@@ -46,7 +46,11 @@ fun ME7TunerApp(navState: NavigationState = remember { NavigationState() }) {
                             color = MaterialTheme.colorScheme.primaryContainer
                         )
                         Text(
-                            text = if (navState.ecuPlatform == EcuPlatform.ME7) "ME7Tuner" else "MED17Tuner",
+                            text = when (navState.ecuPlatform) {
+                                EcuPlatform.ME7 -> "ME7Tuner"
+                                EcuPlatform.MED9 -> "MED9Tuner"
+                                EcuPlatform.MED17 -> "MED17Tuner"
+                            },
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -77,7 +81,11 @@ fun ME7TunerApp(navState: NavigationState = remember { NavigationState() }) {
                 Spacer(modifier = Modifier.height(8.dp))
 
                 RailDestination.entries.forEach { destination ->
-                    val enabled = destination == RailDestination.CONFIGURATION || isConfigured
+                    val enabled = when (destination) {
+                        RailDestination.CONFIGURATION -> true
+                        RailDestination.TOOLS -> true
+                        else -> isConfigured
+                    }
 
                     NavigationRailItem(
                         selected = navState.railDestination == destination,
@@ -116,6 +124,9 @@ fun ME7TunerApp(navState: NavigationState = remember { NavigationState() }) {
                         } else {
                             ConfigurationRequiredPlaceholder()
                         }
+                    }
+                    RailDestination.TOOLS -> {
+                        ToolsContent(navState = navState)
                     }
                     RailDestination.OPTIMIZER -> {
                         if (isConfigured) {
