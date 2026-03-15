@@ -7,7 +7,9 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.rememberScrollbarAdapter
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -21,9 +23,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.key.*
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import data.logger.*
+import ui.components.ChartSeries
+import ui.components.LineChart
+import ui.components.niceTickValues
+import ui.theme.GridColor
+import java.text.DecimalFormat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -601,92 +613,295 @@ private fun ChartTab(
         return
     }
 
-    // Show first 4 numeric variables as separate line charts
-    val chartVariables = variables.take(minOf(4, variables.size))
     val chartColors = listOf(
         Color(0xFFFFB300),  // Amber
         Color(0xFF42A5F5),  // Blue
         Color(0xFF66BB6A),  // Green
         Color(0xFFEF5350),  // Red
+        Color(0xFFAB47BC),  // Purple
+        Color(0xFF26C6DA),  // Cyan
+        Color(0xFFFF7043),  // Deep Orange
+        Color(0xFF78909C),  // Blue Grey
     )
 
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
-        for ((idx, variable) in chartVariables.withIndex()) {
-            if (idx > 0) Spacer(modifier = Modifier.height(8.dp))
+    var combinedView by remember { mutableStateOf(true) }
 
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Toggle bar
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
             Text(
-                "${variable.alias.ifEmpty { variable.name }} (${variable.unit})",
-                style = MaterialTheme.typography.labelSmall,
-                color = chartColors[idx]
+                if (combinedView) "Combined View" else "Individual Charts",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.onSurface
             )
 
-            val values = recentSamples.mapNotNull { sample ->
-                sample.values.getOrNull(variable.index)
+            SingleChoiceSegmentedButtonRow {
+                SegmentedButton(
+                    shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                    onClick = { combinedView = true },
+                    selected = combinedView
+                ) { Text("Combined", style = MaterialTheme.typography.labelSmall) }
+                SegmentedButton(
+                    shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                    onClick = { combinedView = false },
+                    selected = !combinedView
+                ) { Text("Individual", style = MaterialTheme.typography.labelSmall) }
             }
+        }
 
-            if (values.isNotEmpty()) {
-                val minVal = values.min()
-                val maxVal = values.max()
-                val range = if (maxVal > minVal) maxVal - minVal else 1.0
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
 
-                Canvas(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f)
-                ) {
-                    val w = size.width
-                    val h = size.height
-                    val color = chartColors[idx]
+        if (combinedView) {
+            CombinedChart(variables, recentSamples, chartColors)
+        } else {
+            IndividualCharts(variables, recentSamples, chartColors)
+        }
+    }
+}
 
-                    if (values.size < 2) return@Canvas
+@Composable
+private fun IndividualCharts(
+    variables: List<LogVariable>,
+    recentSamples: List<LogSample>,
+    chartColors: List<Color>
+) {
+    val scrollState = rememberScrollState()
 
-                    val path = Path()
-                    val stepX = w / (values.size - 1).toFloat()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState)
+            .padding(16.dp)
+    ) {
+        for ((idx, variable) in variables.withIndex()) {
+            val color = chartColors[idx % chartColors.size]
+            val timestamps = recentSamples.map { it.timestamp }
+            val values = recentSamples.mapNotNull { it.values.getOrNull(variable.index) }
 
-                    for (i in values.indices) {
-                        val x = i * stepX
-                        val y = h - ((values[i] - minVal) / range * h).toFloat()
-                        if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+            if (values.isEmpty() || timestamps.size != values.size) continue
+
+            val points = timestamps.zip(values).map { (t, v) -> t to v }
+            val series = listOf(
+                ChartSeries(
+                    name = variable.alias.ifEmpty { variable.name },
+                    points = points,
+                    color = color,
+                    strokeWidth = 1.5f
+                )
+            )
+
+            LineChart(
+                series = series,
+                title = "${variable.alias.ifEmpty { variable.name }} (${variable.unit})",
+                xAxisLabel = "Time (s)",
+                yAxisLabel = variable.unit,
+                modifier = Modifier.fillMaxWidth().height(220.dp)
+            )
+
+            Spacer(modifier = Modifier.height(16.dp))
+        }
+    }
+}
+
+@Composable
+private fun CombinedChart(
+    variables: List<LogVariable>,
+    recentSamples: List<LogSample>,
+    chartColors: List<Color>
+) {
+    if (variables.isEmpty()) return
+
+    // Group variables by unit for dual-axis assignment
+    val unitGroups = variables.groupBy { it.unit.lowercase().trim() }
+    val sortedUnits = unitGroups.entries.sortedByDescending { it.value.size }
+    val leftUnit = sortedUnits.firstOrNull()?.key ?: ""
+    val rightUnit = if (sortedUnits.size > 1) sortedUnits[1].key else null
+
+    // Assign each variable to left or right axis
+    data class AxisVar(val variable: LogVariable, val color: Color, val isLeft: Boolean)
+    val axisVars = variables.mapIndexed { idx, v ->
+        val unit = v.unit.lowercase().trim()
+        AxisVar(v, chartColors[idx % chartColors.size], isLeft = unit == leftUnit || rightUnit == null)
+    }
+
+    val density = LocalDensity.current
+    val textMeasurer = rememberTextMeasurer()
+
+    Column(modifier = Modifier.fillMaxSize().padding(8.dp)) {
+        // Legend
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            for (av in axisVars) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Canvas(modifier = Modifier.size(10.dp)) {
+                        drawCircle(av.color, radius = 5f)
                     }
-
-                    drawPath(path, color, style = Stroke(width = 1.5f))
-
-                    // Min/Max labels
-                    drawLine(
-                        color = color.copy(alpha = 0.2f),
-                        start = Offset(0f, 0f),
-                        end = Offset(w, 0f),
-                        strokeWidth = 0.5f
-                    )
-                    drawLine(
-                        color = color.copy(alpha = 0.2f),
-                        start = Offset(0f, h),
-                        end = Offset(w, h),
-                        strokeWidth = 0.5f
-                    )
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
+                    Spacer(Modifier.width(4.dp))
                     Text(
-                        formatLiveValue(values.min()),
+                        "${av.variable.alias.ifEmpty { av.variable.name }} (${av.variable.unit})" +
+                                if (!av.isLeft && rightUnit != null) " ▸" else "",
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                    Text(
-                        "latest: ${formatLiveValue(values.last())}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = chartColors[idx]
-                    )
-                    Text(
-                        formatLiveValue(values.max()),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        color = av.color,
+                        maxLines = 1
                     )
                 }
             }
+        }
+
+        // Axis labels
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                "◀ ${unitGroups[leftUnit]?.firstOrNull()?.unit ?: leftUnit}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            if (rightUnit != null) {
+                Text(
+                    "${unitGroups[rightUnit]?.firstOrNull()?.unit ?: rightUnit} ▶",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        // Precompute per-variable data and ranges
+        data class VarData(val av: AxisVar, val values: List<Double>, val min: Double, val max: Double)
+        val timestamps = recentSamples.map { it.timestamp }
+        val varDataList = axisVars.mapNotNull { av ->
+            val vals = recentSamples.map { it.values.getOrElse(av.variable.index) { 0.0 } }
+            if (vals.isEmpty()) null
+            else {
+                val mn = vals.min()
+                val mx = vals.max()
+                VarData(av, vals, mn, mx)
+            }
+        }
+
+        // Compute axis ranges (union of all signals on each axis)
+        val leftVars = varDataList.filter { it.av.isLeft }
+        val rightVars = varDataList.filter { !it.av.isLeft }
+        val leftMin = leftVars.minOfOrNull { it.min } ?: 0.0
+        val leftMax = leftVars.maxOfOrNull { it.max } ?: 1.0
+        val rightMin = rightVars.minOfOrNull { it.min } ?: 0.0
+        val rightMax = rightVars.maxOfOrNull { it.max } ?: 1.0
+
+        val leftMarginPx = with(density) { 64.dp.toPx() }
+        val rightMarginPx = with(density) { if (rightUnit != null) 64.dp.toPx() else 16.dp.toPx() }
+        val bottomMarginPx = with(density) { 32.dp.toPx() }
+        val topMarginPx = with(density) { 8.dp.toPx() }
+
+        Canvas(modifier = Modifier.fillMaxSize().weight(1f)) {
+            val chartW = size.width - leftMarginPx - rightMarginPx
+            val chartH = size.height - topMarginPx - bottomMarginPx
+            if (chartW <= 0 || chartH <= 0) return@Canvas
+
+            val formatter = DecimalFormat("#.##")
+            val tickLabelStyle = TextStyle(color = Color(0xFFF8F8F2), fontSize = 10.sp)
+
+            // Time axis
+            val tMin = timestamps.firstOrNull() ?: 0.0
+            val tMax = timestamps.lastOrNull() ?: 1.0
+            val tRange = if (tMax > tMin) tMax - tMin else 1.0
+
+            fun mapX(t: Double) = (leftMarginPx + (t - tMin) / tRange * chartW).toFloat()
+
+            // Left Y axis mapping
+            val lRange = if (leftMax > leftMin) leftMax - leftMin else 1.0
+            val lPad = lRange * 0.05
+            val lMin = leftMin - lPad
+            val lMax = leftMax + lPad
+            val lRangeP = lMax - lMin
+            fun mapYLeft(y: Double) = (topMarginPx + chartH - (y - lMin) / lRangeP * chartH).toFloat()
+
+            // Right Y axis mapping
+            val rRange = if (rightMax > rightMin) rightMax - rightMin else 1.0
+            val rPad = rRange * 0.05
+            val rMin = rightMin - rPad
+            val rMax = rightMax + rPad
+            val rRangeP = rMax - rMin
+            fun mapYRight(y: Double) = (topMarginPx + chartH - (y - rMin) / rRangeP * chartH).toFloat()
+
+            // Draw grid and border
+            drawRect(
+                GridColor,
+                topLeft = Offset(leftMarginPx, topMarginPx),
+                size = androidx.compose.ui.geometry.Size(chartW, chartH),
+                style = Stroke(1f)
+            )
+
+            // X axis ticks
+            val xTicks = niceTickValues(tMin, tMax, 8)
+            for (tick in xTicks) {
+                val x = mapX(tick)
+                drawLine(GridColor, Offset(x, topMarginPx), Offset(x, topMarginPx + chartH), strokeWidth = 0.5f)
+                val label = textMeasurer.measure(formatter.format(tick), tickLabelStyle)
+                drawText(label, topLeft = Offset(x - label.size.width / 2f, topMarginPx + chartH + 4f))
+            }
+
+            // Left Y axis ticks
+            val leftTicks = niceTickValues(lMin, lMax, 6)
+            for (tick in leftTicks) {
+                val y = mapYLeft(tick)
+                drawLine(GridColor, Offset(leftMarginPx, y), Offset(leftMarginPx + chartW, y), strokeWidth = 0.5f)
+                val label = textMeasurer.measure(formatter.format(tick), tickLabelStyle)
+                drawText(label, topLeft = Offset(leftMarginPx - label.size.width - 4f, y - label.size.height / 2f))
+            }
+
+            // Right Y axis ticks
+            if (rightUnit != null) {
+                val rightTicks = niceTickValues(rMin, rMax, 6)
+                for (tick in rightTicks) {
+                    val y = mapYRight(tick)
+                    val label = textMeasurer.measure(formatter.format(tick), tickLabelStyle)
+                    drawText(label, topLeft = Offset(leftMarginPx + chartW + 6f, y - label.size.height / 2f))
+                }
+            }
+
+            // X axis label
+            val xLabel = textMeasurer.measure("Time (s)", tickLabelStyle)
+            drawText(xLabel, topLeft = Offset(
+                leftMarginPx + chartW / 2f - xLabel.size.width / 2f,
+                topMarginPx + chartH + 16f
+            ))
+
+            // Draw signals
+            for (vd in varDataList) {
+                if (vd.values.size < 2 || timestamps.size < 2) continue
+                val path = Path()
+                val mapY: (Double) -> Float = if (vd.av.isLeft) ::mapYLeft else ::mapYRight
+
+                for (i in vd.values.indices) {
+                    if (i >= timestamps.size) break
+                    val x = mapX(timestamps[i])
+                    val y = mapY(vd.values[i])
+                    if (i == 0) path.moveTo(x, y) else path.lineTo(x, y)
+                }
+
+                drawPath(path, vd.av.color, style = Stroke(width = 1.5f))
+            }
+        }
+
+        // Time axis label at bottom
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+            horizontalArrangement = Arrangement.Center
+        ) {
+            Text(
+                "Time: ${formatLiveValue(timestamps.firstOrNull() ?: 0.0)}s — ${formatLiveValue(timestamps.lastOrNull() ?: 0.0)}s  (${recentSamples.size} samples)",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
         }
     }
 }
