@@ -16,7 +16,7 @@ class NavigationState {
     var calibrationTab by mutableStateOf(CalibrationTab.FUELING)
         private set
 
-    var toolsTab by mutableStateOf(ToolsTab.A2L_GENERATOR)
+    var toolsTab by mutableStateOf(ToolsTab.LOGGER)
         private set
 
     // Sub-tab state (used by screenshot harness; screens read for initial values)

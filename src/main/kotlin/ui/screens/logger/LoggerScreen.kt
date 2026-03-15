@@ -28,9 +28,9 @@ import java.awt.Frame
 import java.io.File
 
 @Composable
-fun LoggerScreen() {
+fun LoggerScreen(loggerManager: LoggerManager? = null) {
     val scope = rememberCoroutineScope()
-    val logger = remember { Me7LoggerProcess() }
+    val logger = remember { loggerManager ?: Me7LoggerProcess() }
 
     // Collect logger state
     val loggerStatus by logger.status.collectAsState()
@@ -172,7 +172,7 @@ fun LoggerScreen() {
                     onLoadLogFile = { file ->
                         scope.launch {
                             val session = withContext(Dispatchers.IO) {
-                                logger.parseLogFile(file)
+                                Me7LoggerProcess().parseLogFile(file)
                             }
                             recentSamples.clear()
                             recentSamples.addAll(session.samples.takeLast(maxRecentSamples))
