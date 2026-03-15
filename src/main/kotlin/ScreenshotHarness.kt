@@ -45,6 +45,7 @@ import ui.navigation.CalibrationTab
 import ui.navigation.ME7TunerApp
 import ui.navigation.NavigationState
 import ui.navigation.RailDestination
+import ui.navigation.ToolsTab
 import ui.theme.ME7TunerTheme
 import java.io.File
 import java.util.Locale
@@ -359,6 +360,25 @@ fun main() {
     }
 
     println("All ME7 screenshots generated.\n")
+
+    // --- Tools Screenshots (platform-independent) ---
+    println("\n--- Tools Screenshots ---")
+
+    // A2L → ECU Generator (empty state — shows UI layout)
+    captureScreen("tools/a2l_generator.png") {
+        val navState = NavigationState()
+        navState.navigateToTools(ToolsTab.A2L_GENERATOR)
+        ME7TunerApp(navState)
+    }
+
+    // Data Logger — Connection tab (empty state)
+    captureScreen("tools/logger_connection.png") {
+        val navState = NavigationState()
+        navState.navigateToTools(ToolsTab.LOGGER)
+        ME7TunerApp(navState)
+    }
+
+    println("All Tools screenshots generated.\n")
 
     // --- MED17 Screenshots ---
     println("\n--- MED17 Screenshots ---")

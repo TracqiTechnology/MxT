@@ -121,6 +121,10 @@ Start with Configuration, calibrate if your hardware has changed, then optimize 
 **Optimization**
 5. [Optimizer](#stage-3-optimization)
 
+**Tools**
+6. [Data Logger](#data-logger)
+7. [A2L → ECU Generator](#a2l--ecu-generator)
+
 ---
 
 # Stage 1: Configuration
@@ -429,6 +433,98 @@ If the maps are calibrated correctly, `pssol` should match `pvdks_w` and `rlsol`
 For detailed configuration (map definitions, log headers), step-by-step usage, result interpretation, and platform-specific signal names, see the calibration guides:
 - **[ME7 Optimizer](documentation/me7-calibration-guide.md#optimizer)** — ME7Logger signal names, KFPBRK corrections, MAF voltage saturation
 - **[MED17 Optimizer](documentation/med17-calibration-guide.md#optimizer-med17)** — ScorpionEFI signal names, adaptive VE model validation
+
+---
+
+# Stage 4: Tools
+
+ME7Tuner includes standalone utilities that don't require a BIN or XDF file. Access them from the **Tools** rail on the left navigation.
+
+## Data Logger
+
+A built-in data logger that replaces external tools like VisualME7Logger. Connect to your ECU, log data in real time, and view results — all without leaving ME7Tuner.
+
+<img src="/documentation/images/tools/logger_connection.png" alt="Data Logger — Connection Tab" width="800">
+
+### Setup
+
+1. Navigate to **Tools → Data Logger**
+2. In the **Connection** tab, configure:
+   - **ME7Logger Path** — path to `ME7Logger.exe` (the same binary used by VisualME7Logger)
+   - **COM Port** — serial port connected to your ECU (e.g., `COM3`)
+   - **ECU File** — `.ecu` characteristics file for your ECU (generate one with the A2L → ECU Generator below, or use a community `.ecu` file)
+   - **CFG File** — `.cfg` log configuration specifying which variables to log
+3. Click **Connect** to validate the configuration, then **Start** to begin logging
+
+### Live Data
+
+The **Live Data** tab displays a real-time table of all logged variables with their current values, aliases, and units. Values update on every sample from the ECU.
+
+### Charts
+
+The **Chart** tab provides real-time line charts with two view modes, controlled by a toggle at the top:
+
+- **Combined** (default) — All signals overlaid on a single chart. Signals are grouped by unit and assigned to left or right Y axes, so variables with different scales (e.g., RPM vs. %) are readable simultaneously. A color-coded legend identifies each signal.
+- **Individual** — Each signal gets its own dedicated chart with proper X/Y axes, grid lines, and tick labels. Scrollable when logging many variables.
+
+Both views show time on the X axis (seconds) with automatically scaled tick intervals.
+
+### Loading Existing Logs
+
+You don't need a live ECU connection to use the charts. Click **Load Log File** in the Connection tab to open any ME7Logger CSV file. The data populates the Live Data and Chart tabs for offline analysis.
+
+### Exporting
+
+Click **Export CSV** to save the current session in ME7Logger-compatible CSV format. The exported file can be opened in ME7Tuner, VisualME7Logger, or any spreadsheet application.
+
+### Dev Mode
+
+Press **Ctrl+Shift+D** on the Data Logger screen to activate demo mode. This replays bundled log fixtures through the charting system at ~20 samples/second — useful for exploring the UI without an ECU connection. Press again to stop; the session auto-saves to your Desktop.
+
+---
+
+## A2L → ECU Generator
+
+Convert DAMOS A2L files into ME7Logger-compatible `.ecu` and `.cfg` files. If you have a DAMOS export for your ECU, this tool generates the logging configuration files automatically — no manual editing required.
+
+<img src="/documentation/images/tools/a2l_generator.png" alt="A2L → ECU Generator" width="800">
+
+### Usage
+
+1. Navigate to **Tools → A2L → ECU Generator**
+2. Click **Load A2L** and select your DAMOS `.a2l` file
+3. The parser extracts all loggable signals (typically 9,000–14,000+ entries) and displays them in a searchable table
+4. Review and edit the metadata fields:
+   - **Part Number** — ECU part number (e.g., `06F 906 056 S`)
+   - **SW Number** — Software version identifier
+   - **Engine ID** — Engine description (e.g., `2.0L TFSI`)
+5. Click **Save .ecu + .cfg** to generate both files
+
+### What Gets Generated
+
+**`.ecu` file** — Complete ECU characteristics file containing every loggable variable with:
+- RAM address, data size, bitmask
+- Scaling formula (factor + offset, or inverse scaling)
+- Human-readable alias (44 well-known signals auto-aliased)
+- Unit and description from the A2L source
+
+**`.cfg` file** — Ready-to-use log configuration with:
+- Reference to the generated `.ecu` file
+- **Basic Variables** preset — 18 essential tuning signals (engine speed, load, MAF, boost, fuel trims, ignition, temperatures)
+- **LDRPID Variables** preset — 13 boost control signals for PID tuning
+
+### Signal Browser
+
+The table shows all parsed entries with columns for Name, Alias, Address, Size, Unit, Factor, and Description. Use the search field to filter by any column — useful for finding specific signals in ECUs with thousands of variables.
+
+### Conversion Math
+
+The generator handles two conversion types from A2L rational function coefficients:
+
+- **Linear** (most signals): `Value = Factor × raw - Offset`
+- **Inverse** (~25 signals): `Value = Factor / (raw - Offset)` — used for temperature sensors and similar non-linear conversions
+
+For technical details on the A2L parsing pipeline and conversion formulas, see [A2L → ECU Pipeline](technical/a2l-ecu-pipeline.md).
 
 ---
 
