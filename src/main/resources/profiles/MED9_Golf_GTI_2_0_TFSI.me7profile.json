@@ -1,0 +1,120 @@
+{
+    "name": "VW Golf V GTI 2.0 TFSI — MED9.1",
+    "description": "EA113 2.0 TFSI (AXX/BWA). MED9.1, K03 turbo. Stock DI injectors (Bosch HDEV). 2 MB BIN.",
+    "ecuPlatform": "MED9",
+    "ecuPartNumbers": ["1K0907115", "0261S02469"],
+    "mapDefinitions": {
+        "KRKATE": {
+            "tableName": "Conversion of Relative Fuel Mass into Effective Injection time (KRKATE)",
+            "tableDescription": "Umrechnung relative Kraftstoffmasse rk in effektive Einspritzzeit te",
+            "unit": "ms/%"
+        },
+        "KFMIOP": {
+            "tableName": "Map Optimal Engine Torque (KFMIOP)",
+            "tableDescription": "Kennfeld optimales Motormoment",
+            "unit": "%"
+        },
+        "KFMIRL": {
+            "tableName": "Specified Load (KFMIRL)",
+            "tableDescription": "Kennfeld für Berechnung Sollfüllung",
+            "unit": "%"
+        },
+        "KFZWOP": {
+            "tableName": "KFZWOP",
+            "tableDescription": "optimaler Zündwinkel",
+            "unit": "grad KW"
+        },
+        "KFZW": {
+            "tableName": "Ignition Timing 1",
+            "tableDescription": "Zündwinkelkennfeld (KFZW_0_A)",
+            "unit": "grad KW"
+        },
+        "KFVPDKSD": {
+            "tableName": "Max Permissable Pressure Ratio -  KFVPDKLD",
+            "tableDescription": "Max. zulässiges Druckverhältnis DK für ldra Diagnose",
+            "unit": "-"
+        },
+        "WDKUGDN": {
+            "tableName": "WDKUGDN",
+            "tableDescription": "KL Drosselklappenwinkel, ab der keine Drosselung mehr erfolgt",
+            "unit": "%"
+        },
+        "KFLDRL": {
+            "tableName": "Boost Duty to Linearize Charge Pressure",
+            "tableDescription": "KF zur Linearisierung Ladedruck=f(TV)",
+            "unit": "%"
+        },
+        "KFLDIMX": {
+            "tableName": "KFLDIMX",
+            "tableDescription": "Kennfeld LDR I-Reglerbegrenzung",
+            "unit": "%"
+        },
+        "KFLDHBN": {
+            "tableName": "Max Pressure Ratio (KFLDHBN)",
+            "tableDescription": "LDR-Höhenbegrenzung (max. Verdichterdruckverhältnis)",
+            "unit": "-"
+        }
+    },
+    "primaryFueling": {
+        "airDensity": 1.2929,
+        "displacement": 0.496,
+        "numCylinders": 4,
+        "stoichiometricAfr": 14.7,
+        "gasolineGramsPerCcm": 0.7,
+        "fuelInjectorSize": 200.0
+    },
+    "plsol": {
+        "barometricPressure": 1013.0,
+        "intakeAirTemperature": 20.0,
+        "kfurl": 0.1037,
+        "displacement": 1.984,
+        "rpm": 6500
+    },
+    "kfmiop": {
+        "maxMapPressure": 2300.0,
+        "maxBoostPressure": 1800.0
+    },
+    "kfvpdksd": {
+        "maxWastegateCrackingPressure": 200.0
+    },
+    "wdkugdn": {
+        "displacement": 1.984
+    },
+    "closedLoopFueling": {
+        "minThrottleAngle": 0.0,
+        "minRpm": 0.0,
+        "maxDerivative": 50.0
+    },
+    "openLoopFueling": {
+        "minThrottleAngle": 80.0,
+        "minRpm": 2000.0,
+        "minMe7Points": 75,
+        "minAfrPoints": 150,
+        "maxAfr": 16.0,
+        "fuelInjectorSize": 200.0,
+        "gasolineGramsPerCcm": 0.7,
+        "numFuelInjectors": 4.0
+    },
+    "logHeaders": {
+        "START_TIME_HEADER": "start_time",
+        "TIME_STAMP_COLUMN_HEADER": "TIME",
+        "RPM_COLUMN_HEADER": "nmot_w",
+        "STFT_COLUMN_HEADER": "fr_w",
+        "LTFT_COLUMN_HEADER": "fra_w",
+        "MAF_VOLTAGE_HEADER": "uhfm_w",
+        "MAF_GRAMS_PER_SECOND_HEADER": "mshfm_w",
+        "THROTTLE_PLATE_ANGLE_HEADER": "wdkba",
+        "LAMBDA_CONTROL_ACTIVE_HEADER": "B_lr",
+        "REQUESTED_LAMBDA_HEADER": "lamsbg_w",
+        "FUEL_INJECTOR_ON_TIME_HEADER": "ti_w",
+        "ENGINE_LOAD_HEADER": "rl_w",
+        "WASTEGATE_DUTY_CYCLE_HEADER": "ldtvm",
+        "BAROMETRIC_PRESSURE_HEADER": "pus_w",
+        "ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER": "pvdks_w",
+        "SELECTED_GEAR_HEADER": "gangi",
+        "WIDE_BAND_O2_HEADER": "lamsoni_w",
+        "REQUESTED_PRESSURE_HEADER": "pssol_w",
+        "REQUESTED_LOAD_HEADER": "rlsol_w",
+        "ACTUAL_LOAD_HEADER": "rl"
+    }
+}

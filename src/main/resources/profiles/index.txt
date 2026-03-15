@@ -5,4 +5,5 @@ ME7_27T_A4_A6.me7profile.json
 ME7_18T_A4_150hp.me7profile.json
 ME7_18T_TT_225hp.me7profile.json
 ME7_18T_Golf.me7profile.json
+MED9_Golf_GTI_2_0_TFSI.me7profile.json
 MED17_162_RS3_TTRS_2_5T.me7profile.json

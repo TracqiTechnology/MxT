@@ -63,12 +63,12 @@ import javax.swing.SwingUtilities
 private data class MapDefinitionEntry(
     val title: String,
     val preference: MapPreference,
-    val platforms: Set<EcuPlatform> = setOf(EcuPlatform.ME7, EcuPlatform.MED17)
+    val platforms: Set<EcuPlatform> = EcuPlatform.entries.toSet()
 )
 
 private val allMapDefinitions = listOf(
-    // ME7-only
-    MapDefinitionEntry("KRKTE", KrktePreferences, platforms = setOf(EcuPlatform.ME7)),
+    // ME7 + MED9 — single injector constant (MED9 uses KRKATE, resolved via profile)
+    MapDefinitionEntry("KRKTE", KrktePreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
     MapDefinitionEntry("MLHFM", MlhfmPreferences, platforms = setOf(EcuPlatform.ME7)),
     // MED17-only (dual injection)
     MapDefinitionEntry("KRKTE (Port)", KrktePfiPreferences, platforms = setOf(EcuPlatform.MED17)),
@@ -79,20 +79,20 @@ private val allMapDefinitions = listOf(
     MapDefinitionEntry("KFMIRL", KfmirlPreferences),
     MapDefinitionEntry("KFZWOP", KfzwopPreferences),
     MapDefinitionEntry("KFZW", KfzwPreferences),
-    // ME7-only — boost transition & throttle body (not in MED17 Funktionsrahmen)
-    MapDefinitionEntry("KFVPDKSD", KfvpdksdPreferences, platforms = setOf(EcuPlatform.ME7)),
-    MapDefinitionEntry("WDKUGDN", WdkugdnPreferences, platforms = setOf(EcuPlatform.ME7)),
-    MapDefinitionEntry("KFWDKMSN", KfwdkmsnPreferences, platforms = setOf(EcuPlatform.ME7)),
+    // ME7 + MED9 — boost transition & throttle body (not in MED17 Funktionsrahmen)
+    MapDefinitionEntry("KFVPDKSD", KfvpdksdPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
+    MapDefinitionEntry("WDKUGDN", WdkugdnPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
+    MapDefinitionEntry("KFWDKMSN", KfwdkmsnPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
     // Shared — boost PID linearization
     MapDefinitionEntry("KFLDRL", KfldrlPreferences),
     MapDefinitionEntry("KFLDIMX", KfldimxPreferences),
-    // ME7-only — VE model maps (MED17 uses adaptive fupsrl_w / pbrint_w)
-    MapDefinitionEntry("KFPBRK", KfpbrkPreferences, platforms = setOf(EcuPlatform.ME7)),
-    MapDefinitionEntry("KFPBRKNW", KfpbrknwPreferences, platforms = setOf(EcuPlatform.ME7)),
-    MapDefinitionEntry("KFPRG", KfprgPreferences, platforms = setOf(EcuPlatform.ME7)),
+    // ME7 + MED9 — VE model maps (MED17 uses adaptive fupsrl_w / pbrint_w)
+    MapDefinitionEntry("KFPBRK", KfpbrkPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
+    MapDefinitionEntry("KFPBRKNW", KfpbrknwPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
+    MapDefinitionEntry("KFPRG", KfprgPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
     // v4: Environmental correction maps
     MapDefinitionEntry("KFLDIOPU", KfldioPuPreferences),
-    MapDefinitionEntry("KFFWTBR", KffwtbrPreferences, platforms = setOf(EcuPlatform.ME7)),
+    MapDefinitionEntry("KFFWTBR", KffwtbrPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
     // v4: PID gain maps
     MapDefinitionEntry("KFLDRQ0", Kfldrq0Preferences),
     MapDefinitionEntry("KFLDRQ1", Kfldrq1Preferences),

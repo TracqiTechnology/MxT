@@ -56,6 +56,7 @@ object ProfileManager {
 
     private val mapPreferencesByKey: Map<String, MapPreference> = mapOf(
         "KRKTE" to KrktePreferences,
+        "KRKATE" to KrktePreferences, // MED9 equivalent of KRKTE
         "MLHFM" to MlhfmPreferences,
         "KFMIOP" to KfmiopPreferences,
         "KFMIRL" to KfmirlPreferences,

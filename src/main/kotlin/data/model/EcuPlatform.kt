@@ -9,6 +9,7 @@ package data.model
  */
 enum class EcuPlatform(val displayName: String, val shortName: String) {
     ME7("ME7 (Bosch ME7.x)", "ME7"),
+    MED9("MED9 (Bosch MED9.x)", "MED9"),
     MED17("MED17 (Bosch MED17.x)", "MED17");
 }
 
