@@ -10,7 +10,7 @@
             "unit": "ms/%"
         },
         "KFMIOP": {
-            "tableName": "Map Optimal Engine Torque (KFMIOP)",
+            "tableName": "Optimal Engine Torque (KFMIOP)",
             "tableDescription": "Kennfeld optimales Motormoment",
             "unit": "%"
         },
@@ -20,40 +20,59 @@
             "unit": "%"
         },
         "KFZWOP": {
-            "tableName": "KFZWOP",
+            "tableName": "Optimal Ignition Angle (KFZWOP)",
             "tableDescription": "optimaler Zündwinkel",
             "unit": "grad KW"
         },
         "KFZW": {
-            "tableName": "Ignition Timing 1",
-            "tableDescription": "Zündwinkelkennfeld (KFZW_0_A)",
+            "tableName": "Ignition Timing KFZW_0_A",
+            "tableDescription": "Zündwinkelkennfeld",
             "unit": "grad KW"
         },
         "KFVPDKSD": {
-            "tableName": "Max Permissable Pressure Ratio -  KFVPDKLD",
+            "tableName": "Max Permissible Pressure Ratio (KFVPDKLD)",
             "tableDescription": "Max. zulässiges Druckverhältnis DK für ldra Diagnose",
             "unit": "-"
         },
         "WDKUGDN": {
-            "tableName": "WDKUGDN",
+            "tableName": "Throttle Angle No-Restriction (WDKUGDN)",
             "tableDescription": "KL Drosselklappenwinkel, ab der keine Drosselung mehr erfolgt",
             "unit": "%"
         },
         "KFLDRL": {
-            "tableName": "Boost Duty to Linearize Charge Pressure",
+            "tableName": "Boost Linearization (KFLDRL)",
             "tableDescription": "KF zur Linearisierung Ladedruck=f(TV)",
             "unit": "%"
         },
         "KFLDIMX": {
-            "tableName": "KFLDIMX",
+            "tableName": "Boost I-Regulator Limit (KFLDIMX)",
             "tableDescription": "Kennfeld LDR I-Reglerbegrenzung",
             "unit": "%"
         },
         "KFLDHBN": {
-            "tableName": "Max Pressure Ratio (KFLDHBN)",
+            "tableName": "Max Compressor Pressure Ratio (KFLDHBN)",
             "tableDescription": "LDR-Höhenbegrenzung (max. Verdichterdruckverhältnis)",
             "unit": "-"
         }
+    },
+    "multiMapDefinitions": {
+        "KFZW_SWITCH": [
+            {
+                "tableName": "Ignition Timing KFZW_0_A",
+                "tableDescription": "Zündwinkelkennfeld Variante 0",
+                "unit": "grad KW"
+            },
+            {
+                "tableName": "Ignition Timing KFZW_1_A",
+                "tableDescription": "Zündwinkelkennfeld Variante 1",
+                "unit": "grad KW"
+            },
+            {
+                "tableName": "Ignition Timing KFZW_2_A",
+                "tableDescription": "Zündwinkelkennfeld Variante 2",
+                "unit": "grad KW"
+            }
+        ]
     },
     "primaryFueling": {
         "airDensity": 1.2929,
