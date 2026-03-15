@@ -2,6 +2,7 @@ package ui.screens.logger
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.VerticalScrollbar
+import androidx.compose.foundation.focusable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -13,10 +14,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.input.key.*
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import data.logger.*
@@ -26,11 +30,27 @@ import kotlinx.coroutines.withContext
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 @Composable
 fun LoggerScreen(loggerManager: LoggerManager? = null) {
     val scope = rememberCoroutineScope()
-    val logger = remember { loggerManager ?: Me7LoggerProcess() }
+    val defaultLogger = remember { loggerManager ?: Me7LoggerProcess() }
+
+    // Dev mode state — Ctrl+Shift+D toggles mock replay
+    var devMode by remember { mutableStateOf(false) }
+    var devLogger by remember { mutableStateOf<MockLoggerProcess?>(null) }
+    val logger: LoggerManager = devLogger ?: defaultLogger
+
+    // Focus for keyboard events
+    val focusRequester = remember { FocusRequester() }
+
+    // Bundled log fixtures for dev mode (cycled through)
+    val devLogFiles = remember {
+        listOf("open_loop_log.csv", "closed_loop_log.csv", "ldrpid_log.csv")
+    }
+    var devLogIndex by remember { mutableStateOf(0) }
 
     // Collect logger state
     val loggerStatus by logger.status.collectAsState()
@@ -66,7 +86,62 @@ fun LoggerScreen(loggerManager: LoggerManager? = null) {
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
+    // Request focus on first composition for keyboard events
+    LaunchedEffect(Unit) { focusRequester.requestFocus() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .focusRequester(focusRequester)
+            .focusable()
+            .onPreviewKeyEvent { event ->
+                if (event.type == KeyEventType.KeyDown &&
+                    event.isCtrlPressed && event.isShiftPressed &&
+                    event.key == Key.D
+                ) {
+                    scope.launch {
+                        if (!devMode || loggerStatus != LoggerStatus.LOGGING) {
+                            // Start dev mode
+                            val mock = MockLoggerProcess(replayDelayMs = 50)
+                            val logFile = File("example/med9/logs/${devLogFiles[devLogIndex % devLogFiles.size]}")
+                            devLogIndex++
+
+                            if (logFile.exists()) {
+                                devLogger = mock
+                                devMode = true
+                                recentSamples.clear()
+                                latestSample = null
+                                mock.connectWithFile(logFile)
+                                mock.startLogging()
+                                selectedTab = 2  // Switch to Chart tab
+                            }
+                        } else {
+                            // Stop dev mode — save log
+                            val mock = devLogger ?: return@launch
+                            mock.stopLogging()
+
+                            val session = mock.session.value
+                            if (session != null && session.sampleCount > 0) {
+                                withContext(Dispatchers.IO) {
+                                    val ts = LocalDateTime.now().format(
+                                        DateTimeFormatter.ofPattern("yyyyMMdd_HHmmss")
+                                    )
+                                    val desktop = File(System.getProperty("user.home"), "Desktop")
+                                    val outDir = if (desktop.exists()) desktop else File(".")
+                                    val outFile = File(outDir, "me7tuner_demo_$ts.csv")
+                                    CsvExporter.export(session, outFile)
+                                }
+                            }
+
+                            mock.disconnect()
+                            devLogger = null
+                            devMode = false
+                        }
+                    }
+                    true
+                } else false
+            }
+    ) {
         // Tab row
         TabRow(selectedTabIndex = selectedTab) {
             tabTitles.forEachIndexed { index, title ->
@@ -122,6 +197,21 @@ fun LoggerScreen(loggerManager: LoggerManager? = null) {
                     text = "${loggerStatus.name}${if (statusMessage.isNotEmpty()) " — $statusMessage" else ""}",
                     style = MaterialTheme.typography.bodySmall
                 )
+
+                if (devMode) {
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Surface(
+                        color = MaterialTheme.colorScheme.tertiary,
+                        shape = MaterialTheme.shapes.extraSmall
+                    ) {
+                        Text(
+                            text = " \uD83D\uDD27 DEV MODE — Ctrl+Shift+D to stop ",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onTertiary,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
+                        )
+                    }
+                }
 
                 Spacer(modifier = Modifier.weight(1f))
 
