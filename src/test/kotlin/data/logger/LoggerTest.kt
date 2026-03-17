@@ -214,7 +214,7 @@ class CsvExporterTest {
         CsvExporter.export(session, tmpFile)
 
         val content = tmpFile.readText()
-        assertTrue(content.contains("; ME7Tuner Logger Export"))
+        assertTrue(content.contains("; MxT Logger Export"))
         assertTrue(content.contains("TimeStamp"))
         assertTrue(content.contains("nmot_w"))
         assertTrue(content.contains("\"TIME\""))
@@ -267,7 +267,7 @@ class CsvExporterTest {
         CsvExporter.export(session, tmpFile)
 
         val content = tmpFile.readText()
-        assertTrue(content.contains("; ME7Tuner Logger Export"))
+        assertTrue(content.contains("; MxT Logger Export"))
         // Should not contain data rows
         val lines = content.lines().filter { !it.startsWith(";") && it.isNotBlank() }
         assertTrue(lines.isEmpty())
@@ -313,5 +313,207 @@ class LoggerModelTest {
         assertEquals("", config.comPort)
         assertEquals(56000, config.baudRate)
         assertEquals(20, config.samplesPerSecond)
+        assertEquals(ConnectionType.COM_PORT, config.connectionType)
+        assertTrue(config.ftdiIdentifier is FtdiIdentifier.None)
+        assertFalse(config.overrideSamplesPerSecond)
+        assertFalse(config.overrideBaudRate)
+        assertFalse(config.syncTimestamp)
+        assertFalse(config.absoluteTimestamps)
+        assertFalse(config.millisecondTimestamps)
+        assertEquals("", config.outputLogFile)
+        assertFalse(config.realTimeWrite)
+    }
+}
+
+class BuildCommandTest {
+
+    private val logger = Me7LoggerProcess()
+
+    @Test
+    fun `default COM port produces expected command`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            comPort = "COM3",
+            cfgFile = "/path/config.cfg"
+        )
+        val cmd = logger.buildCommand(cfg)
+        assertEquals(listOf("/path/ME7Logger.exe", "-p", "COM3", "-R", "/path/config.cfg"), cmd)
+    }
+
+    @Test
+    fun `empty COM port omits -p flag`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            comPort = "",
+            cfgFile = "/path/config.cfg"
+        )
+        val cmd = logger.buildCommand(cfg)
+        assertFalse(cmd.contains("-p"))
+        assertEquals(listOf("/path/ME7Logger.exe", "-R", "/path/config.cfg"), cmd)
+    }
+
+    @Test
+    fun `FTDI bare produces -f flag`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            connectionType = ConnectionType.FTDI,
+            cfgFile = "/path/config.cfg"
+        )
+        val cmd = logger.buildCommand(cfg)
+        assertTrue(cmd.contains("-f"))
+        assertFalse(cmd.contains("-p"))
+        assertEquals(listOf("/path/ME7Logger.exe", "-f", "-R", "/path/config.cfg"), cmd)
+    }
+
+    @Test
+    fun `FTDI with serial number`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            connectionType = ConnectionType.FTDI,
+            ftdiIdentifier = FtdiIdentifier.Serial("XYZ123"),
+            cfgFile = "/path/config.cfg"
+        )
+        val cmd = logger.buildCommand(cfg)
+        assertTrue(cmd.contains("-f"))
+        assertTrue(cmd.contains("-SXYZ123"))
+    }
+
+    @Test
+    fun `FTDI with description`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            connectionType = ConnectionType.FTDI,
+            ftdiIdentifier = FtdiIdentifier.Description("MyDevice"),
+            cfgFile = "/path/config.cfg"
+        )
+        val cmd = logger.buildCommand(cfg)
+        assertTrue(cmd.contains("-f"))
+        assertTrue(cmd.contains("-DMyDevice"))
+    }
+
+    @Test
+    fun `FTDI with location`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            connectionType = ConnectionType.FTDI,
+            ftdiIdentifier = FtdiIdentifier.Location("1A"),
+            cfgFile = "/path/config.cfg"
+        )
+        val cmd = logger.buildCommand(cfg)
+        assertTrue(cmd.contains("-f"))
+        assertTrue(cmd.contains("-L1A"))
+    }
+
+    @Test
+    fun `SPS override includes -s flag`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            cfgFile = "/path/config.cfg",
+            overrideSamplesPerSecond = true,
+            samplesPerSecond = 30
+        )
+        val cmd = logger.buildCommand(cfg)
+        val sIdx = cmd.indexOf("-s")
+        assertTrue(sIdx >= 0)
+        assertEquals("30", cmd[sIdx + 1])
+    }
+
+    @Test
+    fun `SPS NOT overridden does not include -s flag`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            cfgFile = "/path/config.cfg",
+            overrideSamplesPerSecond = false,
+            samplesPerSecond = 30
+        )
+        val cmd = logger.buildCommand(cfg)
+        assertFalse(cmd.contains("-s"))
+    }
+
+    @Test
+    fun `baud rate override includes -b flag`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            cfgFile = "/path/config.cfg",
+            overrideBaudRate = true,
+            baudRate = 115200
+        )
+        val cmd = logger.buildCommand(cfg)
+        val bIdx = cmd.indexOf("-b")
+        assertTrue(bIdx >= 0)
+        assertEquals("115200", cmd[bIdx + 1])
+    }
+
+    @Test
+    fun `timestamp flags are all present`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            cfgFile = "/path/config.cfg",
+            syncTimestamp = true,
+            absoluteTimestamps = true,
+            millisecondTimestamps = true
+        )
+        val cmd = logger.buildCommand(cfg)
+        assertTrue(cmd.contains("-t"))
+        assertTrue(cmd.contains("-a"))
+        assertTrue(cmd.contains("-m"))
+    }
+
+    @Test
+    fun `output file includes -o flag`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            cfgFile = "/path/config.cfg",
+            outputLogFile = "/path/out.csv"
+        )
+        val cmd = logger.buildCommand(cfg)
+        val oIdx = cmd.indexOf("-o")
+        assertTrue(oIdx >= 0)
+        assertEquals("/path/out.csv", cmd[oIdx + 1])
+    }
+
+    @Test
+    fun `real-time write includes -r flag`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            cfgFile = "/path/config.cfg",
+            realTimeWrite = true
+        )
+        val cmd = logger.buildCommand(cfg)
+        assertTrue(cmd.contains("-r"))
+    }
+
+    @Test
+    fun `SPS clamped to 1-50 range`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            cfgFile = "/path/config.cfg",
+            overrideSamplesPerSecond = true,
+            samplesPerSecond = 100
+        )
+        val cmd = logger.buildCommand(cfg)
+        val sIdx = cmd.indexOf("-s")
+        assertEquals("50", cmd[sIdx + 1])
+
+        val cfgLow = cfg.copy(samplesPerSecond = 0)
+        val cmdLow = logger.buildCommand(cfgLow)
+        val sIdxLow = cmdLow.indexOf("-s")
+        assertEquals("1", cmdLow[sIdxLow + 1])
+    }
+
+    @Test
+    fun `config file is always last positional arg`() {
+        val cfg = LoggerConfig(
+            me7loggerPath = "/path/ME7Logger.exe",
+            comPort = "COM5",
+            cfgFile = "/path/config.cfg",
+            overrideSamplesPerSecond = true,
+            samplesPerSecond = 25,
+            syncTimestamp = true,
+            outputLogFile = "/path/out.csv",
+            realTimeWrite = true
+        )
+        val cmd = logger.buildCommand(cfg)
+        assertEquals("/path/config.cfg", cmd.last())
     }
 }

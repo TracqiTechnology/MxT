@@ -6,7 +6,7 @@ import java.time.format.DateTimeFormatter
 
 /**
  * Exports a LogSession to ME7Logger-compatible CSV format.
- * The output is importable by ME7Tuner's existing Me7LogParser.
+ * The output is importable by MxT's existing Me7LogParser.
  */
 object CsvExporter {
 
@@ -14,7 +14,7 @@ object CsvExporter {
      * Export a logging session to CSV in ME7Logger format.
      *
      * Format:
-     *   ; ME7Tuner Logger Export
+     *   ; MxT Logger Export
      *   ; Log started at: 2024-01-15 14:30:00
      *   TimeStamp, nmot_w, rl_w, ...         ← names
      *     sec.ms , 1/min , %   , ...         ← units
@@ -27,7 +27,7 @@ object CsvExporter {
             val now = LocalDateTime.now().format(formatter)
 
             // Comment header
-            w.write("; ME7Tuner Logger Export\n")
+            w.write("; MxT Logger Export\n")
             w.write("; Log started at: $now\n")
             w.write("; Variables: ${session.variables.size}\n")
             w.write("; Samples: ${session.samples.size}\n")

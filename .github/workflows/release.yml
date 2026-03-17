@@ -79,7 +79,7 @@ jobs:
       - name: Rename uber JAR
         run: |
           VERSION=${{ needs.check-version.outputs.version }}
-          mv build/compose/jars/*.jar "build/compose/jars/ME7Tuner-${VERSION}-macos-aarch64.jar"
+          mv build/compose/jars/*.jar "build/compose/jars/MxT-${VERSION}-macos-aarch64.jar"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -109,7 +109,7 @@ jobs:
         shell: bash
         run: |
           VERSION=${{ needs.check-version.outputs.version }}
-          mv build/compose/jars/*.jar "build/compose/jars/ME7Tuner-${VERSION}-windows-x64.jar"
+          mv build/compose/jars/*.jar "build/compose/jars/MxT-${VERSION}-windows-x64.jar"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -138,9 +138,9 @@ jobs:
         run: |
           ./gradlew createDistributable -Papp.version=${{ needs.check-version.outputs.version }}
           VERSION=${{ needs.check-version.outputs.version }}
-          tar -czf "ME7Tuner-${VERSION}-linux-x64.tar.gz" \
+          tar -czf "MxT-${VERSION}-linux-x64.tar.gz" \
             -C build/compose/binaries/main/app .
-          mv build/compose/jars/*.jar "build/compose/jars/ME7Tuner-${VERSION}-linux-x64.jar"
+          mv build/compose/jars/*.jar "build/compose/jars/MxT-${VERSION}-linux-x64.jar"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -148,7 +148,7 @@ jobs:
           path: |
             build/compose/binaries/main/deb/*.deb
             build/compose/jars/*.jar
-            ME7Tuner-*-linux-x64.tar.gz
+            MxT-*-linux-x64.tar.gz
 
   release:
     needs: [check-version, build-macos, build-windows, build-linux]
@@ -168,6 +168,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
-          name: ME7Tuner ${{ needs.check-version.outputs.version }}
+          name: MxT ${{ needs.check-version.outputs.version }}
           generate_release_notes: true
           files: flat/*

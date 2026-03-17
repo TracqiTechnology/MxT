@@ -134,7 +134,7 @@ private val ME7Typography = Typography(
 )
 
 @Composable
-fun ME7TunerTheme(content: @Composable () -> Unit) {
+fun MxTTheme(content: @Composable () -> Unit) {
     MaterialTheme(
         colorScheme = ME7ColorScheme,
         typography = ME7Typography,

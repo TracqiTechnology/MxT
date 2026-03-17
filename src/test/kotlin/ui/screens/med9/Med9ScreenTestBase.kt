@@ -81,7 +81,7 @@ abstract class Med9ScreenTestBase {
         BIN_FILE.copyTo(stockBinCopy, overwrite = true)
 
         val stream = ProfileManager::class.java.getResourceAsStream(
-            "/profiles/MED9_Golf_GTI_2_0_TFSI.me7profile.json"
+            "/profiles/MED9_Golf_GTI_2_0_TFSI.mxtprofile.json"
         ) ?: error("MED9 profile not found on classpath")
         profile = profileJson.decodeFromString(
             ConfigurationProfile.serializer(), stream.bufferedReader().readText()

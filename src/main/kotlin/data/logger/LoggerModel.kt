@@ -4,6 +4,15 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
+ * Logger mode: which backend is used for ECU communication.
+ */
+enum class LoggerMode {
+    ME7LOGGER_EXE,   // Existing: spawn ME7Logger.exe (Windows)
+    NATIVE_KWP2000,  // K-line via jSerialComm (Motronic, ME7, MED9)
+    NATIVE_UDS       // CAN via SLCAN/PCAN + jSerialComm (MED17)
+}
+
+/**
  * A single loggable variable definition.
  */
 data class LogVariable(
@@ -41,15 +50,51 @@ enum class LoggerStatus {
 }
 
 /**
- * Connection configuration for ME7Logger.
+ * Connection mode for ME7Logger: COM port or FTDI adapter.
+ */
+enum class ConnectionType { COM_PORT, FTDI }
+
+/**
+ * FTDI device identification method.
+ */
+sealed class FtdiIdentifier {
+    data class Serial(val value: String) : FtdiIdentifier()
+    data class Description(val value: String) : FtdiIdentifier()
+    data class Location(val value: String) : FtdiIdentifier()
+    data object None : FtdiIdentifier()
+}
+
+/**
+ * Connection configuration for all logger modes.
  */
 data class LoggerConfig(
+    // Logger mode
+    val loggerMode: LoggerMode = LoggerMode.ME7LOGGER_EXE,
+    // Existing (shared)
     val comPort: String = "",
     val baudRate: Int = 56000,
     val ecuFile: String = "",
     val cfgFile: String = "",
     val me7loggerPath: String = "",
-    val samplesPerSecond: Int = 20
+    val samplesPerSecond: Int = 20,
+    // Connection type (ME7Logger.exe mode)
+    val connectionType: ConnectionType = ConnectionType.COM_PORT,
+    val ftdiIdentifier: FtdiIdentifier = FtdiIdentifier.None,
+    // Override gates (when false, values are stored but not passed to ME7Logger)
+    val overrideSamplesPerSecond: Boolean = false,
+    val overrideBaudRate: Boolean = false,
+    // Timestamps (ME7Logger.exe mode)
+    val syncTimestamp: Boolean = false,
+    val absoluteTimestamps: Boolean = false,
+    val millisecondTimestamps: Boolean = false,
+    // Output
+    val outputLogFile: String = "",
+    val realTimeWrite: Boolean = false,
+    // Native UDS mode (MED17)
+    val canAdapterType: data.logger.uds.CanAdapterType = data.logger.uds.CanAdapterType.SLCAN,
+    val canBitrate: Int = 500_000,
+    val canTxId: Int = 0x7E0,
+    val canRxId: Int = 0x7E8
 )
 
 /**

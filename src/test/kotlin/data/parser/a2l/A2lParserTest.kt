@@ -182,12 +182,27 @@ class A2lParserTest {
         assertTrue(tmotCm.unit.contains("C"), "Unit should contain 'C', got: ${tmotCm.unit}")
     }
 
-    // Tests that use the real MED9 DAMOS A2L file (large, ~600K lines)
+    // Real A2L file tests — conditional on fixture availability
     companion object {
         private val DAMOS_A2L = File("/tmp/med9_damos/Golf V 2.0 GTI TFSI 0261S02469 387445 Damos.A2L")
+        private val ME7_JETTA_A2L = File("technical/vag/a2l/me7/06A906012AE_0901.A2L")
+        private val ME7_TOURAN_A2L = File("technical/vag/a2l/me7/06A906032TE_0040.A2L")
+        private val ME7_BORA_A2L = File("technical/vag/a2l/me7/06A906012C_0002.A2L")
+        private val MED17_RS3_A2L = File("technical/vag/a2l/med17/D17162A01C000_MY17I0.a2l")
+        private val MED9_TTRS_A2L = File("technical/vag/a2l/med9/8J0907404D_0020.A2L")
 
         @JvmStatic
         fun damosAvailable(): Boolean = DAMOS_A2L.exists()
+        @JvmStatic
+        fun me7JettaAvailable(): Boolean = ME7_JETTA_A2L.exists()
+        @JvmStatic
+        fun me7TouranAvailable(): Boolean = ME7_TOURAN_A2L.exists()
+        @JvmStatic
+        fun me7BoraAvailable(): Boolean = ME7_BORA_A2L.exists()
+        @JvmStatic
+        fun med17Rs3Available(): Boolean = MED17_RS3_A2L.exists()
+        @JvmStatic
+        fun med9TtrsAvailable(): Boolean = MED9_TTRS_A2L.exists()
     }
 
     @Test
@@ -238,6 +253,153 @@ class A2lParserTest {
         assertEquals(2, nmot.size)
         assertEquals(0, nmot.signed)
         assertTrue(nmot.factor > 0, "nmot_w factor should be positive")
+    }
+
+    // ---- ME7.5 Jetta 1.8T A2L (VAG archive) ----
+
+    @Test
+    @EnabledIf("me7JettaAvailable")
+    fun `ME7 Jetta A2L parses without error`() {
+        val result = A2lParser.parse(ME7_JETTA_A2L)
+        assertTrue(result.compuMethods.isNotEmpty(), "Should have COMPU_METHODs")
+        assertTrue(result.measurements.isNotEmpty(), "Should have MEASUREMENTs")
+    }
+
+    @Test
+    @EnabledIf("me7JettaAvailable")
+    fun `ME7 Jetta A2L has expected entry counts`() {
+        val result = A2lParser.parse(ME7_JETTA_A2L)
+        assertTrue(result.compuMethods.size > 100,
+            "Expected 100+ COMPU_METHODs, got ${result.compuMethods.size}")
+        assertTrue(result.measurements.size > 2000,
+            "Expected 2000+ MEASUREMENTs, got ${result.measurements.size}")
+    }
+
+    @Test
+    @EnabledIf("me7JettaAvailable")
+    fun `ME7 Jetta A2L contains key ME7 calibration signals`() {
+        val result = A2lParser.parse(ME7_JETTA_A2L)
+        val names = result.measurements.map { it.name }.toSet()
+        val cmNames = result.compuMethods.keys
+
+        // Core engine signals
+        val keySignals = listOf("nmot_w", "rl_w", "tmot", "tans", "wdkba")
+        for (signal in keySignals) {
+            assertTrue(signal in names, "Missing key ME7 signal: $signal")
+        }
+
+        // Verify COMPU_METHODs reference known calibration maps
+        val allCmContent = cmNames.joinToString(" ")
+        // ME7.5 should have conversion formulas for rpm, load, temperature, etc.
+        assertTrue(result.compuMethods.values.any { it.unit.contains("min") || it.unit.contains("rpm", ignoreCase = true) },
+            "Should have an RPM-related COMPU_METHOD")
+    }
+
+    @Test
+    @EnabledIf("me7JettaAvailable")
+    fun `ME7 Jetta A2L generates valid ECU entries`() {
+        val result = A2lParser.parse(ME7_JETTA_A2L)
+        val entries = A2lParser.buildEcuEntries(result.measurements, result.compuMethods)
+        assertTrue(entries.size > 1000, "Expected 1000+ ECU entries, got ${entries.size}")
+
+        // All entries must have valid addresses
+        for (e in entries) {
+            assertTrue(e.address > 0, "Entry ${e.name} has invalid address ${e.address}")
+            assertTrue(e.size in 1..2, "Entry ${e.name} has invalid size ${e.size}")
+            assertTrue(e.factor != 0.0 || e.inverse == 0,
+                "Entry ${e.name} has zero factor without inverse flag")
+        }
+
+        // Entries should be sorted by address
+        for (i in 1 until entries.size) {
+            assertTrue(entries[i].address >= entries[i - 1].address,
+                "Entries not sorted: ${entries[i-1].name}@${entries[i-1].address} > ${entries[i].name}@${entries[i].address}")
+        }
+    }
+
+    // ---- ME7.5 Touran 1.8T A2L (cross-validation) ----
+
+    @Test
+    @EnabledIf("me7TouranAvailable")
+    fun `ME7 Touran A2L parses and cross-validates with Jetta`() {
+        val touran = A2lParser.parse(ME7_TOURAN_A2L)
+        assertTrue(touran.compuMethods.size > 100,
+            "Touran should have 100+ COMPU_METHODs, got ${touran.compuMethods.size}")
+        assertTrue(touran.measurements.size > 2000,
+            "Touran should have 2000+ MEASUREMENTs, got ${touran.measurements.size}")
+
+        // Same ME7.5 platform — should have same core signals
+        val names = touran.measurements.map { it.name }.toSet()
+        for (signal in listOf("nmot_w", "rl_w", "tmot")) {
+            assertTrue(signal in names, "Touran ME7.5 missing core signal: $signal")
+        }
+    }
+
+    // ---- MED17.1.62 RS3 2.5T A2L ----
+
+    @Test
+    @EnabledIf("med17Rs3Available")
+    fun `MED17 RS3 A2L parses without error`() {
+        val result = A2lParser.parse(MED17_RS3_A2L)
+        assertTrue(result.compuMethods.isNotEmpty(), "Should have COMPU_METHODs")
+        assertTrue(result.measurements.isNotEmpty(), "Should have MEASUREMENTs")
+    }
+
+    @Test
+    @EnabledIf("med17Rs3Available")
+    fun `MED17 RS3 A2L has large entry counts`() {
+        val result = A2lParser.parse(MED17_RS3_A2L)
+        assertTrue(result.compuMethods.size > 300,
+            "Expected 300+ COMPU_METHODs for MED17, got ${result.compuMethods.size}")
+        assertTrue(result.measurements.size > 5000,
+            "Expected 5000+ MEASUREMENTs for MED17, got ${result.measurements.size}")
+    }
+
+    @Test
+    @EnabledIf("med17Rs3Available")
+    fun `MED17 RS3 A2L generates valid ECU entries`() {
+        val result = A2lParser.parse(MED17_RS3_A2L)
+        val entries = A2lParser.buildEcuEntries(result.measurements, result.compuMethods)
+        assertTrue(entries.size > 3000, "Expected 3000+ ECU entries, got ${entries.size}")
+
+        // MED17 uses TriCore — addresses should be in 0xD0000000+ RAM range
+        val highAddrEntries = entries.filter { it.address > 0xD0000000L }
+        assertTrue(highAddrEntries.size > entries.size / 2,
+            "Most MED17 entries should have TriCore RAM addresses (0xD0000000+)")
+    }
+
+    // ---- MED9.1.2 TT RS 2.5T A2L ----
+
+    @Test
+    @EnabledIf("med9TtrsAvailable")
+    fun `MED9 TTRS A2L parses without error`() {
+        val result = A2lParser.parse(MED9_TTRS_A2L)
+        assertTrue(result.compuMethods.isNotEmpty(), "Should have COMPU_METHODs")
+        assertTrue(result.measurements.isNotEmpty(), "Should have MEASUREMENTs")
+    }
+
+    @Test
+    @EnabledIf("med9TtrsAvailable")
+    fun `MED9 TTRS A2L has expected entry counts`() {
+        val result = A2lParser.parse(MED9_TTRS_A2L)
+        assertTrue(result.compuMethods.size > 200,
+            "Expected 200+ COMPU_METHODs for MED9, got ${result.compuMethods.size}")
+        assertTrue(result.measurements.size > 5000,
+            "Expected 5000+ MEASUREMENTs for MED9, got ${result.measurements.size}")
+    }
+
+    @Test
+    @EnabledIf("med9TtrsAvailable")
+    fun `MED9 TTRS A2L generates valid ECU entries`() {
+        val result = A2lParser.parse(MED9_TTRS_A2L)
+        val entries = A2lParser.buildEcuEntries(result.measurements, result.compuMethods)
+        assertTrue(entries.size > 3000, "Expected 3000+ ECU entries, got ${entries.size}")
+
+        // All factors should be finite
+        for (e in entries) {
+            assertTrue(e.factor.isFinite(), "Entry ${e.name} has non-finite factor: ${e.factor}")
+            assertTrue(e.offset.isFinite(), "Entry ${e.name} has non-finite offset: ${e.offset}")
+        }
     }
 }
 

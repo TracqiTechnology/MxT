@@ -1,0 +1,77 @@
+name: Bug Report
+description: Report a bug or unexpected behavior
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug! Please fill out the sections below so we can reproduce and fix the issue.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened? What did you expect to happen?
+      placeholder: |
+        What happened:
+        ...
+
+        What I expected:
+        ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps to reproduce the issue
+      placeholder: |
+        1. Open BIN file '...'
+        2. Navigate to '...' tab
+        3. Click '...'
+        4. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: "Paste the diagnostic info from **Help → Report Issue** (it's copied to your clipboard automatically)"
+      placeholder: "Paste diagnostic info here"
+      render: markdown
+    validations:
+      required: false
+
+  - type: textarea
+    id: files
+    attributes:
+      label: Files involved
+      description: BIN filename, XDF filename, log files, or other relevant files (optional)
+      placeholder: |
+        - BIN: my_ecu.bin
+        - XDF: my_ecu.xdf
+    validations:
+      required: false
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: Screenshots
+      description: If applicable, add screenshots to help explain the problem
+    validations:
+      required: false
+
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severity
+      options:
+        - Crash / data loss
+        - Wrong calculation results
+        - UI / cosmetic issue
+        - Other
+    validations:
+      required: true

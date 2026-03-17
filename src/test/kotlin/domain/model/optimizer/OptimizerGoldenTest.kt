@@ -48,7 +48,7 @@ class OptimizerGoldenTest {
         XdfParser.setTableDefinitionsForTesting(defs)
         BinParser.setMapListForTesting(allMaps)
 
-        val stream = ProfileManager::class.java.getResourceAsStream("/profiles/MBox.me7profile.json")
+        val stream = ProfileManager::class.java.getResourceAsStream("/profiles/MBox.mxtprofile.json")
             ?: error("MBox profile not found")
         val profile = profileJson.decodeFromString(
             ConfigurationProfile.serializer(), stream.bufferedReader().readText()

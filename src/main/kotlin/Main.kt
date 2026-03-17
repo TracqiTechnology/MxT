@@ -12,6 +12,7 @@ import data.preferences.MapPreferenceManager
 import data.preferences.bin.BinFilePreferences
 import data.preferences.csv.WinOlsCsvFileChooserPreferences
 import data.preferences.csv.WinOlsCsvFilePreferences
+import data.preferences.disclaimer.AlphaBetaDisclaimerPreferences
 import data.preferences.eula.EulaPreferences
 import data.preferences.filechooser.BinFileChooserPreferences
 import data.preferences.filechooser.XdfFileChooserPreferences
@@ -21,12 +22,18 @@ import data.preferences.logheaderdefinition.LogHeaderPreference
 import data.preferences.platform.EcuPlatformPreference
 import data.preferences.xdf.XdfFilePreferences
 import data.profile.ProfileManager
+import data.diagnostics.DiagnosticCollector
+import ui.components.AlphaBetaDisclaimer
 import ui.components.EulaDialog
-import ui.navigation.ME7TunerApp
-import ui.theme.ME7TunerTheme
+import ui.navigation.MxTApp
+import ui.theme.MxTTheme
+import java.awt.Desktop
 import java.awt.FileDialog
 import java.awt.Frame
+import java.awt.Toolkit
+import java.awt.datatransfer.StringSelection
 import java.io.File
+import java.net.URI
 import java.util.Locale
 
 fun main() {
@@ -46,16 +53,40 @@ fun main() {
         if (!eulaAccepted) {
             Window(
                 onCloseRequest = ::exitApplication,
-                title = "TracQi ME7Tuner — License Agreement",
+                title = "TracQi MxT — License Agreement",
                 state = rememberWindowState(width = 800.dp, height = 700.dp),
             ) {
-                ME7TunerTheme {
+                MxTTheme {
                     EulaDialog(
                         onAccept = {
                             EulaPreferences.accepted = true
                             eulaAccepted = true
                         },
                         onDecline = ::exitApplication,
+                    )
+                }
+            }
+            return@application
+        }
+
+        var disclaimerAccepted by remember { mutableStateOf(AlphaBetaDisclaimerPreferences.accepted) }
+
+        if (!disclaimerAccepted) {
+            Window(
+                onCloseRequest = ::exitApplication,
+                title = "TracQi MxT — Feature Stability",
+                state = rememberWindowState(width = 800.dp, height = 700.dp),
+            ) {
+                MxTTheme {
+                    AlphaBetaDisclaimer(
+                        onAccept = {
+                            AlphaBetaDisclaimerPreferences.accepted = true
+                            disclaimerAccepted = true
+                        },
+                        onStickToME7 = {
+                            AlphaBetaDisclaimerPreferences.accepted = true
+                            disclaimerAccepted = true
+                        },
                     )
                 }
             }
@@ -71,7 +102,7 @@ fun main() {
             val platformLabel = EcuPlatformPreference.platform.shortName
             val kpSuffix = if (kpFile.exists()) " | WinOLS KP - ${kpFile.name}" else ""
             val csvSuffix = if (csvFile.exists()) " | WinOLS CSV - ${csvFile.name}" else ""
-            "TracQi ME7Tuner ($platformLabel) - ${binFile.name} | XDF File - ${xdfFile.name}$kpSuffix$csvSuffix"
+            "TracQi MxT ($platformLabel) - ${binFile.name} | XDF File - ${xdfFile.name}$kpSuffix$csvSuffix"
         }
 
         Window(
@@ -123,7 +154,7 @@ fun main() {
                 }
                 Menu("Profiles") {
                     Item("Load Profile...") {
-                        val file = openFileDialog(window, "Load Profile", "me7profile.json", "")
+                        val file = openFileDialog(window, "Load Profile", "mxtprofile.json", "")
                         if (file != null) {
                             runCatching {
                                 val profile = ProfileManager.loadFromFile(file)
@@ -142,7 +173,7 @@ fun main() {
                             )
                             if (name != null && name.isNotBlank()) {
                                 val dialog = FileDialog(window, "Save Profile", FileDialog.SAVE)
-                                dialog.file = "${name.replace(Regex("[^a-zA-Z0-9_ -]"), "")}.me7profile.json"
+                                dialog.file = "${name.replace(Regex("[^a-zA-Z0-9_ -]"), "")}.mxtprofile.json"
                                 dialog.isVisible = true
                                 val dir = dialog.directory
                                 val fileName = dialog.file
@@ -168,10 +199,22 @@ fun main() {
                         KpFileChooserPreferences.clear()
                     }
                 }
+                Menu("Help") {
+                    Item("Report Issue...") {
+                        val diagnostics = DiagnosticCollector.collect()
+                        val clipboard = Toolkit.getDefaultToolkit().systemClipboard
+                        clipboard.setContents(StringSelection(diagnostics), null)
+                        if (Desktop.isDesktopSupported()) {
+                            Desktop.getDesktop().browse(
+                                URI("https://github.com/TracqiTechnology/MxT/issues/new?template=bug_report.yml")
+                            )
+                        }
+                    }
+                }
             }
 
-            ME7TunerTheme {
-                ME7TunerApp()
+            MxTTheme {
+                MxTApp()
             }
         }
     }

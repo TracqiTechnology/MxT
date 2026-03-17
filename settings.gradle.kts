@@ -13,4 +13,4 @@ pluginManagement {
     }
 }
 
-rootProject.name = "ME7Tuner"
+rootProject.name = "MxT"

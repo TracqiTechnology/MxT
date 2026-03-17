@@ -31,6 +31,10 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import data.logger.*
+import data.logger.kwp2000.Kwp2000NativeLogger
+import data.logger.protocol.FakeSerialPortProvider
+import data.logger.protocol.SerialPortEnumerator
+import data.logger.uds.*
 import ui.components.ChartSeries
 import ui.components.LineChart
 import ui.components.niceTickValues
@@ -48,12 +52,23 @@ import java.time.format.DateTimeFormatter
 @Composable
 fun LoggerScreen(loggerManager: LoggerManager? = null) {
     val scope = rememberCoroutineScope()
-    val defaultLogger = remember { loggerManager ?: Me7LoggerProcess() }
+
+    // Logger mode selection
+    var loggerMode by remember { mutableStateOf(LoggerMode.ME7LOGGER_EXE) }
+
+    // Create logger based on mode (re-created when mode changes)
+    val modeLogger: LoggerManager = remember(loggerMode) {
+        loggerManager ?: when (loggerMode) {
+            LoggerMode.ME7LOGGER_EXE -> Me7LoggerProcess()
+            LoggerMode.NATIVE_KWP2000 -> Kwp2000NativeLogger(FakeSerialPortProvider())
+            LoggerMode.NATIVE_UDS -> UdsNativeLogger(FakeCanTransport())
+        }
+    }
 
     // Dev mode state — Ctrl+Shift+D toggles mock replay
     var devMode by remember { mutableStateOf(false) }
     var devLogger by remember { mutableStateOf<MockLoggerProcess?>(null) }
-    val logger: LoggerManager = devLogger ?: defaultLogger
+    val logger: LoggerManager = devLogger ?: modeLogger
 
     // Focus for keyboard events
     val focusRequester = remember { FocusRequester() }
@@ -75,6 +90,36 @@ fun LoggerScreen(loggerManager: LoggerManager? = null) {
     var comPort by remember { mutableStateOf("COM3") }
     var ecuFile by remember { mutableStateOf("") }
     var cfgFile by remember { mutableStateOf("") }
+    var connectionType by remember { mutableStateOf(ConnectionType.COM_PORT) }
+    var ftdiMode by remember { mutableStateOf("serial") }
+    var ftdiValue by remember { mutableStateOf("") }
+    var overrideSps by remember { mutableStateOf(false) }
+    var samplesPerSecond by remember { mutableStateOf("20") }
+    var overrideBaud by remember { mutableStateOf(false) }
+    var baudRate by remember { mutableStateOf("56000") }
+    var syncTimestamp by remember { mutableStateOf(false) }
+    var absoluteTimestamps by remember { mutableStateOf(false) }
+    var millisecondTimestamps by remember { mutableStateOf(false) }
+    var outputLogFile by remember { mutableStateOf("") }
+    var realTimeWrite by remember { mutableStateOf(false) }
+
+    // Native mode state
+    var canAdapterType by remember { mutableStateOf(CanAdapterType.SLCAN) }
+    var canBitrate by remember { mutableStateOf("500000") }
+    var canTxId by remember { mutableStateOf("7E0") }
+    var canRxId by remember { mutableStateOf("7E8") }
+    val serialPorts = remember { mutableStateListOf<String>() }
+
+    // Refresh serial ports on mode change
+    LaunchedEffect(loggerMode) {
+        if (loggerMode != LoggerMode.ME7LOGGER_EXE) {
+            withContext(Dispatchers.IO) {
+                val ports = SerialPortEnumerator.listPorts().map { it.displayName }
+                serialPorts.clear()
+                serialPorts.addAll(ports)
+            }
+        }
+    }
 
     // UI state
     var selectedTab by remember { mutableStateOf(0) }
@@ -140,7 +185,7 @@ fun LoggerScreen(loggerManager: LoggerManager? = null) {
                                     )
                                     val desktop = File(System.getProperty("user.home"), "Desktop")
                                     val outDir = if (desktop.exists()) desktop else File(".")
-                                    val outFile = File(outDir, "me7tuner_demo_$ts.csv")
+                                    val outFile = File(outDir, "mxt_demo_$ts.csv")
                                     CsvExporter.export(session, outFile)
                                 }
                             }
@@ -241,23 +286,80 @@ fun LoggerScreen(loggerManager: LoggerManager? = null) {
         Box(modifier = Modifier.fillMaxSize().weight(1f)) {
             when (selectedTab) {
                 0 -> ConnectionTab(
+                    loggerMode = loggerMode,
                     me7loggerPath = me7loggerPath,
                     comPort = comPort,
                     ecuFile = ecuFile,
                     cfgFile = cfgFile,
+                    connectionType = connectionType,
+                    ftdiMode = ftdiMode,
+                    ftdiValue = ftdiValue,
+                    overrideSps = overrideSps,
+                    samplesPerSecond = samplesPerSecond,
+                    overrideBaud = overrideBaud,
+                    baudRate = baudRate,
+                    syncTimestamp = syncTimestamp,
+                    absoluteTimestamps = absoluteTimestamps,
+                    millisecondTimestamps = millisecondTimestamps,
+                    outputLogFile = outputLogFile,
+                    realTimeWrite = realTimeWrite,
                     loggerStatus = loggerStatus,
+                    canAdapterType = canAdapterType,
+                    canBitrate = canBitrate,
+                    canTxId = canTxId,
+                    canRxId = canRxId,
+                    serialPorts = serialPorts,
+                    onLoggerModeChange = { loggerMode = it },
                     onMe7loggerPathChange = { me7loggerPath = it },
                     onComPortChange = { comPort = it },
                     onEcuFileChange = { ecuFile = it },
                     onCfgFileChange = { cfgFile = it },
+                    onConnectionTypeChange = { connectionType = it },
+                    onFtdiModeChange = { ftdiMode = it },
+                    onFtdiValueChange = { ftdiValue = it },
+                    onOverrideSpsChange = { overrideSps = it },
+                    onSamplesPerSecondChange = { samplesPerSecond = it },
+                    onOverrideBaudChange = { overrideBaud = it },
+                    onBaudRateChange = { baudRate = it },
+                    onSyncTimestampChange = { syncTimestamp = it },
+                    onAbsoluteTimestampsChange = { absoluteTimestamps = it },
+                    onMillisecondTimestampsChange = { millisecondTimestamps = it },
+                    onOutputLogFileChange = { outputLogFile = it },
+                    onRealTimeWriteChange = { realTimeWrite = it },
+                    onCanAdapterTypeChange = { canAdapterType = it },
+                    onCanBitrateChange = { canBitrate = it },
+                    onCanTxIdChange = { canTxId = it },
+                    onCanRxIdChange = { canRxId = it },
                     onConnect = {
                         scope.launch {
+                            val ftdiIdentifier = when (ftdiMode) {
+                                "serial" -> if (ftdiValue.isNotEmpty()) FtdiIdentifier.Serial(ftdiValue) else FtdiIdentifier.None
+                                "description" -> if (ftdiValue.isNotEmpty()) FtdiIdentifier.Description(ftdiValue) else FtdiIdentifier.None
+                                "location" -> if (ftdiValue.isNotEmpty()) FtdiIdentifier.Location(ftdiValue) else FtdiIdentifier.None
+                                else -> FtdiIdentifier.None
+                            }
                             logger.connect(
                                 LoggerConfig(
+                                    loggerMode = loggerMode,
                                     me7loggerPath = me7loggerPath,
                                     comPort = comPort,
                                     ecuFile = ecuFile,
-                                    cfgFile = cfgFile
+                                    cfgFile = cfgFile,
+                                    connectionType = connectionType,
+                                    ftdiIdentifier = ftdiIdentifier,
+                                    overrideSamplesPerSecond = overrideSps,
+                                    samplesPerSecond = samplesPerSecond.toIntOrNull() ?: 20,
+                                    overrideBaudRate = overrideBaud,
+                                    baudRate = baudRate.toIntOrNull() ?: 56000,
+                                    syncTimestamp = syncTimestamp,
+                                    absoluteTimestamps = absoluteTimestamps,
+                                    millisecondTimestamps = millisecondTimestamps,
+                                    outputLogFile = outputLogFile,
+                                    realTimeWrite = realTimeWrite,
+                                    canAdapterType = canAdapterType,
+                                    canBitrate = canBitrate.toIntOrNull() ?: 500_000,
+                                    canTxId = canTxId.toIntOrNull(16) ?: 0x7E0,
+                                    canRxId = canRxId.toIntOrNull(16) ?: 0x7E8
                                 )
                             )
                         }
@@ -304,16 +406,60 @@ fun LoggerScreen(loggerManager: LoggerManager? = null) {
 }
 
 @Composable
+private fun SectionTitle(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.titleSmall,
+        modifier = Modifier.padding(top = 16.dp, bottom = 8.dp)
+    )
+}
+
+@Composable
 private fun ConnectionTab(
+    loggerMode: LoggerMode,
     me7loggerPath: String,
     comPort: String,
     ecuFile: String,
     cfgFile: String,
+    connectionType: ConnectionType,
+    ftdiMode: String,
+    ftdiValue: String,
+    overrideSps: Boolean,
+    samplesPerSecond: String,
+    overrideBaud: Boolean,
+    baudRate: String,
+    syncTimestamp: Boolean,
+    absoluteTimestamps: Boolean,
+    millisecondTimestamps: Boolean,
+    outputLogFile: String,
+    realTimeWrite: Boolean,
     loggerStatus: LoggerStatus,
+    canAdapterType: CanAdapterType,
+    canBitrate: String,
+    canTxId: String,
+    canRxId: String,
+    serialPorts: List<String>,
+    onLoggerModeChange: (LoggerMode) -> Unit,
     onMe7loggerPathChange: (String) -> Unit,
     onComPortChange: (String) -> Unit,
     onEcuFileChange: (String) -> Unit,
     onCfgFileChange: (String) -> Unit,
+    onConnectionTypeChange: (ConnectionType) -> Unit,
+    onFtdiModeChange: (String) -> Unit,
+    onFtdiValueChange: (String) -> Unit,
+    onOverrideSpsChange: (Boolean) -> Unit,
+    onSamplesPerSecondChange: (String) -> Unit,
+    onOverrideBaudChange: (Boolean) -> Unit,
+    onBaudRateChange: (String) -> Unit,
+    onSyncTimestampChange: (Boolean) -> Unit,
+    onAbsoluteTimestampsChange: (Boolean) -> Unit,
+    onMillisecondTimestampsChange: (Boolean) -> Unit,
+    onOutputLogFileChange: (String) -> Unit,
+    onRealTimeWriteChange: (Boolean) -> Unit,
+    onCanAdapterTypeChange: (CanAdapterType) -> Unit,
+    onCanBitrateChange: (String) -> Unit,
+    onCanTxIdChange: (String) -> Unit,
+    onCanRxIdChange: (String) -> Unit,
     onConnect: () -> Unit,
     onStartLogging: () -> Unit,
     onStopLogging: () -> Unit,
@@ -321,25 +467,58 @@ private fun ConnectionTab(
     onLoadLogFile: (File) -> Unit,
     onExportCsv: (File) -> Unit
 ) {
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(16.dp)
+    ) {
+
+        // Section 0: Logger Mode
+        SectionTitle("Logger Mode")
+
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.padding(bottom = 8.dp)) {
+            SegmentedButton(
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
+                onClick = { onLoggerModeChange(LoggerMode.ME7LOGGER_EXE) },
+                selected = loggerMode == LoggerMode.ME7LOGGER_EXE
+            ) { Text("ME7Logger.exe", style = MaterialTheme.typography.labelSmall) }
+            SegmentedButton(
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
+                onClick = { onLoggerModeChange(LoggerMode.NATIVE_KWP2000) },
+                selected = loggerMode == LoggerMode.NATIVE_KWP2000
+            ) { Text("Native KWP", style = MaterialTheme.typography.labelSmall) }
+            SegmentedButton(
+                shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
+                onClick = { onLoggerModeChange(LoggerMode.NATIVE_UDS) },
+                selected = loggerMode == LoggerMode.NATIVE_UDS
+            ) { Text("Native UDS", style = MaterialTheme.typography.labelSmall) }
+        }
 
         Text(
-            "ME7Logger Configuration",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(bottom = 12.dp)
+            when (loggerMode) {
+                LoggerMode.ME7LOGGER_EXE -> "Windows ME7Logger.exe wrapper (ME7 only)"
+                LoggerMode.NATIVE_KWP2000 -> "K-line serial (Motronic, ME7, MED9)"
+                LoggerMode.NATIVE_UDS -> "CAN bus (MED17)"
+            },
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 8.dp)
         )
 
-        // ME7Logger path
-        FilePickerRow(
-            label = "ME7Logger.exe",
-            value = me7loggerPath,
-            onValueChange = onMe7loggerPathChange,
-            filterDescription = "ME7Logger executable"
-        )
+        // Section 1: Files
+        SectionTitle("Files")
 
-        Spacer(modifier = Modifier.height(8.dp))
+        if (loggerMode == LoggerMode.ME7LOGGER_EXE) {
+            FilePickerRow(
+                label = "ME7Logger.exe",
+                value = me7loggerPath,
+                onValueChange = onMe7loggerPathChange,
+                filterDescription = "ME7Logger executable"
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+        }
 
-        // ECU file
         FilePickerRow(
             label = ".ecu File",
             value = ecuFile,
@@ -349,40 +528,322 @@ private fun ConnectionTab(
 
         Spacer(modifier = Modifier.height(8.dp))
 
-        // CFG file
-        FilePickerRow(
-            label = ".cfg File",
-            value = cfgFile,
-            onValueChange = onCfgFileChange,
-            filterDescription = "Log configuration"
-        )
+        if (loggerMode == LoggerMode.ME7LOGGER_EXE) {
+            FilePickerRow(
+                label = ".cfg File",
+                value = cfgFile,
+                onValueChange = onCfgFileChange,
+                filterDescription = "Log configuration"
+            )
+        } else {
+            FilePickerRow(
+                label = ".cfg File (optional)",
+                value = cfgFile,
+                onValueChange = onCfgFileChange,
+                filterDescription = "Log configuration"
+            )
+        }
 
-        Spacer(modifier = Modifier.height(8.dp))
+        // Section 2: Connection
+        SectionTitle("Connection")
 
-        // COM port
+        when (loggerMode) {
+            LoggerMode.ME7LOGGER_EXE -> {
+                // Existing COM / FTDI selector
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.padding(bottom = 8.dp)) {
+                    SegmentedButton(
+                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                        onClick = { onConnectionTypeChange(ConnectionType.COM_PORT) },
+                        selected = connectionType == ConnectionType.COM_PORT
+                    ) { Text("COM Port", style = MaterialTheme.typography.labelSmall) }
+                    SegmentedButton(
+                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                        onClick = { onConnectionTypeChange(ConnectionType.FTDI) },
+                        selected = connectionType == ConnectionType.FTDI
+                    ) { Text("FTDI", style = MaterialTheme.typography.labelSmall) }
+                }
+
+                if (connectionType == ConnectionType.COM_PORT) {
+                    OutlinedTextField(
+                        value = comPort,
+                        onValueChange = onComPortChange,
+                        label = { Text("COM Port") },
+                        singleLine = true,
+                        modifier = Modifier.width(200.dp),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                    )
+                } else {
+                    val ftdiOptions = listOf("serial" to "Serial Number", "description" to "Description", "location" to "USB Location")
+                    for ((key, label) in ftdiOptions) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)
+                        ) {
+                            RadioButton(
+                                selected = ftdiMode == key,
+                                onClick = { onFtdiModeChange(key) }
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            OutlinedTextField(
+                                value = if (ftdiMode == key) ftdiValue else "",
+                                onValueChange = { if (ftdiMode == key) onFtdiValueChange(it) },
+                                label = { Text(label) },
+                                singleLine = true,
+                                enabled = ftdiMode == key,
+                                modifier = Modifier.width(300.dp),
+                                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                            )
+                        }
+                    }
+                }
+            }
+
+            LoggerMode.NATIVE_KWP2000 -> {
+                // Serial port dropdown for K-line
+                Text("Serial Port", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(bottom = 4.dp))
+                if (serialPorts.isEmpty()) {
+                    OutlinedTextField(
+                        value = comPort,
+                        onValueChange = onComPortChange,
+                        label = { Text("Port name (e.g. /dev/ttyUSB0, COM3)") },
+                        singleLine = true,
+                        modifier = Modifier.width(350.dp),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                    )
+                } else {
+                    var expanded by remember { mutableStateOf(false) }
+                    Box {
+                        OutlinedTextField(
+                            value = comPort,
+                            onValueChange = onComPortChange,
+                            label = { Text("Serial Port") },
+                            singleLine = true,
+                            readOnly = true,
+                            modifier = Modifier.width(350.dp),
+                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            trailingIcon = {
+                                IconButton(onClick = { expanded = !expanded }) {
+                                    Icon(
+                                        if (expanded) Icons.Default.ArrowDropUp else Icons.Default.ArrowDropDown,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        )
+                        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                            serialPorts.forEach { port ->
+                                DropdownMenuItem(
+                                    text = { Text(port, style = MaterialTheme.typography.bodySmall) },
+                                    onClick = { onComPortChange(port.substringBefore(" -")); expanded = false }
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            LoggerMode.NATIVE_UDS -> {
+                // CAN adapter type selector
+                Text("CAN Adapter", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(bottom = 4.dp))
+                SingleChoiceSegmentedButtonRow(modifier = Modifier.padding(bottom = 8.dp)) {
+                    SegmentedButton(
+                        shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+                        onClick = { onCanAdapterTypeChange(CanAdapterType.SLCAN) },
+                        selected = canAdapterType == CanAdapterType.SLCAN
+                    ) { Text("SLCAN", style = MaterialTheme.typography.labelSmall) }
+                    SegmentedButton(
+                        shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+                        onClick = { onCanAdapterTypeChange(CanAdapterType.PCAN) },
+                        selected = canAdapterType == CanAdapterType.PCAN,
+                        enabled = PcanTransport.isAvailable()
+                    ) { Text("PCAN", style = MaterialTheme.typography.labelSmall) }
+                }
+
+                if (!PcanTransport.isAvailable() && canAdapterType == CanAdapterType.PCAN) {
+                    Text(
+                        "PCAN drivers not detected. Install from peak-system.com",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+                }
+
+                // Port selection (SLCAN uses serial port)
+                if (canAdapterType == CanAdapterType.SLCAN) {
+                    if (serialPorts.isEmpty()) {
+                        OutlinedTextField(
+                            value = comPort,
+                            onValueChange = onComPortChange,
+                            label = { Text("SLCAN Port (e.g. /dev/ttyACM0, COM3)") },
+                            singleLine = true,
+                            modifier = Modifier.width(350.dp),
+                            textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                        )
+                    } else {
+                        var expanded by remember { mutableStateOf(false) }
+                        Box {
+                            OutlinedTextField(
+                                value = comPort,
+                                onValueChange = onComPortChange,
+                                label = { Text("SLCAN Serial Port") },
+                                singleLine = true,
+                                readOnly = true,
+                                modifier = Modifier.width(350.dp),
+                                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                                trailingIcon = {
+                                    IconButton(onClick = { expanded = !expanded }) {
+                                        Icon(
+                                            if (expanded) Icons.Default.ArrowDropUp else Icons.Default.ArrowDropDown,
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            )
+                            DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                                serialPorts.forEach { port ->
+                                    DropdownMenuItem(
+                                        text = { Text(port, style = MaterialTheme.typography.bodySmall) },
+                                        onClick = { onComPortChange(port.substringBefore(" -")); expanded = false }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // CAN bitrate
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    OutlinedTextField(
+                        value = canBitrate,
+                        onValueChange = onCanBitrateChange,
+                        label = { Text("CAN Bitrate") },
+                        singleLine = true,
+                        modifier = Modifier.width(150.dp),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                    )
+                    OutlinedTextField(
+                        value = canTxId,
+                        onValueChange = onCanTxIdChange,
+                        label = { Text("TX ID (hex)") },
+                        singleLine = true,
+                        modifier = Modifier.width(120.dp),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                    )
+                    OutlinedTextField(
+                        value = canRxId,
+                        onValueChange = onCanRxIdChange,
+                        label = { Text("RX ID (hex)") },
+                        singleLine = true,
+                        modifier = Modifier.width(120.dp),
+                        textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                    )
+                }
+            }
+        }
+
+        // Section 3: Sampling (shown for all modes)
+        SectionTitle("Sampling")
+
         Row(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier.fillMaxWidth()
         ) {
+            Checkbox(checked = overrideSps, onCheckedChange = onOverrideSpsChange)
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("Override samples/sec", style = MaterialTheme.typography.bodySmall)
+            Spacer(modifier = Modifier.width(12.dp))
             OutlinedTextField(
-                value = comPort,
-                onValueChange = onComPortChange,
-                label = { Text("COM Port") },
+                value = samplesPerSecond,
+                onValueChange = onSamplesPerSecondChange,
+                label = { Text("SPS (1-50)") },
                 singleLine = true,
-                modifier = Modifier.width(200.dp),
+                enabled = overrideSps,
+                modifier = Modifier.width(120.dp),
                 textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+            )
+        }
+
+        Spacer(modifier = Modifier.height(4.dp))
+
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Checkbox(checked = overrideBaud, onCheckedChange = onOverrideBaudChange)
+            Spacer(modifier = Modifier.width(4.dp))
+            Text("Override baud rate", style = MaterialTheme.typography.bodySmall)
+            Spacer(modifier = Modifier.width(12.dp))
+            OutlinedTextField(
+                value = baudRate,
+                onValueChange = onBaudRateChange,
+                label = { Text("Baud") },
+                singleLine = true,
+                enabled = overrideBaud,
+                modifier = Modifier.width(120.dp),
+                textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+            )
+        }
+
+        // Section 4: Advanced (ME7Logger.exe only)
+        if (loggerMode == LoggerMode.ME7LOGGER_EXE) {
+            SectionTitle("Advanced")
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = syncTimestamp, onCheckedChange = onSyncTimestampChange)
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Sync to next full second (-t)", style = MaterialTheme.typography.bodySmall)
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = absoluteTimestamps, onCheckedChange = onAbsoluteTimestampsChange)
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Absolute timestamps (-a)", style = MaterialTheme.typography.bodySmall)
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = millisecondTimestamps, onCheckedChange = onMillisecondTimestampsChange)
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Millisecond precision (-m)", style = MaterialTheme.typography.bodySmall)
+            }
+
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(checked = realTimeWrite, onCheckedChange = onRealTimeWriteChange)
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Write to disk immediately (-r)", style = MaterialTheme.typography.bodySmall)
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            FilePickerRow(
+                label = "Save log to file (-o)",
+                value = outputLogFile,
+                onValueChange = onOutputLogFileChange,
+                filterDescription = "Log output file"
             )
         }
 
         Spacer(modifier = Modifier.height(16.dp))
 
         // Action buttons
+        val connectEnabled = when (loggerMode) {
+            LoggerMode.ME7LOGGER_EXE -> me7loggerPath.isNotEmpty() && ecuFile.isNotEmpty() && cfgFile.isNotEmpty()
+            LoggerMode.NATIVE_KWP2000 -> ecuFile.isNotEmpty() && comPort.isNotEmpty()
+            LoggerMode.NATIVE_UDS -> ecuFile.isNotEmpty() && (canAdapterType == CanAdapterType.PCAN || comPort.isNotEmpty())
+        }
+
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             when (loggerStatus) {
                 LoggerStatus.DISCONNECTED, LoggerStatus.ERROR -> {
                     Button(
                         onClick = onConnect,
-                        enabled = me7loggerPath.isNotEmpty() && ecuFile.isNotEmpty() && cfgFile.isNotEmpty()
+                        enabled = connectEnabled
                     ) {
                         Icon(Icons.Default.Link, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
@@ -423,17 +884,10 @@ private fun ConnectionTab(
 
         HorizontalDivider()
 
-        Spacer(modifier = Modifier.height(16.dp))
-
-        // Offline mode
-        Text(
-            "Offline Log Viewer",
-            style = MaterialTheme.typography.titleMedium,
-            modifier = Modifier.padding(bottom = 12.dp)
-        )
+        // Section 5: Offline Log Viewer
+        SectionTitle("Offline Log Viewer")
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            // Load log file
             OutlinedButton(onClick = {
                 val dialog = FileDialog(Frame(), "Open Log File", FileDialog.LOAD)
                 dialog.isVisible = true
@@ -446,11 +900,10 @@ private fun ConnectionTab(
                 Text("Open Log File")
             }
 
-            // Export CSV
             OutlinedButton(
                 onClick = {
                     val dialog = FileDialog(Frame(), "Export CSV", FileDialog.SAVE)
-                    dialog.file = "me7tuner_log.csv"
+                    dialog.file = "mxt_log.csv"
                     dialog.isVisible = true
                     if (dialog.directory != null && dialog.file != null) {
                         onExportCsv(File(dialog.directory, dialog.file))

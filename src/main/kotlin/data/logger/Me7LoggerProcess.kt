@@ -252,12 +252,47 @@ class Me7LoggerProcess : LoggerManager {
         return LogSession(variables = variables, samples = samples)
     }
 
-    private fun buildCommand(cfg: LoggerConfig): List<String> {
+    internal fun buildCommand(cfg: LoggerConfig): List<String> {
         val cmd = mutableListOf(cfg.me7loggerPath)
-        if (cfg.comPort.isNotEmpty()) {
-            cmd.addAll(listOf("-p", cfg.comPort))
+
+        // Connection
+        when (cfg.connectionType) {
+            ConnectionType.COM_PORT -> {
+                if (cfg.comPort.isNotEmpty()) cmd.addAll(listOf("-p", cfg.comPort))
+            }
+            ConnectionType.FTDI -> {
+                cmd.add("-f")
+                when (val id = cfg.ftdiIdentifier) {
+                    is FtdiIdentifier.Serial -> cmd.add("-S${id.value}")
+                    is FtdiIdentifier.Description -> cmd.add("-D${id.value}")
+                    is FtdiIdentifier.Location -> cmd.add("-L${id.value}")
+                    FtdiIdentifier.None -> {}
+                }
+            }
         }
-        cmd.addAll(listOf("-R", cfg.cfgFile))
+
+        // Sampling overrides
+        if (cfg.overrideSamplesPerSecond) {
+            cmd.addAll(listOf("-s", cfg.samplesPerSecond.coerceIn(1, 50).toString()))
+        }
+        if (cfg.overrideBaudRate) {
+            cmd.addAll(listOf("-b", cfg.baudRate.toString()))
+        }
+
+        // Timestamps
+        if (cfg.syncTimestamp) cmd.add("-t")
+        if (cfg.absoluteTimestamps) cmd.add("-a")
+        if (cfg.millisecondTimestamps) cmd.add("-m")
+
+        // Output (always -R for CSV parsing; optionally also log to file)
+        cmd.add("-R")
+        if (cfg.outputLogFile.isNotEmpty()) {
+            cmd.addAll(listOf("-o", cfg.outputLogFile))
+        }
+        if (cfg.realTimeWrite) cmd.add("-r")
+
+        // Config file (positional argument, must be last)
+        cmd.add(cfg.cfgFile)
         return cmd
     }
 }

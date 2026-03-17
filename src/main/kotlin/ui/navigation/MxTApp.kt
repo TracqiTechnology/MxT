@@ -1,22 +1,31 @@
 package ui.navigation
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import data.model.EcuPlatform
+import data.model.StabilityLevel
 import data.preferences.bin.BinFilePreferences
 import data.preferences.xdf.XdfFilePreferences
+import ui.components.StabilityBadge
 import ui.screens.configuration.ConfigurationScreen
 import ui.screens.optimizer.OptimizerScreen
 
 @Composable
-fun ME7TunerApp(navState: NavigationState = remember { NavigationState() }) {
+fun MxTApp(navState: NavigationState = remember { NavigationState() }) {
 
     val xdfFile by XdfFilePreferences.file.collectAsState()
     val binFile by BinFilePreferences.file.collectAsState()
@@ -47,9 +56,10 @@ fun ME7TunerApp(navState: NavigationState = remember { NavigationState() }) {
                         )
                         Text(
                             text = when (navState.ecuPlatform) {
-                                EcuPlatform.ME7 -> "ME7Tuner"
+                                EcuPlatform.ME7 -> "MxT"
                                 EcuPlatform.MED9 -> "MED9Tuner"
                                 EcuPlatform.MED17 -> "MED17Tuner"
+                                EcuPlatform.MOTRONIC -> "MotronicTuner"
                             },
                             style = MaterialTheme.typography.labelMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -57,24 +67,12 @@ fun ME7TunerApp(navState: NavigationState = remember { NavigationState() }) {
 
                         Spacer(modifier = Modifier.height(8.dp))
 
-                        // ECU Platform toggle
-                        SingleChoiceSegmentedButtonRow(modifier = Modifier.padding(horizontal = 4.dp)) {
-                            EcuPlatform.entries.forEachIndexed { index, platform ->
-                                SegmentedButton(
-                                    shape = SegmentedButtonDefaults.itemShape(
-                                        index = index,
-                                        count = EcuPlatform.entries.size
-                                    ),
-                                    onClick = { navState.selectPlatform(platform) },
-                                    selected = navState.ecuPlatform == platform
-                                ) {
-                                    Text(
-                                        text = platform.shortName,
-                                        style = MaterialTheme.typography.labelSmall
-                                    )
-                                }
-                            }
-                        }
+                        // ECU Platform toggle (2×2 grid)
+                        PlatformGrid(
+                            selected = navState.ecuPlatform,
+                            onSelect = { navState.selectPlatform(it) },
+                            modifier = Modifier.padding(horizontal = 4.dp).width(140.dp)
+                        )
                     }
                 }
             ) {
@@ -98,7 +96,17 @@ fun ME7TunerApp(navState: NavigationState = remember { NavigationState() }) {
                                 contentDescription = destination.label
                             )
                         },
-                        label = { Text(destination.label) },
+                        label = {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Text(destination.label)
+                                if (destination == RailDestination.TOOLS) {
+                                    StabilityBadge(StabilityLevel.ALPHA)
+                                }
+                            }
+                        },
                         enabled = enabled
                     )
                 }
@@ -110,6 +118,7 @@ fun ME7TunerApp(navState: NavigationState = remember { NavigationState() }) {
                 when (navState.railDestination) {
                     RailDestination.CONFIGURATION -> {
                         ConfigurationScreen(
+                            navState = navState,
                             trailingContent = {
                                 WorkflowGuidanceCards(
                                     onStartCalibration = { navState.navigateToCalibration() },
@@ -136,6 +145,112 @@ fun ME7TunerApp(navState: NavigationState = remember { NavigationState() }) {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlatformGrid(
+    selected: EcuPlatform,
+    onSelect: (EcuPlatform) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val shape = RoundedCornerShape(12.dp)
+    val outlineColor = MaterialTheme.colorScheme.outline
+    val platforms = EcuPlatform.entries
+
+    Surface(
+        modifier = modifier.clip(shape),
+        shape = shape,
+        border = BorderStroke(1.dp, outlineColor),
+        color = MaterialTheme.colorScheme.surface
+    ) {
+        Column {
+            // Row 1: MOTRONIC, ME7
+            Row(modifier = Modifier.height(48.dp)) {
+                PlatformCell(
+                    platform = platforms[0],
+                    selected = selected == platforms[0],
+                    onSelect = onSelect,
+                    modifier = Modifier.weight(1f).fillMaxHeight()
+                )
+                VerticalDivider(thickness = 1.dp, color = outlineColor)
+                PlatformCell(
+                    platform = platforms[1],
+                    selected = selected == platforms[1],
+                    onSelect = onSelect,
+                    modifier = Modifier.weight(1f).fillMaxHeight()
+                )
+            }
+            HorizontalDivider(thickness = 1.dp, color = outlineColor)
+            // Row 2: MED9, MED17
+            Row(modifier = Modifier.height(48.dp)) {
+                PlatformCell(
+                    platform = platforms[2],
+                    selected = selected == platforms[2],
+                    onSelect = onSelect,
+                    modifier = Modifier.weight(1f).fillMaxHeight()
+                )
+                VerticalDivider(thickness = 1.dp, color = outlineColor)
+                PlatformCell(
+                    platform = platforms[3],
+                    selected = selected == platforms[3],
+                    onSelect = onSelect,
+                    modifier = Modifier.weight(1f).fillMaxHeight()
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PlatformCell(
+    platform: EcuPlatform,
+    selected: Boolean,
+    onSelect: (EcuPlatform) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val backgroundColor = if (selected) {
+        MaterialTheme.colorScheme.secondaryContainer
+    } else {
+        MaterialTheme.colorScheme.surface
+    }
+    val textColor = if (selected) {
+        MaterialTheme.colorScheme.onSecondaryContainer
+    } else {
+        MaterialTheme.colorScheme.onSurface
+    }
+
+    Box(
+        modifier = modifier
+            .background(backgroundColor)
+            .clickable { onSelect(platform) },
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (selected) {
+                    Icon(
+                        imageVector = Icons.Default.Check,
+                        contentDescription = null,
+                        modifier = Modifier.size(12.dp),
+                        tint = textColor
+                    )
+                }
+                Text(
+                    text = platform.shortName,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = textColor
+                )
+            }
+            if (platform.stability != StabilityLevel.STABLE) {
+                StabilityBadge(platform.stability, compact = true)
             }
         }
     }

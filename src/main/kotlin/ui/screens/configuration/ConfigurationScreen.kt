@@ -47,13 +47,13 @@ import data.preferences.krkte.KrktePfiPreferences
 import data.preferences.krkte.KrkteGdiPreferences
 import data.preferences.logheaderdefinition.LogHeaderPreference
 import data.preferences.mlhfm.MlhfmPreferences
-import data.preferences.platform.EcuPlatformPreference
 import data.preferences.rkw.RkwPreferences
 import data.preferences.tvub.TvubPfiPreferences
 import data.preferences.wdkugdn.WdkugdnPreferences
 import data.profile.ProfileManager
 import ui.components.MapPickerDialog
 import ui.components.InfoTooltip
+import ui.navigation.NavigationState
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
@@ -130,6 +130,7 @@ private val defaultHeaderValues = mapOf(
 
 @Composable
 fun ConfigurationScreen(
+    navState: NavigationState,
     trailingContent: (@Composable ColumnScope.() -> Unit)? = null
 ) {
     val scrollState = rememberScrollState()
@@ -174,9 +175,9 @@ fun ConfigurationScreen(
         } else {
             // Auto-apply the matching default profile when both files are loaded
             // and no map definitions have been configured yet.
-            AutoApplyProfile()
+            AutoApplyProfile(navState = navState)
 
-            QuickSetupSection()
+            QuickSetupSection(navState = navState)
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -187,8 +188,8 @@ fun ConfigurationScreen(
             Row(
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                MapDefinitionsSection(modifier = Modifier.weight(1f))
-                LogHeadersSection(modifier = Modifier.weight(1f))
+                MapDefinitionsSection(navState = navState, modifier = Modifier.weight(1f))
+                LogHeadersSection(navState = navState, modifier = Modifier.weight(1f))
             }
 
             if (trailingContent != null) {
@@ -331,10 +332,10 @@ private fun FilesNotLoadedPlaceholder() {
  * resets the guard via the key parameters.
  */
 @Composable
-private fun AutoApplyProfile() {
+private fun AutoApplyProfile(navState: NavigationState) {
     val mapList by BinParser.mapList.collectAsState()
     val allDefaultProfiles by ProfileManager.defaultProfiles.collectAsState()
-    val platform = EcuPlatformPreference.platform
+    val platform = navState.ecuPlatform
 
     val matchingProfiles = remember(allDefaultProfiles, platform) {
         allDefaultProfiles.filter { it.ecuPlatform == platform.name }
@@ -354,18 +355,29 @@ private fun AutoApplyProfile() {
 }
 
 @Composable
-private fun QuickSetupSection() {
+private fun QuickSetupSection(navState: NavigationState) {
     val allDefaultProfiles by ProfileManager.defaultProfiles.collectAsState()
     val allUserProfiles by ProfileManager.userProfiles.collectAsState()
     var statusMessage by remember { mutableStateOf<String?>(null) }
 
-    val platform = EcuPlatformPreference.platform
-    val platformName = platform.name // "ME7" or "MED17"
-    val defaultProfiles = remember(allDefaultProfiles, platform) {
-        allDefaultProfiles.filter { it.ecuPlatform == platformName }
+    // Group all profiles by platform (show all, not just current)
+    val defaultByPlatform = remember(allDefaultProfiles) {
+        allDefaultProfiles.groupBy { it.ecuPlatform }
     }
-    val userProfiles = remember(allUserProfiles, platform) {
-        allUserProfiles.filter { it.ecuPlatform == platformName }
+    val userByPlatform = remember(allUserProfiles) {
+        allUserProfiles.groupBy { it.ecuPlatform }
+    }
+    val allPlatformKeys = remember(defaultByPlatform, userByPlatform) {
+        (defaultByPlatform.keys + userByPlatform.keys).distinct().sorted()
+    }
+
+    /** Switch platform to match the profile (if needed) then apply. */
+    fun applyWithPlatformSwitch(profile: data.profile.ConfigurationProfile) {
+        val profilePlatform = runCatching { EcuPlatform.valueOf(profile.ecuPlatform) }.getOrNull()
+        if (profilePlatform != null && profilePlatform != navState.ecuPlatform) {
+            navState.selectPlatform(profilePlatform)
+        }
+        ProfileManager.applyProfile(profile)
     }
 
     Column {
@@ -386,21 +398,28 @@ private fun QuickSetupSection() {
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                if (defaultProfiles.isNotEmpty()) {
-                    for (profile in defaultProfiles) {
+                for (platformKey in allPlatformKeys) {
+                    val defaults = defaultByPlatform[platformKey].orEmpty()
+                    val users = userByPlatform[platformKey].orEmpty()
+                    if (defaults.isEmpty() && users.isEmpty()) continue
+
+                    // Platform section header
+                    Text(
+                        text = platformKey,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                    )
+
+                    for (profile in defaults) {
                         ProfileRow(profile = profile, onApply = {
-                            ProfileManager.applyProfile(profile)
+                            applyWithPlatformSwitch(profile)
                             statusMessage = "Applied profile: ${profile.name}"
                         })
                     }
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-                }
-
-                if (userProfiles.isNotEmpty()) {
-                    for (profile in userProfiles) {
+                    for (profile in users) {
                         ProfileRow(profile = profile, onApply = {
-                            ProfileManager.applyProfile(profile)
+                            applyWithPlatformSwitch(profile)
                             statusMessage = "Applied profile: ${profile.name}"
                         })
                     }
@@ -413,14 +432,14 @@ private fun QuickSetupSection() {
                 ) {
                     OutlinedButton(onClick = {
                         val dialog = FileDialog(null as Frame?, "Load Profile", FileDialog.LOAD)
-                        dialog.setFilenameFilter { _, name -> name.endsWith(".me7profile.json", ignoreCase = true) }
+                        dialog.setFilenameFilter { _, name -> name.endsWith(".mxtprofile.json", ignoreCase = true) }
                         dialog.isVisible = true
                         val dir = dialog.directory
                         val file = dialog.file
                         if (dir != null && file != null) {
                             runCatching {
                                 val profile = ProfileManager.loadFromFile(File(dir, file))
-                                ProfileManager.applyProfile(profile)
+                                applyWithPlatformSwitch(profile)
                                 ProfileManager.addUserProfile(profile)
                                 statusMessage = "Loaded and applied profile: ${profile.name}"
                             }.onFailure {
@@ -441,7 +460,7 @@ private fun QuickSetupSection() {
                             )
                             if (name != null && name.isNotBlank()) {
                                 val dialog = FileDialog(null as Frame?, "Save Profile", FileDialog.SAVE)
-                                dialog.file = "${name.replace(Regex("[^a-zA-Z0-9_ -]"), "")}.me7profile.json"
+                                dialog.file = "${name.replace(Regex("[^a-zA-Z0-9_ -]"), "")}.mxtprofile.json"
                                 dialog.isVisible = true
                                 val dir = dialog.directory
                                 val fileName = dialog.file
@@ -530,10 +549,10 @@ private fun ProfileRow(profile: data.profile.ConfigurationProfile, onApply: () -
 }
 
 @Composable
-private fun MapDefinitionsSection(modifier: Modifier = Modifier) {
+private fun MapDefinitionsSection(navState: NavigationState, modifier: Modifier = Modifier) {
     val tableDefinitions by XdfParser.tableDefinitions.collectAsState()
     val mapList by BinParser.mapList.collectAsState()
-    val platform = EcuPlatformPreference.platform
+    val platform = navState.ecuPlatform
     val mapDefinitions = remember(platform) { mapDefinitionsForPlatform(platform) }
 
     var pickerDialogEntry by remember { mutableStateOf<MapDefinitionEntry?>(null) }
@@ -656,8 +675,8 @@ private fun MapDefinitionRow(
 }
 
 @Composable
-private fun LogHeadersSection(modifier: Modifier = Modifier) {
-    val isMed17 = EcuPlatformPreference.platform == EcuPlatform.MED17
+private fun LogHeadersSection(navState: NavigationState, modifier: Modifier = Modifier) {
+    val isMed17 = navState.ecuPlatform == EcuPlatform.MED17
     var expanded by remember { mutableStateOf(false) }
     var headerVersion by remember { mutableStateOf(0) }
 

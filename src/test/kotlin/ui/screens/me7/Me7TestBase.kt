@@ -26,7 +26,7 @@ import kotlin.test.assertTrue
 abstract class Me7TestBase(
     private val xdfRelPath: String = STOCK_XDF_REL,
     private val binRelPath: String = STOCK_BIN_REL,
-    private val profileResource: String = "/profiles/MBox.me7profile.json"
+    private val profileResource: String = "/profiles/MBox.mxtprofile.json"
 ) {
 
     companion object {

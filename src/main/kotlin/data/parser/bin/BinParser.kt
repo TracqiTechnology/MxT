@@ -1,5 +1,8 @@
 package data.parser.bin
 
+import data.parser.csv.WinOlsCsvDefinitionAdapter
+import data.parser.csv.WinOlsCsvMapDefinition
+import data.parser.csv.WinOlsCsvParser
 import data.parser.xdf.AxisDefinition
 import data.parser.xdf.TableDefinition
 import data.parser.xdf.XdfParser
@@ -27,12 +30,17 @@ object BinParser {
 
     fun init() {
         scope.launch {
-            combine(BinFilePreferences.file, XdfParser.tableDefinitions) { file, defs ->
-                file to defs
-            }.collect { (file, defs) ->
+            combine(
+                BinFilePreferences.file,
+                XdfParser.tableDefinitions,
+                WinOlsCsvParser.definitions
+            ) { file, xdfDefs, csvDefs ->
+                Triple(file, xdfDefs, csvDefs)
+            }.collect { (file, xdfDefs, csvDefs) ->
                 binaryFile = file
+                val merged = mergeDefinitions(xdfDefs, csvDefs)
                 if (file.exists() && file.isFile) {
-                    try { parseMutex.withLock { parse(FileInputStream(file), defs) } }
+                    try { parseMutex.withLock { parse(FileInputStream(file), merged) } }
                     catch (e: IOException) { e.printStackTrace() }
                 }
             }
@@ -40,11 +48,30 @@ object BinParser {
         scope.launch {
             BinWriter.writeEvents.collect {
                 if (binaryFile.exists() && binaryFile.isFile) {
-                    try { parseMutex.withLock { parse(FileInputStream(binaryFile), XdfParser.tableDefinitions.value) } }
+                    val merged = mergeDefinitions(
+                        XdfParser.tableDefinitions.value,
+                        WinOlsCsvParser.definitions.value
+                    )
+                    try { parseMutex.withLock { parse(FileInputStream(binaryFile), merged) } }
                     catch (e: IOException) { e.printStackTrace() }
                 }
             }
         }
+    }
+
+    /**
+     * Merge XDF and CSV-derived table definitions. XDF definitions always take
+     * priority; CSV definitions only fill gaps (maps not already in the XDF).
+     */
+    internal fun mergeDefinitions(
+        xdfDefs: List<TableDefinition>,
+        csvDefs: List<WinOlsCsvMapDefinition>
+    ): List<TableDefinition> {
+        if (csvDefs.isEmpty()) return xdfDefs
+        val csvTableDefs = WinOlsCsvDefinitionAdapter.toTableDefinitions(csvDefs)
+        if (xdfDefs.isEmpty()) return csvTableDefs
+        val xdfNames = xdfDefs.map { it.tableName.lowercase() }.toSet()
+        return xdfDefs + csvTableDefs.filter { it.tableName.lowercase() !in xdfNames }
     }
 
     private fun parse(inputStream: InputStream, tableDefinitions: List<TableDefinition>) {
