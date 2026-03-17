@@ -32,8 +32,9 @@ fun MapPickerDialog(
         .removeSuffix(" Map")
         .trim()
 ) {
-    // Observe KP hints and CSV definitions.
+    // Observe KP hints, KP definitions, and CSV definitions.
     val kpHints by KpHintParser.hints.collectAsState()
+    val kpDefinitions by KpHintParser.definitions.collectAsState()
     val csvDefinitions by WinOlsCsvParser.definitions.collectAsState()
 
     // Find the KP hint (if any) that matches the map we're looking for.
@@ -44,6 +45,11 @@ fun MapPickerDialog(
     // Find a matching WinOLS CSV definition for richer hint metadata.
     val csvHint = remember(initialFilter, csvDefinitions) {
         csvDefinitions.firstOrNull { it.id.equals(initialFilter, ignoreCase = true) }
+    }
+
+    // Find a matching KP full definition (richer than hint — has dimensions/units/scaling).
+    val kpDef = remember(initialFilter, kpDefinitions) {
+        kpDefinitions.firstOrNull { it.name.equals(initialFilter, ignoreCase = true) }
     }
 
     // Use TextFieldValue so we can place the cursor at the end of the pre-populated text,
@@ -69,14 +75,15 @@ fun MapPickerDialog(
         }
     }
 
-    // When a KP hint with an address is available, prefer the XDF definition whose
-    // z-axis address matches the KP AR address.
-    val kpPreferredDefinition = remember(kpHint, csvHint, tableDefinitions) {
-        // Prefer CSV address (more reliable, explicit column) over KP parsed address
+    // When a KP hint/definition or CSV hint with an address is available,
+    // prefer the table definition whose z-axis address matches.
+    val kpPreferredDefinition = remember(kpHint, kpDef, csvHint, tableDefinitions) {
+        // Prefer CSV address (most reliable), then KP definition z-address, then KP hint AR address
         val preferredAddress = when {
-            csvHint != null && csvHint.hasAddress -> csvHint.address
-            kpHint != null && kpHint.hasAddress   -> kpHint.arAddress
-            else                                  -> -1
+            csvHint != null && csvHint.hasAddress   -> csvHint.address
+            kpDef != null && kpDef.hasAddress        -> kpDef.effectiveAddress
+            kpHint != null && kpHint.hasAddress      -> kpHint.arAddress
+            else                                     -> -1
         }
         if (preferredAddress > 0) {
             tableDefinitions.firstOrNull { def -> def.zAxis.address == preferredAddress }
@@ -127,15 +134,37 @@ fun MapPickerDialog(
                     }
                 }
 
-                // KP hint badge — shown when a WinOLS KP file is loaded and has a match
+                // KP badge — shown when a WinOLS KP file is loaded and has a match
                 // (shown alongside CSV hint if both are available)
-                if (kpHint != null && csvHint == null) {
-                    val addrStr = if (kpHint.hasAddress) " @ 0x${kpHint.arAddress.toString(16).uppercase()}" else ""
-                    Text(
-                        text = "WinOLS KP: ${kpHint.name}$addrStr — ${kpHint.description.take(60)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                if (csvHint == null && (kpDef != null || kpHint != null)) {
+                    if (kpDef != null) {
+                        // Rich badge with dimensions, units, scaling (from full KP parsing)
+                        val addrStr = if (kpDef.hasAddress) " @ 0x${kpDef.effectiveAddress.toString(16).uppercase()}" else ""
+                        val dimStr = if (kpDef.is2D) " [${kpDef.dimensionString}]"
+                                     else " [${maxOf(kpDef.columns, kpDef.rows)}]"
+                        val unitStr = if (kpDef.units.isNotBlank()) " — ${kpDef.units}" else ""
+                        val scaleStr = if (kpDef.scale != 1.0) " × ${kpDef.scale}" else ""
+                        Text(
+                            text = "WinOLS KP: ${kpDef.name}$addrStr$dimStr$unitStr$scaleStr",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else if (kpHint != null) {
+                        // Basic badge (name + address only)
+                        val addrStr = if (kpHint.hasAddress) " @ 0x${kpHint.arAddress.toString(16).uppercase()}" else ""
+                        Text(
+                            text = "WinOLS KP: ${kpHint.name}$addrStr — ${kpHint.description.take(60)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    if (kpDef != null && kpDef.description.isNotBlank()) {
+                        Text(
+                            text = kpDef.description.take(80),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         },

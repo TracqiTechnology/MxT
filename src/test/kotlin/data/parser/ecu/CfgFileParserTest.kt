@@ -6,7 +6,7 @@ import java.io.File
 
 class CfgFileParserTest {
 
-    private val fixtureFile = File("technical/med9/me7logger/MED9_0261S02469_basic.cfg")
+    private val fixtureFile = File("example/med9/MED9_0261S02469_basic.cfg")
 
     @Test
     fun `parse configuration section`() {
@@ -54,7 +54,7 @@ class CfgFileParserTest {
     @Test
     fun `cross-reference variables against ecu file`() {
         val cfg = CfgFileParser.parse(fixtureFile)
-        val ecu = EcuFileParser.parse(File("technical/med9/me7logger/MED9_0261S02469.ecu"))
+        val ecu = EcuFileParser.parse(File("example/med9/MED9_0261S02469.ecu"))
 
         // Every .cfg variable should exist in the .ecu file
         for (cfgVar in cfg.variables) {
@@ -95,7 +95,7 @@ class CfgFileParserTest {
 
     @Test
     fun `parse full config file`() {
-        val fullCfg = CfgFileParser.parse(File("technical/med9/me7logger/MED9_0261S02469_full.cfg"))
+        val fullCfg = CfgFileParser.parse(File("example/med9/MED9_0261S02469_full.cfg"))
         assertTrue(fullCfg.variables.size > cfg_basic_count(),
             "Full config should have more variables than basic")
     }
