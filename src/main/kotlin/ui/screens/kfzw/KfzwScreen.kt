@@ -54,6 +54,7 @@ private fun computeRescaledOutput(input: Map3d, targetMax: Double): Map3d? {
 @Composable
 fun KfzwScreen() {
     val isMed17 = EcuPlatformPreference.platform == EcuPlatform.MED17
+    val isMed9 = EcuPlatformPreference.platform == EcuPlatform.MED9
     val mapList by BinParser.mapList.collectAsState()
     val tableDefinitions by XdfParser.tableDefinitions.collectAsState()
 
@@ -73,8 +74,10 @@ fun KfzwScreen() {
     // Detect scalar KFMIOP (DS1: 1x1 map with empty axes)
     val kfmiopIsScalar = inputKfmiop != null && inputKfmiop.xAxis.isEmpty() && inputKfmiop.yAxis.isEmpty()
 
-    // Use multi-switch-map mode when MED17 + scalar KFMIOP
-    val useMultiSwitchMode = isMed17 && kfmiopIsScalar
+    // Use multi-switch-map mode when MED17 + scalar KFMIOP (DS1 pattern)
+    // or MED9 with switch maps loaded (3 KFZW variants)
+    val hasSwitchMaps = KfzwSwitchMapPreferences.count > 0
+    val useMultiSwitchMode = (isMed17 && kfmiopIsScalar) || (isMed9 && hasSwitchMaps)
 
     if (useMultiSwitchMode) {
         KfzwMultiSwitchScreen(

@@ -16,6 +16,9 @@ class NavigationState {
     var calibrationTab by mutableStateOf(CalibrationTab.FUELING)
         private set
 
+    var toolsTab by mutableStateOf(ToolsTab.LOGGER)
+        private set
+
     // Sub-tab state (used by screenshot harness; screens read for initial values)
     var closedLoopTab by mutableStateOf(0)
     var closedLoopCorrectionSubTab by mutableStateOf(0)
@@ -40,6 +43,15 @@ class NavigationState {
 
     fun selectCalibrationTab(tab: CalibrationTab) {
         calibrationTab = tab
+    }
+
+    fun navigateToTools(tab: ToolsTab = toolsTab) {
+        toolsTab = tab
+        railDestination = RailDestination.TOOLS
+    }
+
+    fun selectToolsTab(tab: ToolsTab) {
+        toolsTab = tab
     }
 
     fun selectPlatform(platform: EcuPlatform) {

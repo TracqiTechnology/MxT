@@ -148,7 +148,7 @@ fun OpenLoopScreen(
             IconButton(
                 onClick = {
                     try {
-                        Desktop.getDesktop().browse(URI("https://github.com/KalebKE/ME7Tuner#open-loop"))
+                        Desktop.getDesktop().browse(URI("https://github.com/TracqiTechnology/MxT#open-loop"))
                     } catch (_: Exception) { }
                 },
                 modifier = Modifier.align(Alignment.CenterEnd)

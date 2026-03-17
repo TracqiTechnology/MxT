@@ -1,0 +1,110 @@
+{
+    "name": "VW/Audi 1.8T AGU — Motronic 3.8.3",
+    "description": "EA827 1.8T (AGU/AEB/APU/AJL). Motronic 3.8.3, K03 turbo. Stock 210cc port injectors. 512KB/1MB BIN.",
+    "ecuPlatform": "MOTRONIC",
+    "ecuPartNumbers": ["8D0907558C", "8D0907558E", "06A906018BS"],
+    "mapDefinitions": {
+        "KRKTE": {
+            "tableName": "FGAT0",
+            "tableDescription": "Grundanpassungsfaktor 0",
+            "unit": "-"
+        },
+        "MLHFM": {
+            "tableName": "MLHFM",
+            "tableDescription": "Linearisierung der Heissfilmspannung",
+            "unit": "kg/h"
+        },
+        "KFMIOP": {
+            "tableName": "KFMDOPT",
+            "tableDescription": "Motormoment aus Hochdruckphase bei optimalem Zuendwinkel",
+            "unit": "Nm"
+        },
+        "KFZWOP": {
+            "tableName": "KFZWOPT",
+            "tableDescription": "optimaler Zuendwinkel",
+            "unit": "grad KW"
+        },
+        "KFZW": {
+            "tableName": "KFZW",
+            "tableDescription": "Zuendwinkelkennfeld",
+            "unit": "grad KW"
+        },
+        "WDKUGDN": {
+            "tableName": "KFTLWS",
+            "tableDescription": "Kennfeld fuer tL-Berechnung aus Drosselklappenwinkel",
+            "unit": "ms/rev"
+        },
+        "KFLDRL": {
+            "tableName": "KFLDS",
+            "tableDescription": "Kennfeld LDR-Sollwert",
+            "unit": "ms/rev"
+        },
+        "KFLDIMX": {
+            "tableName": "LDSMXN",
+            "tableDescription": "LDR-Sollwertbegrenzung",
+            "unit": "ms/rev"
+        }
+    },
+    "primaryFueling": {
+        "airDensity": 1.2929,
+        "displacement": 0.4453,
+        "numCylinders": 4,
+        "stoichiometricAfr": 14.7,
+        "gasolineGramsPerCcm": 0.7,
+        "fuelInjectorSize": 210.0
+    },
+    "plsol": {
+        "barometricPressure": 1013.0,
+        "intakeAirTemperature": 20.0,
+        "kfurl": 0.1037,
+        "displacement": 1.781,
+        "rpm": 6500
+    },
+    "kfmiop": {
+        "maxMapPressure": 2300.0,
+        "maxBoostPressure": 1800.0
+    },
+    "kfvpdksd": {
+        "maxWastegateCrackingPressure": 200.0
+    },
+    "wdkugdn": {
+        "displacement": 1.781
+    },
+    "closedLoopFueling": {
+        "minThrottleAngle": 0.0,
+        "minRpm": 0.0,
+        "maxDerivative": 50.0
+    },
+    "openLoopFueling": {
+        "minThrottleAngle": 80.0,
+        "minRpm": 2000.0,
+        "minMe7Points": 75,
+        "minAfrPoints": 150,
+        "maxAfr": 16.0,
+        "fuelInjectorSize": 210.0,
+        "gasolineGramsPerCcm": 0.7,
+        "numFuelInjectors": 4.0
+    },
+    "logHeaders": {
+        "START_TIME_HEADER": "start_time",
+        "TIME_STAMP_COLUMN_HEADER": "TIME",
+        "RPM_COLUMN_HEADER": "nmot",
+        "STFT_COLUMN_HEADER": "fr_w",
+        "LTFT_COLUMN_HEADER": "fra_w",
+        "MAF_VOLTAGE_HEADER": "uhfm_w",
+        "MAF_GRAMS_PER_SECOND_HEADER": "mshfm_w",
+        "THROTTLE_PLATE_ANGLE_HEADER": "wdkba",
+        "LAMBDA_CONTROL_ACTIVE_HEADER": "B_lr",
+        "REQUESTED_LAMBDA_HEADER": "lamsbg_w",
+        "FUEL_INJECTOR_ON_TIME_HEADER": "ti_w",
+        "ENGINE_LOAD_HEADER": "rl_w",
+        "WASTEGATE_DUTY_CYCLE_HEADER": "ldtvm",
+        "BAROMETRIC_PRESSURE_HEADER": "pus_w",
+        "ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER": "pvdks_w",
+        "SELECTED_GEAR_HEADER": "gangi",
+        "WIDE_BAND_O2_HEADER": "lamsoni_w",
+        "REQUESTED_PRESSURE_HEADER": "pssol_w",
+        "REQUESTED_LOAD_HEADER": "rlsol_w",
+        "ACTUAL_LOAD_HEADER": "rl"
+    }
+}

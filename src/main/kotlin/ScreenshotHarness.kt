@@ -42,10 +42,11 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.jetbrains.skia.EncodedImageFormat
 import ui.navigation.CalibrationTab
-import ui.navigation.ME7TunerApp
+import ui.navigation.MxTApp
 import ui.navigation.NavigationState
 import ui.navigation.RailDestination
-import ui.theme.ME7TunerTheme
+import ui.navigation.ToolsTab
+import ui.theme.MxTTheme
 import java.io.File
 import java.util.Locale
 
@@ -110,7 +111,7 @@ fun main() {
                         color = MaterialTheme.colorScheme.primaryContainer
                     )
                     Text(
-                        text = "ME7Tuner",
+                        text = "MxT",
                         style = MaterialTheme.typography.labelMedium.copy(fontSize = 16.sp),
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -125,69 +126,69 @@ fun main() {
     captureScreen("me7Tuner.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.FUELING)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreen("krkte.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.FUELING)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // Configuration
     captureScreen("configuration.png") {
         val navState = NavigationState()
         navState.navigateTo(RailDestination.CONFIGURATION)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // PLSOL
     captureScreen("plsol.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.PLSOL)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFMIOP
     captureScreen("kfmiop.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFMIOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFMIRL
     captureScreen("kfmirl.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFMIRL)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFZWOP
     captureScreen("kfzwop.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFZWOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFZW
     captureScreen("kfzw.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFZW)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // WDKUGDN
     captureScreen("wdkugdn.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.WDKUGDN)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // LDRPID (no log data — renders in ready state)
     captureScreen("ldrpid.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.LDRPID)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // --- Log-dependent screens ---
@@ -196,14 +197,14 @@ fun main() {
     captureScreen("closed_loop_mlhfm.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.CLOSED_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // Open Loop: empty state (no log data)
     captureScreen("open_loop_mlhfm.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.OPEN_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFVPDKSD: load logs
@@ -215,7 +216,7 @@ fun main() {
     ) {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFVPDKSD)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // --- Closed Loop sub-tab screenshots (all need log data) ---
@@ -227,7 +228,7 @@ fun main() {
         val navState = NavigationState()
         navState.closedLoopTab = 0
         navState.navigateToCalibration(CalibrationTab.CLOSED_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithLogData(
@@ -238,7 +239,7 @@ fun main() {
         navState.closedLoopTab = 2
         navState.closedLoopCorrectionSubTab = 0
         navState.navigateToCalibration(CalibrationTab.CLOSED_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithLogData(
@@ -249,7 +250,7 @@ fun main() {
         navState.closedLoopTab = 2
         navState.closedLoopCorrectionSubTab = 1
         navState.navigateToCalibration(CalibrationTab.CLOSED_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithLogData(
@@ -260,7 +261,7 @@ fun main() {
         navState.closedLoopTab = 2
         navState.closedLoopCorrectionSubTab = 2
         navState.navigateToCalibration(CalibrationTab.CLOSED_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithLogData(
@@ -272,7 +273,7 @@ fun main() {
         navState.closedLoopCorrectionSubTab = 2
         navState.autoFitDegree = 6
         navState.navigateToCalibration(CalibrationTab.CLOSED_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // --- Open Loop sub-tab screenshots (all need log data) ---
@@ -288,7 +289,7 @@ fun main() {
         navState.openLoopTab = 0
         navState.openLoopLogSubTab = 0
         navState.navigateToCalibration(CalibrationTab.OPEN_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithLogData(
@@ -302,7 +303,7 @@ fun main() {
         navState.openLoopTab = 0
         navState.openLoopLogSubTab = 1
         navState.navigateToCalibration(CalibrationTab.OPEN_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithTwoPhaseLogData(
@@ -314,7 +315,7 @@ fun main() {
         navState.openLoopTab = 2
         navState.openLoopCorrectionSubTab = 0
         navState.navigateToCalibration(CalibrationTab.OPEN_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithTwoPhaseLogData(
@@ -326,7 +327,7 @@ fun main() {
         navState.openLoopTab = 2
         navState.openLoopCorrectionSubTab = 1
         navState.navigateToCalibration(CalibrationTab.OPEN_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithTwoPhaseLogData(
@@ -339,7 +340,7 @@ fun main() {
         navState.openLoopCorrectionSubTab = 0
         navState.autoFitDegree = 6
         navState.navigateToCalibration(CalibrationTab.OPEN_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // --- PLSOL sub-tab screenshots (no log data needed) ---
@@ -348,17 +349,36 @@ fun main() {
         val navState = NavigationState()
         navState.plsolTab = 1
         navState.navigateToCalibration(CalibrationTab.PLSOL)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreen("plsol_power.png") {
         val navState = NavigationState()
         navState.plsolTab = 2
         navState.navigateToCalibration(CalibrationTab.PLSOL)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     println("All ME7 screenshots generated.\n")
+
+    // --- Tools Screenshots (platform-independent) ---
+    println("\n--- Tools Screenshots ---")
+
+    // A2L → ECU Generator (empty state — shows UI layout)
+    captureScreen("tools/a2l_generator.png") {
+        val navState = NavigationState()
+        navState.navigateToTools(ToolsTab.A2L_GENERATOR)
+        MxTApp(navState)
+    }
+
+    // Data Logger — Connection tab (empty state)
+    captureScreen("tools/logger_connection.png") {
+        val navState = NavigationState()
+        navState.navigateToTools(ToolsTab.LOGGER)
+        MxTApp(navState)
+    }
+
+    println("All Tools screenshots generated.\n")
 
     // --- MED17 Screenshots ---
     println("\n--- MED17 Screenshots ---")
@@ -390,84 +410,84 @@ fun main() {
     captureScreen("med17/me7Tuner_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.FUELING)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // MED17 Configuration
     captureScreen("med17/configuration_med17.png") {
         val navState = NavigationState()
         navState.navigateTo(RailDestination.CONFIGURATION)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // Dual Injection (MED17-only tab)
     captureScreen("med17/dual_injection.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.DUAL_INJECTION)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFMIOP in MED17 mode
     captureScreen("med17/kfmiop_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFMIOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFMIRL in MED17 mode
     captureScreen("med17/kfmirl_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFMIRL)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // LDRPID in MED17 mode
     captureScreen("med17/ldrpid_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.LDRPID)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // PLSOL in MED17 mode
     captureScreen("med17/plsol_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.PLSOL)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // Optimizer in MED17 mode
     captureScreen("med17/optimizer_med17.png") {
         val navState = NavigationState()
         navState.navigateToOptimizer()
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // Fuel Trim (MED17-only)
     captureScreen("med17/fuel_trim_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.FUEL_TRIM)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFZWOP in MED17 mode
     captureScreen("med17/kfzwop_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFZWOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFZW in MED17 mode
     captureScreen("med17/kfzw_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFZW)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // Fueling in MED17 mode (KRKTE with dual presets)
     captureScreen("med17/fueling_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.FUELING)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // Restore ME7 platform
@@ -496,7 +516,7 @@ private fun captureScreen(
 ) {
     print("Capturing $filename...")
     val scene = ImageComposeScene(width, height, density = Density(1f)) {
-        ME7TunerTheme { content() }
+        MxTTheme { content() }
     }
     // Render multiple frames to settle LaunchedEffects and collectAsState
     repeat(20) { scene.render(it * 16_000_000L) }
@@ -517,7 +537,7 @@ private fun captureScreenWithLogData(
 ) {
     print("Capturing $filename (with log data)...")
     val scene = ImageComposeScene(width, height, density = Density(1f)) {
-        ME7TunerTheme { content() }
+        MxTTheme { content() }
     }
     // Initial render to start LaunchedEffect collectors
     repeat(5) { scene.render(it * 16_000_000L) }
@@ -552,7 +572,7 @@ private fun captureScreenWithTwoPhaseLogData(
 ) {
     print("Capturing $filename (with log data)...")
     val scene = ImageComposeScene(width, height, density = Density(1f)) {
-        ME7TunerTheme { content() }
+        MxTTheme { content() }
     }
     // Initial render to start LaunchedEffect collectors
     repeat(5) { scene.render(it * 16_000_000L) }

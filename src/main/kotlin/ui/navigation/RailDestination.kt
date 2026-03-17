@@ -3,6 +3,7 @@ package ui.navigation
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.TrendingUp
 import androidx.compose.material.icons.filled.Build
+import androidx.compose.material.icons.filled.Handyman
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.ui.graphics.vector.ImageVector
 
@@ -20,6 +21,11 @@ enum class RailDestination(
         label = "Calibration",
         icon = Icons.Default.Build,
         description = "Calibrate base fueling, torque, ignition, and boost maps"
+    ),
+    TOOLS(
+        label = "Tools",
+        icon = Icons.Default.Handyman,
+        description = "A2L→ECU generator, data logger, and utilities"
     ),
     OPTIMIZER(
         label = "Optimizer",

@@ -39,7 +39,7 @@ class Med17MultiVariantProfileTest {
 
     private fun loadProfile(): ConfigurationProfile {
         val stream = ProfileManager::class.java.getResourceAsStream(
-            "/profiles/MED17_162_RS3_TTRS_2_5T.me7profile.json"
+            "/profiles/MED17_162_RS3_TTRS_2_5T.mxtprofile.json"
         ) ?: error("MED17 profile not found on classpath")
         return JSON.decodeFromString(ConfigurationProfile.serializer(), stream.bufferedReader().readText())
     }

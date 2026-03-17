@@ -111,7 +111,7 @@ class Me7MultiVariantTest {
         stockBinCopy = File.createTempFile("me7_stock_${variant.name}_", ".bin")
         binFile.copyTo(stockBinCopy, overwrite = true)
 
-        val stream = ProfileManager::class.java.getResourceAsStream("/profiles/MBox.me7profile.json")
+        val stream = ProfileManager::class.java.getResourceAsStream("/profiles/MBox.mxtprofile.json")
             ?: error("MBox profile not found")
         val profile = Me7TestBase.profileJson.decodeFromString(
             data.profile.ConfigurationProfile.serializer(), stream.bufferedReader().readText()

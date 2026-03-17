@@ -83,7 +83,7 @@ abstract class Med17ScreenTestBase {
 
         // Load and apply MED17 profile
         val stream = ProfileManager::class.java.getResourceAsStream(
-            "/profiles/MED17_162_RS3_TTRS_2_5T.me7profile.json"
+            "/profiles/MED17_162_RS3_TTRS_2_5T.mxtprofile.json"
         ) ?: error("MED17 profile not found on classpath")
         profile = profileJson.decodeFromString(
             ConfigurationProfile.serializer(), stream.bufferedReader().readText()

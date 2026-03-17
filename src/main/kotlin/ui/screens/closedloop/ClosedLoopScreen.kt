@@ -121,7 +121,7 @@ fun ClosedLoopScreen(
             IconButton(
                 onClick = {
                     try {
-                        Desktop.getDesktop().browse(URI("https://github.com/KalebKE/ME7Tuner#closed-loop-mlhfm"))
+                        Desktop.getDesktop().browse(URI("https://github.com/TracqiTechnology/MxT#closed-loop-mlhfm"))
                     } catch (_: Exception) { }
                 },
                 modifier = Modifier.align(Alignment.CenterEnd)

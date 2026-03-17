@@ -1943,7 +1943,7 @@ private fun ExportTab(
                     // XDF Patch Export
                     Button(onClick = {
                         val dialog = FileDialog(Frame(), "Save XDF Patch", FileDialog.SAVE)
-                        dialog.file = "ME7Tuner_corrections.xdf"
+                        dialog.file = "MxT_corrections.xdf"
                         dialog.isVisible = true
                         val dir = dialog.directory
                         val file = dialog.file
@@ -1968,7 +1968,7 @@ private fun ExportTab(
                     // HTML Report Export
                     Button(onClick = {
                         val dialog = FileDialog(Frame(), "Save HTML Report", FileDialog.SAVE)
-                        dialog.file = "ME7Tuner_report.html"
+                        dialog.file = "MxT_report.html"
                         dialog.isVisible = true
                         val dir = dialog.directory
                         val file = dialog.file

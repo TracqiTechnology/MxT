@@ -56,6 +56,7 @@ object ProfileManager {
 
     private val mapPreferencesByKey: Map<String, MapPreference> = mapOf(
         "KRKTE" to KrktePreferences,
+        "KRKATE" to KrktePreferences, // MED9 equivalent of KRKTE
         "MLHFM" to MlhfmPreferences,
         "KFMIOP" to KfmiopPreferences,
         "KFMIRL" to KfmirlPreferences,
@@ -331,7 +332,7 @@ object ProfileManager {
         val index = ProfileManager::class.java.getResourceAsStream("/profiles/index.txt")
             ?.bufferedReader()?.readLines() ?: return emptyList()
         return index
-            .filter { it.isNotBlank() && it.endsWith(".me7profile.json") }
+            .filter { it.isNotBlank() && it.endsWith(".mxtprofile.json") }
             .mapNotNull { fileName ->
                 ProfileManager::class.java.getResourceAsStream("/profiles/$fileName")?.let { stream ->
                     runCatching {
@@ -342,6 +343,6 @@ object ProfileManager {
     }
 
     fun addUserProfile(profile: ConfigurationProfile) {
-        _userProfiles.value = _userProfiles.value + profile
+        _userProfiles.value = _userProfiles.value.filter { it.name != profile.name } + profile
     }
 }

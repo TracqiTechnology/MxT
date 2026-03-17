@@ -78,7 +78,7 @@ class BinWriterEndToEndTest {
 
     /** Copy the BIN to a temp file and return it. */
     private fun copyBin(): File {
-        val tmp = File.createTempFile("me7tuner_test_", ".bin")
+        val tmp = File.createTempFile("mxt_test_", ".bin")
         tmp.deleteOnExit()
         BIN_FILE.copyTo(tmp, overwrite = true)
         return tmp

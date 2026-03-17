@@ -30,13 +30,13 @@ class ProfileManagerTest {
 
     @Test
     fun `MED17 profile med17LogHeaders is not empty`() {
-        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.me7profile.json")
+        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.mxtprofile.json")
         assertTrue(profile.med17LogHeaders.isNotEmpty(), "med17LogHeaders should not be empty")
     }
 
     @Test
     fun `MED17 profile key headers have correct signal names`() {
-        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.me7profile.json")
+        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.mxtprofile.json")
         val h = profile.med17LogHeaders
 
         assertEquals("nmot_w", h["RPM_COLUMN_HEADER"], "RPM → nmot_w")
@@ -48,7 +48,7 @@ class ProfileManagerTest {
 
     @Test
     fun `MED17 profile has entries for all Med17 Header enum values`() {
-        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.me7profile.json")
+        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.mxtprofile.json")
         val headerKeys = profile.med17LogHeaders.keys
 
         for (header in Med17LogFileContract.Header.entries) {
@@ -61,7 +61,7 @@ class ProfileManagerTest {
 
     @Test
     fun `MED17 profile has med17LogHeaders matching enum size`() {
-        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.me7profile.json")
+        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.mxtprofile.json")
         assertEquals(
             Med17LogFileContract.Header.entries.size,
             profile.med17LogHeaders.size,
@@ -73,7 +73,7 @@ class ProfileManagerTest {
 
     @Test
     fun `MED17 profile dualInjection has expected values`() {
-        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.me7profile.json")
+        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.mxtprofile.json")
         val di = profile.dualInjection
 
         assertEquals(220.0, di.portInjectorFlowRateCcMin, "portInjectorFlowRateCcMin")
@@ -86,13 +86,13 @@ class ProfileManagerTest {
 
     @Test
     fun `MED17 profile ecuPlatform is MED17`() {
-        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.me7profile.json")
+        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.mxtprofile.json")
         assertEquals("MED17", profile.ecuPlatform)
     }
 
     @Test
     fun `MED17 profile has critical map definitions`() {
-        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.me7profile.json")
+        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.mxtprofile.json")
         val maps = profile.mapDefinitions.keys
         val required = listOf("KFMIOP", "KFMIRL", "KFZWOP", "KFZW", "KFLDRL", "KFLDIMX")
         for (key in required) {
@@ -104,13 +104,13 @@ class ProfileManagerTest {
 
     @Test
     fun `MBox profile logHeaders is not empty`() {
-        val profile = loadProfile("MBox.me7profile.json")
+        val profile = loadProfile("MBox.mxtprofile.json")
         assertTrue(profile.logHeaders.isNotEmpty(), "logHeaders should not be empty")
     }
 
     @Test
     fun `MBox profile key ME7 headers have correct signal names`() {
-        val profile = loadProfile("MBox.me7profile.json")
+        val profile = loadProfile("MBox.mxtprofile.json")
         val h = profile.logHeaders
 
         assertEquals("nmot", h["RPM_COLUMN_HEADER"], "RPM → nmot")
@@ -120,13 +120,13 @@ class ProfileManagerTest {
 
     @Test
     fun `MBox profile med17LogHeaders is empty`() {
-        val profile = loadProfile("MBox.me7profile.json")
+        val profile = loadProfile("MBox.mxtprofile.json")
         assertTrue(profile.med17LogHeaders.isEmpty(), "ME7 profiles should not have MED17 headers")
     }
 
     @Test
     fun `MBox profile ecuPlatform defaults to ME7`() {
-        val profile = loadProfile("MBox.me7profile.json")
+        val profile = loadProfile("MBox.mxtprofile.json")
         assertEquals("ME7", profile.ecuPlatform)
     }
 
@@ -222,7 +222,7 @@ class ProfileManagerTest {
         val index = this::class.java.getResourceAsStream("/profiles/index.txt")
             ?.bufferedReader()?.readLines() ?: fail("index.txt not found")
 
-        val profileFiles = index.filter { it.isNotBlank() && it.endsWith(".me7profile.json") }
+        val profileFiles = index.filter { it.isNotBlank() && it.endsWith(".mxtprofile.json") }
         assertTrue(profileFiles.isNotEmpty(), "index.txt should list at least one profile")
 
         for (fileName in profileFiles) {
@@ -247,7 +247,7 @@ class ProfileManagerTest {
         val profiles = ProfileManager.loadBundledProfiles()
         val index = this::class.java.getResourceAsStream("/profiles/index.txt")
             ?.bufferedReader()?.readLines() ?: fail("index.txt not found")
-        val expectedCount = index.count { it.isNotBlank() && it.endsWith(".me7profile.json") }
+        val expectedCount = index.count { it.isNotBlank() && it.endsWith(".mxtprofile.json") }
 
         assertEquals(expectedCount, profiles.size, "loadBundledProfiles should load all indexed profiles")
     }
@@ -256,7 +256,7 @@ class ProfileManagerTest {
 
     @Test
     fun `MED17 profile resolves all 14 maps against 404E Normal XDF`() {
-        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.me7profile.json")
+        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.mxtprofile.json")
         val projectRoot = java.io.File(System.getProperty("user.dir"))
         val xdfFile = java.io.File(projectRoot, "example/med17/404E/404E_normal.xdf")
         if (!xdfFile.exists()) {
@@ -288,7 +288,7 @@ class ProfileManagerTest {
 
     @Test
     fun `MED17 profile has all 14 expected map definition keys`() {
-        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.me7profile.json")
+        val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.mxtprofile.json")
         val expected = listOf(
             "KRKTE_PFI", "KRKTE_GDI", "TVUB_PFI",
             "KFMIOP", "KFMIRL", "KFZWOP", "KFZW",

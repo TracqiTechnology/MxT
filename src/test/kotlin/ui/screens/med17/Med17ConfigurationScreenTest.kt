@@ -29,7 +29,7 @@ class Med17ConfigurationScreenTest : Med17ScreenTestBase() {
     @Test
     fun configurationScreenShowsMed17MapDefinitions() = runComposeUiTest {
         setContent {
-            ui.screens.configuration.ConfigurationScreen()
+            ui.screens.configuration.ConfigurationScreen(navState = ui.navigation.NavigationState())
         }
 
         // All MED17-only definitions should be present
@@ -52,7 +52,7 @@ class Med17ConfigurationScreenTest : Med17ScreenTestBase() {
     @Test
     fun configurationScreenHidesMe7OnlyDefinitions() = runComposeUiTest {
         setContent {
-            ui.screens.configuration.ConfigurationScreen()
+            ui.screens.configuration.ConfigurationScreen(navState = ui.navigation.NavigationState())
         }
 
         // ME7-only definitions should NOT be visible
@@ -65,7 +65,7 @@ class Med17ConfigurationScreenTest : Med17ScreenTestBase() {
     @Test
     fun configurationScreenShowsMapDefinitionsSection() = runComposeUiTest {
         setContent {
-            ui.screens.configuration.ConfigurationScreen()
+            ui.screens.configuration.ConfigurationScreen(navState = ui.navigation.NavigationState())
         }
 
         // Map definitions section title
@@ -75,7 +75,7 @@ class Med17ConfigurationScreenTest : Med17ScreenTestBase() {
     @Test
     fun configurationScreenShowsSelectDefinitionButtons() = runComposeUiTest {
         setContent {
-            ui.screens.configuration.ConfigurationScreen()
+            ui.screens.configuration.ConfigurationScreen(navState = ui.navigation.NavigationState())
         }
 
         // "Select Definition" buttons should exist for each visible map definition

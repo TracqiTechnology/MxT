@@ -57,6 +57,9 @@ dependencies {
     implementation("org.graalvm.js:js-scriptengine:22.3.4")
     implementation("org.jdom:jdom2:2.0.6.1")
 
+    // Serial port communication (native KWP2000/UDS logger)
+    implementation("com.fazecast:jSerialComm:2.10.4")
+
     // Removed: jfreechart, rxjava, flatlaf, flatlaf-intellij-themes
 
     // Testing
@@ -77,6 +80,15 @@ tasks.register<JavaExec>("screenshots") {
     workingDir = projectDir
 }
 
+tasks.register("generateVersionFile") {
+    val outputFile = file("src/main/resources/version.txt")
+    inputs.property("appVersion", appVersion)
+    outputs.file(outputFile)
+    doLast { outputFile.writeText(appVersion) }
+}
+
+tasks.named("processResources") { dependsOn("generateVersionFile") }
+
 compose.desktop {
     application {
         mainClass = "MainKt"
@@ -91,14 +103,14 @@ compose.desktop {
 
         nativeDistributions {
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
-            packageName = "ME7Tuner"
+            packageName = "MxT"
             packageVersion = pkgVersion
-            description = "ME7 M-box ECU Calibration Tool"
+            description = "Mx Tuner — Motronic ECU Calibration Tool"
 
             includeAllModules = true
 
             macOS {
-                bundleID = "com.tracqi.me7tuner"
+                bundleID = "com.tracqi.mxt"
                 iconFile.set(project.file("src/main/resources/icons/icon.icns"))
             }
 

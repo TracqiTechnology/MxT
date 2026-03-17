@@ -73,7 +73,7 @@ class Med17LogWorkflowTest {
         BIN_FILE.copyTo(stockBinCopy, overwrite = true)
 
         val stream = ProfileManager::class.java.getResourceAsStream(
-            "/profiles/MED17_162_RS3_TTRS_2_5T.me7profile.json"
+            "/profiles/MED17_162_RS3_TTRS_2_5T.mxtprofile.json"
         ) ?: error("MED17 profile not found")
         val profile = profileJson.decodeFromString(
             ConfigurationProfile.serializer(), stream.bufferedReader().readText()
