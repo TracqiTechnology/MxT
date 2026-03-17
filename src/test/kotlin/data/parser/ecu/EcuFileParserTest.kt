@@ -6,7 +6,7 @@ import java.io.File
 
 class EcuFileParserTest {
 
-    private val fixtureFile = File("technical/med9/me7logger/MED9_0261S02469.ecu")
+    private val fixtureFile = File("example/med9/MED9_0261S02469.ecu")
 
     @Test
     fun `parse version section`() {

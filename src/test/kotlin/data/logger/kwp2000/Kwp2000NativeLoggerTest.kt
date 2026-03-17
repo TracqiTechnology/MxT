@@ -60,8 +60,8 @@ class Kwp2000NativeLoggerTest {
 
         val config = LoggerConfig(
             loggerMode = LoggerMode.NATIVE_KWP2000,
-            ecuFile = "technical/med9/me7logger/MED9_0261S02469.ecu",
-            cfgFile = "technical/med9/me7logger/MED9_0261S02469_basic.cfg",
+            ecuFile = "example/med9/MED9_0261S02469.ecu",
+            cfgFile = "example/med9/MED9_0261S02469_basic.cfg",
             comPort = "COM3"
         )
 
@@ -93,8 +93,8 @@ class Kwp2000NativeLoggerTest {
 
         val config = LoggerConfig(
             loggerMode = LoggerMode.NATIVE_KWP2000,
-            ecuFile = "technical/med9/me7logger/MED9_0261S02469.ecu",
-            cfgFile = "technical/med9/me7logger/MED9_0261S02469_basic.cfg",
+            ecuFile = "example/med9/MED9_0261S02469.ecu",
+            cfgFile = "example/med9/MED9_0261S02469_basic.cfg",
             comPort = "COM3"
         )
 

@@ -16,8 +16,8 @@ class UdsNativeLoggerTest {
 
         val config = LoggerConfig(
             loggerMode = LoggerMode.NATIVE_UDS,
-            ecuFile = "technical/med9/me7logger/MED9_0261S02469.ecu",
-            cfgFile = "technical/med9/me7logger/MED9_0261S02469_basic.cfg",
+            ecuFile = "example/med9/MED9_0261S02469.ecu",
+            cfgFile = "example/med9/MED9_0261S02469_basic.cfg",
             comPort = "SLCAN0"
         )
 
@@ -49,8 +49,8 @@ class UdsNativeLoggerTest {
 
         val config = LoggerConfig(
             loggerMode = LoggerMode.NATIVE_UDS,
-            ecuFile = "technical/med9/me7logger/MED9_0261S02469.ecu",
-            cfgFile = "technical/med9/me7logger/MED9_0261S02469_basic.cfg",
+            ecuFile = "example/med9/MED9_0261S02469.ecu",
+            cfgFile = "example/med9/MED9_0261S02469_basic.cfg",
             comPort = "SLCAN0"
         )
 
