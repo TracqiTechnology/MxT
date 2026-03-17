@@ -14,7 +14,7 @@
 
 MxT is a calibration and optimization tool for Bosch ECUs. It provides calculators for fueling, injector scaling, torque/load tables, ignition timing, and boost control — plus a log-analysis Optimizer that diagnoses and corrects boost control and volumetric efficiency errors from real-world data. Four ECU platforms are supported: **ME7** (Stable), **MED17** (Beta), **Motronic 3.8x–5.9x** (Alpha), and **MED9** (Alpha). MED17 adds dual injection (port + direct) calibration, fuel trim correction, and ScorpionEFI log parsing. Motronic and MED9 share ME7's MAF-based calibration tools plus the RAM Sniffer and Data Logger.
 
-MxT supports any ME7 or MED17 variant that has a TunerPro XDF definition file. Bundled profiles are included for the Audi B5 S4/RS4 2.7T, B5/B6 A4 1.8T, Audi TT 1.8T, VW Golf/Jetta 1.8T (ME7), Audi RS3/TTRS 2.5T TFSI (MED17), VW/Audi 1.8T AGU (Motronic), and VW Golf GTI 2.0 TFSI (MED9).
+MxT supports any variant of these platforms that has a TunerPro XDF definition file. Bundled profiles are included for the Audi B5 S4/RS4 2.7T, B5/B6 A4 1.8T, Audi TT 1.8T, VW Golf/Jetta 1.8T (ME7), Audi RS3/TTRS 2.5T TFSI (MED17), VW/Audi 1.8T AGU (Motronic), and VW Golf GTI 2.0 TFSI (MED9).
 
 <img src="/documentation/images/me7Tuner.png" width="800">
 
@@ -68,27 +68,28 @@ The Calibration tools (fueling, MAF scaling, torque/load tables, ignition timing
 For detailed hardware reference charts, turbo compressor maps, and "how much calibration do I need?" guidance, see your platform's guide:
 - **ME7:** [ME7 Hardware Reference](documentation/me7-calibration-guide.md#do-i-need-calibration-me7-hardware-reference) — includes turbo airflow charts, MAF limits, load/HP tables, and KKK compressor maps for K03 through RS2
 - **MED17:** [MED17 Hardware Reference](documentation/med17-calibration-guide.md#do-i-need-calibration-med17-hardware-reference) — 2.5T-specific thresholds and aftermarket turbo context
+- **Motronic:** [Motronic Tuning Workflow](technical/motronic/motronic-tuning-workflow.md) — Alpha. 1.8T AGU/AEB injector scaling, FGAT0/KHFM, boost control
+- **MED9:** [MED9 Tuning Workflow](technical/med9/med9-tuning-workflow.md) — Alpha. 2.0 TFSI KRKATE, HPFP considerations, K03/K04 calibration
 
 ### Platform Differences
 
-Motronic and MED9 follow the same MAF-based calibration workflow as ME7. The table below focuses on the ME7 vs MED17 architectural differences, which are the most significant:
-
 The physics doesn't change between platforms. The ECU's opinion about how to manage it does.
 
-| Feature | ME7 | MED17 |
-|---------|-----|-------|
-| **Injection** | Single bank (port only) | Dual bank (port + direct). Two KRKTEs, two TVUBs. The 2.5T fires both simultaneously and varies the split ratio across the operating map. |
-| **MAF Scaling** | MLHFM linearization curve (voltage → kg/h). Your MAF is a liar; Closed Loop and Open Loop tabs help you figure out how much. | Not applicable. Adaptive VE model (`fupsrl_w`) handles air metering internally. One less thing to calibrate, one less thing to mess up. |
-| **VE Model** | KFURL / KFPBRK (static maps). If you change hardware, you recalibrate these by hand — or let the Optimizer do it. | Adaptive (`fupsrls_w` / `pbrint_w`). The ECU adjusts continuously. Persistent drift shows up in fuel trims, not VE maps. |
-| **Throttle Model** | KFVPDKSD (throttle-to-boost handoff) + WDKUGDN (throttle body choke point) | Different architecture — not calibratable here. MED17 handles it internally. |
-| **Alpha-N** | `msdk_w` vs `mshfm_w` diagnostic with BGSRM VE model solving | Not applicable. The adaptive VE model covers this. |
-| **Torque Tables** | KFMIOP / KFMIRL (load ↔ torque normalization) | KFLMIOP / KFLMIRL (same math, different map names). DS1 tunes reduce these to a scalar — MxT detects this and switches to scalar rescaling mode automatically. |
-| **Ignition Timing** | KFZWOP + KFZW/2 (single map set) | KFZWOP + KFZW/2, but DS1 tunes use multi-switch mode — up to 6 fuel-blend maps (Gasoline 0/1/2, Ethanol 0/1/2) that MxT can rescale simultaneously. |
-| **Fuel Trim** | Closed Loop (narrowband O2 + fuel trims) / Open Loop (wideband O2 at WOT) — both correct MLHFM | `rk_w` STFT/LTFT analysis (Fuel Trim tab). MED17's equivalent of Closed Loop MLHFM, but corrects the base fuel mass map instead of a MAF curve. |
-| **PLSOL** | Pressure ↔ load sanity check. Log overlay shows WOT data points on the chart; KFURL auto-fill from `KfurlSolver.solveFromActuals()`. | Same calculator. Log overlay uses `fupsrls_w` (≈ KFURL) from ScorpionEFI logs. |
-| **Boost PID** | KFLDRL / KFLDIMX — feed-forward PID linearization from logged data | Same maps, same PID algorithm — but non-linear turbo response with aftermarket hardware makes the linearization more valuable here. |
-| **Optimizer** | 3-phase: boost control → VE model (KFPBRK) → intervention check. Includes MAF voltage saturation detection (4.8V ceiling) and MAP sensor auto-classification (3/4/5-bar). | 3-phase: boost control → VE model (adaptive validation) → intervention check. Phase 2 validates adaptive convergence rather than writing KFPBRK — persistent load ratio errors point to mechanical issues. |
-| **Log Format** | ME7Logger CSV (`nmot`, `pvdks_w`, `pssol_w`, `ldtvm`, ...) | ScorpionEFI CSV (`nmot_w`, `psrg_w`, `pvds_w`, `tvldste_w`, ...). MxT's adapter layer translates automatically. |
+| Feature | ME7 | MED17 | Motronic 3/5 | MED9 |
+|---------|-----|-------|--------------|------|
+| **Injection** | Port only | Dual (port + direct). Two KRKTEs, two TVUBs. Split ratio varies across the map. | Port only | Direct only (Bosch HDEV, 50–110 bar HPFP) |
+| **Air Metering** | MAF voltage (MLHFM, 512 pts, V → kg/h) | Pressure-based. Adaptive VE model (`fupsrl_w`) — no MAF to calibrate. | MAF voltage (MLHFM, 256 pts, V → kg/h) | MAF period (MSHFMTPH, µs → kg/h) |
+| **Fuel Constant** | KRKTE (ms/%) | Dual KRKTE (port + direct, ms/%) | FGAT0 (dimensionless × 128) + KHFM (MAF-to-load constant) | KRKATE (ms/%, with fuel pressure correction) |
+| **MAF Scaling** | MLHFM linearization via Closed Loop + Open Loop | N/A — adaptive VE handles air metering | MLHFM linearization (same tools, 256-pt curve) | Period-based — Closed/Open Loop generate corrections, apply via NefMoto/WinOLS |
+| **VE Model** | KFURL / KFPBRK (static). Recalibrate by hand or Optimizer. | Adaptive (`fupsrls_w` / `pbrint_w`). ECU adjusts continuously. | Static, no MAP sensor — load inferred entirely from MAF | Static (KFURL / KFPBRK), same as ME7 |
+| **Torque Tables** | KFMIOP / KFMIRL (load ↔ torque, %) | KFLMIOP / KFLMIRL (same math). DS1 auto-detects scalar mode. | KFMDOPT (torque at optimum timing, Nm). One-directional — no inverse map. | KFMIOP / KFMIRL (same as ME7) |
+| **Ignition Timing** | KFZWOP + KFZW/2 (single map set) | KFZWOP + KFZW/2. DS1 multi-switch: up to 6 fuel-blend maps. | KFZWOPT + KFZW (same concept, different names) | KFZWOP + 6 KFZW variants (_0_A through _2_A) for knock management |
+| **Throttle Model** | KFVPDKSD + WDKUGDN (throttle body choke) | Internal — not calibratable here | N/A — no throttle transition map | KFVPDKLD (same concept as KFVPDKSD) |
+| **Boost Control** | KFLDRL / KFLDIMX (pressure-based, mbar) | Same maps, same PID algorithm | KFLDP / KFLDS / KFLDTV (load-based, ms/rev) | KFLDRL / KFLDIMX (same as ME7) |
+| **Fuel Trim** | Closed Loop (narrowband O2 + trims) / Open Loop (wideband) → correct MLHFM | `rk_w` STFT/LTFT → correct base fuel mass map | Closed Loop / Open Loop → correct KFLF (scaling factor) | Closed Loop / Open Loop → generate MAF correction (apply externally) |
+| **Log Format** | ME7Logger CSV (K-line serial) | ScorpionEFI CSV. MxT adapter translates automatically. | ME7Logger CSV (K-line serial) | VCDS / NefMoto (CAN CCP/KWP2000) |
+| **Optimizer** | 3-phase: boost → VE (KFPBRK) → intervention. MAF saturation detection + MAP auto-classification. | 3-phase: boost → VE (adaptive validation) → intervention. Persistent errors → mechanical issue. | 3-phase: boost → VE → intervention. Load in ms/rev, no MAP sensor. | 3-phase: boost → VE (KFPBRK) → intervention. Same as ME7. |
+| **Architecture** | C166 16-bit, 512 KB–1 MB BIN | TriCore 32-bit, large BIN | C166 16-bit | TriCore 32-bit, 2 MB BIN |
 
 MxT automatically shows only the tabs relevant to your platform. Switch platforms in the Configuration tab — ME7, MED17, Motronic, or MED9.
 
@@ -110,6 +111,30 @@ MED17 follows the same torque-based architecture as ME7 — torque request → l
 
 If you understand ME7's signal chain, you understand MED17's. The map names change (KFMIOP → KFLMIOP, KFMIRL → KFLMIRL), the log signal names change (`pvdks_w` → `psrg_w`, `pssol_w` → `pvds_w`), but the physics doesn't.
 
+## How Motronic 3/5 Works (ME7's Predecessor)
+
+Motronic 3.8x–5.9x uses the same torque-based architecture as ME7 — torque request → load request → boost control — but with one critical difference: **there is no MAP sensor**. Engine load is inferred entirely from the MAF sensor and expressed in **ms/rev** (injection on-time), not percentage. Every map axis that says "load" on ME7 says "ms/rev" on Motronic.
+
+The MAF linearization curve (MLHFM) is 256 points instead of ME7's 512. The fuel constant is FGAT0, a dimensionless multiplier scaled by ×128 — when you swap injectors, you multiply FGAT0 by (old_flow / new_flow). The companion constant KHFM converts airflow (kg/h) into the ms/rev load unit; changing injectors or MAF housing requires recalculating KHFM as well, because it shifts the load axis of every map in the ECU.
+
+Fuel correction targets KFLF (a scaling factor) rather than the MLHFM curve directly. The Closed Loop and Open Loop tabs generate the same correction curves — they just apply to a different map.
+
+Boost control uses load-based maps (KFLDP/KFLDS/KFLDTV in ms/rev) instead of pressure-based maps (KFLDRL in mbar). The torque model is one-directional: KFMDOPT maps RPM × load to torque in Nm, but there is no inverse map (no KFMIRL equivalent). Ignition timing uses KFZWOPT and KFZW — same concept as ME7, different map names.
+
+Motronic runs on a C166 16-bit processor and logs via K-line serial using ME7Logger `.ecu` files. The RAM Sniffer and Data Logger support Motronic binaries natively.
+
+## How MED9 Works (Direct Injection ME7)
+
+MED9 shares ME7's torque-based architecture and most of its map names — KFMIOP, KFMIRL, KFZW, KFPBRK all work the same way. The critical difference is **direct injection only**: Bosch HDEV injectors firing directly into the combustion chamber at 50–110 bar rail pressure from a mechanically-driven high-pressure fuel pump (HPFP).
+
+The MAF sensor is **period/frequency-based** (MSHFMTPH, µs → kg/h) rather than voltage-based. MxT's Closed Loop and Open Loop tabs generate correction curves for the MAF transfer function, but since MSHFMTPH is not directly editable in MxT, corrections are exported and applied via NefMoto or WinOLS.
+
+The fuel constant is KRKATE (ms/%, same physics as KRKTE but with fuel pressure correction). Unlike port injection where rail pressure is fixed by a vacuum-referenced regulator, DI injector flow varies with HPFP rail pressure — the HPFP is the critical constraint for power scaling on K04 and larger turbo builds.
+
+MED9 has three KFZW variants (_0_A, _1_A, _2_A) and two KFZWOP variants for knock management — more ignition maps than ME7's single set, fewer than MED17's DS1 multi-switch mode. The throttle transition map is KFVPDKLD (same concept as ME7's KFVPDKSD). The static VE model (KFURL/KFPBRK) works like ME7's, not MED17's adaptive model.
+
+MED9 runs on a TriCore 32-bit processor with a 2 MB BIN (vs ME7's 512 KB–1 MB). Logging uses VCDS or NefMoto over CAN (CCP/KWP2000), not K-line serial.
+
 # Workflow Overview
 
 MxT is organized into three stages that mirror the calibration workflow:
@@ -130,7 +155,7 @@ Start with Configuration, calibrate if your hardware has changed, then optimize 
 **Configuration**
 2. [Loading Files](#stage-1-configuration)
 3. [XDF Format Support](#xdf-format-support)
-4. [WinOLS KP File Support](#winols-kp-file-support)
+4. [WinOLS Support (KP + CSV)](#winols-support-kp--csv)
 
 **Calibration**
 5. [Tool Catalog](#stage-2-calibration)
@@ -240,8 +265,8 @@ MxT implements the **full** TunerPro XDF format. This means any ECU binary that 
 | **MED17.1.62 (8S0907404x)** | Audi RS3 / TTRS 2.5T TFSI (EA855 EVO) | Full support — dual injection, ScorpionEFI logs |
 | **MED17.1 (4.0T)** | Audi RS6/RS7/S6/S7 4.0T TFSI | Compatible when XDF is available |
 | **MED17.1 (5.2 V10)** | Audi R8 / Lamborghini Huracán 5.2 V10 | Compatible when XDF is available |
-| **Motronic 3.8x–5.9x** | VW/Audi 1.8T (AGU, AEB, etc.) | Alpha — shared MAF-based calibration tools + RAM Sniffer + Data Logger |
-| **MED9.x** | VW Golf GTI 2.0 TFSI, Audi A4 2.0 TFSI | Alpha — shared MAF-based calibration tools + RAM Sniffer + Data Logger |
+| **Motronic 3.8x–5.9x** | VW/Audi 1.8T (AGU, AEB, etc.) | Alpha — C166 16-bit, MAF-based (256-pt MLHFM), load in ms/rev, FGAT0/KHFM fueling, K-line logging |
+| **MED9.x** | VW Golf GTI 2.0 TFSI, Audi A4 2.0 TFSI | Alpha — TriCore 32-bit, 2 MB BIN, direct injection (HDEV), period-based MAF, KRKATE fueling, CAN logging |
 
 XDF files for many of these can be found at [files.s4wiki.com/defs/](https://files.s4wiki.com/defs/) and the [Nefarious Motorsports forums](http://nefariousmotorsports.com/forum).
 
@@ -287,9 +312,11 @@ When MxT writes a corrected map back to the binary, it analytically inverts the 
 
 These cover every equation form produced by the Bosch ME7 TunerPro translators for standard map types.
 
-## WinOLS KP File Support
+## WinOLS Support (KP + CSV)
 
-MxT includes **hint-mode** support for WinOLS `.kp` ECU definition files. We reverse-engineered the proprietary binary format to make this work. You're welcome.
+MxT includes full support for WinOLS `.kp` ECU definition files and WinOLS CSV exports. We reverse-engineered the proprietary KP binary format to make this work. You're welcome.
+
+**An XDF file, WinOLS CSV export, or KP file is sufficient for binary reading and writing.** Any combination works — MxT merges definitions with priority: XDF > CSV > KP.
 
 ### What KP files are
 
@@ -301,30 +328,33 @@ WinOLS `.kp` files (EVC GmbH — https://www.evc.de) are **proprietary binary co
   └── intern             — proprietary binary record database
 ```
 
-The `intern` blob contains map definitions, but the binary layout of axes, dimensions, and scaling factors is **not publicly documented**. MxT reverse-engineered the record structure and can reliably extract map names and binary addresses, but not full axis/scaling data.
+MxT reverse-engineered the binary record layout and can extract map names, addresses, dimensions, scaling factors, units, and axis addresses from each record.
 
-### How KP hint mode works
+### How it works
 
 When you load a KP file via `WinOLS → Open KP File...`:
 
-1. MxT parses the KP file and extracts up to ~90 map name + address pairs
-2. When you open any map selection dialog (e.g. *Select KFPBRK*), MxT:
-   - Shows a **hint badge** with the KP-derived description and binary address
-   - **Auto-pre-selects** the XDF definition whose address matches the KP address
+1. MxT parses the KP binary and extracts **full map definitions** — name, address, dimensions (cols×rows), scaling factor, units, bit width, and axis addresses
+2. These definitions are merged into BinParser alongside any XDF or CSV definitions
+3. When you open a map selection dialog (e.g. *Select KFPBRK*), MxT:
+   - Shows a **badge** with KP-derived dimensions, units, scaling, and address
+   - **Auto-pre-selects** the definition whose address matches the KP address
    - Marks the matched definition with a **KP badge** in the list
 
-The map picker is automatically pre-filtered and pre-selected to the most likely correct definition — no more scrolling through 393 XDF entries hunting for the right one.
+If no XDF is loaded, KP definitions alone are sufficient to read and write maps in the BIN file.
 
-### KP vs XDF coverage
+### KP vs XDF vs CSV coverage
 
-| | XDF | KP (hint mode) |
-|-|-----|----------------|
-| Map definitions | ~393 | ~90 with address, ~62 name-only |
-| Axes & dimensions | Full | Not parseable |
-| Scaling factors | Full | Not parseable |
-| Use case | Primary source of truth | Address cross-reference aid |
-
-**The XDF is always required for binary reading and writing.** The KP file is optional and only provides selection hints.
+| | XDF | KP | CSV |
+|-|-----|-----|-----|
+| Map definitions | ~393 | ~90 with address | ~90 |
+| Dimensions (cols×rows) | Full | Full | Full |
+| Scaling factors | Full | Full | Full |
+| Axis addresses | Full | Full | Full |
+| Units | Full | Full | Full |
+| Bit width | Full | Derived | Full |
+| Byte order | Full | Assumed LE | Full |
+| Use case | Primary source | Standalone or gap-fill | Standalone or gap-fill |
 
 ### Address verification
 
@@ -338,9 +368,14 @@ KP AR addresses and XDF addresses match perfectly for the `8D0907551M` ECU:
 | KRKTE | `0x1EB44` | `0x1EB44` |
 | KFKHFM | `0x10CCE` | `0x10CCE` |
 
-### Why not full KP parsing?
+### Known limitations
 
-The WinOLS binary format is proprietary and has no public specification. Axis dimensions, element sizes, and scaling factor offsets are at undocumented positions within each binary record. XDF files for the same ECU contain ~4x more definitions with full axis/scaling data. We extracted everything we could from the binary format — the rest would require guesswork, and guesswork is not how you build tools that write to engine binaries.
+The WinOLS binary format is proprietary with no public specification. Our reverse-engineering covers the core fields (name, address, dimensions, scaling, units, axes) but has these caveats:
+
+- **Scale anomaly:** ~4/21 tested records have binary scale = 2× or 0.5× the CSV ground truth. The binary scale is used as-is — close enough for reading, and BinWriter's equation inversion is scale-independent.
+- **Byte order:** Assumed little-endian (LoHi) for all ME7 ECUs. This is consistent with XDF defaults and all tested records.
+- **Signed flag:** Derived from scale sign. Records with unsigned negative values (rare) may need an XDF override.
+- **Coverage:** ~90 maps with addresses vs. ~393 in a typical XDF. KP definitions fill gaps when combined with XDF/CSV, or work standalone for the maps they cover.
 
 KP files available from https://files.s4wiki.com/defs/ can be used alongside the XDF files from the same source.
 
