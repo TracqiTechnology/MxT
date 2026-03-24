@@ -6,7 +6,7 @@ import java.util.prefs.Preferences
 /**
  * Persists user-customized MED17 log header mappings, parallel to [LogHeaderPreference]
  * for ME7. Users can override signal names to match their specific logging tool's
- * column headers (ScorpionEFI, VCDS, etc.).
+ * column headers (Dyno Spectrum, VCDS, etc.).
  */
 object Med17LogHeaderPreference {
     private val prefs = Preferences.userNodeForPackage(Med17LogHeaderPreference::class.java)

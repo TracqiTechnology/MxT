@@ -410,7 +410,7 @@ private fun DirectInjectorTab() {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     "MED17 2.5T dual-fuel: direct injectors deliver fuel into the combustion chamber " +
-                        "at high pressure (~200 bar). Compute KRKTE_GDI scale factor when upgrading DI injectors.",
+                        "at high pressure (nominal 240 bar at full load). Compute KRKTE_GDI scale factor when upgrading DI injectors.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -682,7 +682,7 @@ private fun SplitCalculatorTab() {
                 Text(
                     "The 2.5T EA855 EVO PFI share varies with RPM: port injectors ramp up towards " +
                         "torque peak (~4500 RPM), hold steady through mid-range, then decline towards " +
-                        "redline where GDI alone supports required fuel mass. Load a WOT/cruise log to " +
+                        "redline where the GDI share increases to handle the majority of fuel delivery. Load a WOT/cruise log to " +
                         "see your actual InjSys_facPrtnPfi curve overlaid on the default.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant

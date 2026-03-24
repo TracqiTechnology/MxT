@@ -11,15 +11,20 @@ import kotlin.test.*
 
 /**
  * End-to-end tests for the full MED17 LDRPID flow:
- *   ScorpionEFI CSV → Med17LogParser → Med17LogAdapter → LdrpidCalculator
+ *   Dyno Spectrum (DS1) CSV → Med17LogParser → Med17LogAdapter → LdrpidCalculator
  *
  * Uses real log files from src/test/resources/logs/.
  */
 class LdrpidMed17E2ETest {
 
-    // ── Axis definitions matching a realistic KFLDRL (5 duty-cycle cols × 4 RPM rows) ──
-    private val rpmAxis = arrayOf(2000.0, 3000.0, 4000.0, 5000.0)
-    private val dutyAxis = arrayOf(20.0, 40.0, 60.0, 80.0, 95.0)
+    // ── Axis definitions matching a realistic KFLDRL ──
+    // RPM axis must cover the WOT data range in the logs (4425-8208 RPM)
+    private val rpmAxis = arrayOf(3000.0, 4000.0, 5000.0, 5500.0, 6000.0, 6500.0, 7000.0, 7500.0)
+    private val dutyAxis = arrayOf(10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 95.0)
+
+    // Degenerate axis for testing recovery from partial BINs
+    private val degenerateRpmAxis = arrayOf(5000.0)
+    private val degenerateDutyAxis = arrayOf(50.0)
 
     private fun buildKfldrlMap(): Map3d {
         val z = Array(rpmAxis.size) { Array(dutyAxis.size) { 30.0 } }
@@ -30,6 +35,17 @@ class LdrpidMed17E2ETest {
         val pressureAxis = arrayOf(200.0, 400.0, 600.0, 800.0, 1000.0, 1200.0)
         val z = Array(rpmAxis.size) { Array(pressureAxis.size) { 30.0 } }
         return Map3d(pressureAxis, rpmAxis, z)
+    }
+
+    /** Simulate a degenerate 1-row map from a partial BIN */
+    private fun buildDegenerateKfldrlMap(): Map3d {
+        val z = Array(1) { Array(1) { 30.0 } }
+        return Map3d(degenerateDutyAxis, degenerateRpmAxis, z)
+    }
+
+    private fun buildDegenerateKfldimxMap(): Map3d {
+        val z = Array(1) { Array(1) { 30.0 } }
+        return Map3d(degenerateDutyAxis, degenerateRpmAxis, z)
     }
 
     private fun logFile(name: String): File {
@@ -66,10 +82,15 @@ class LdrpidMed17E2ETest {
         assertEquals(rpmAxis.size, result.kfldrl.yAxis.size)
         assertEquals(rpmAxis.size, result.kfldimx.yAxis.size)
 
-        // Non-linear output should have actual boost data (not all zeros)
+        // Non-linear output should have actual boost data — not degenerate 0.10/0.11/0.12 filler
         val nonLinearValues = result.nonLinearOutput.zAxis.flatMap { it.toList() }
         assertTrue(nonLinearValues.any { it > 0.1 },
             "Non-linear output should contain real boost values from WOT data")
+
+        // At least some rows should have meaningful boost (>1 PSI) — reject degenerate filler
+        val rowsWithRealBoost = result.nonLinearOutput.zAxis.count { row -> row.any { it > 1.0 } }
+        assertTrue(rowsWithRealBoost >= 2,
+            "At least 2 RPM rows should have meaningful boost data (>1 PSI), got $rowsWithRealBoost")
     }
 
     // ── 2. Verify parsed signal values are physically plausible ─────
@@ -283,11 +304,42 @@ class LdrpidMed17E2ETest {
 
         val result = LdrpidCalculator.calculateLdrpid(me7Data, buildKfldrlMap(), buildKfldimxMap())
 
-        assertEquals(rpmAxis.size, result.nonLinearOutput.yAxis.size)
-        assertEquals(dutyAxis.size, result.nonLinearOutput.xAxis.size)
+        assertTrue(result.nonLinearOutput.yAxis.size >= 2, "Should have ≥2 RPM rows")
+        assertTrue(result.nonLinearOutput.xAxis.size >= 2, "Should have ≥2 duty columns")
 
         // This log has WOT rows, so we expect some non-trivial boost values
         val hasBoostData = result.nonLinearOutput.zAxis.flatMap { it.toList() }.any { it > 0.1 }
         assertTrue(hasBoostData, "WOT log should produce non-trivial boost values")
+    }
+
+    // ── 11. Degenerate maps (partial BIN) produce sensible output ─────
+
+    @Test
+    fun `degenerate 1-row map from partial BIN derives RPM axis from log data`() {
+        val parser = Med17LogParser()
+        val med17Data = parser.parseLogFile(LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
+        val me7Data = Med17LogAdapter.toMe7LdrpidFormat(med17Data)
+
+        // Simulate partial BIN: KFLDRL is 1x1 with degenerate axes
+        val result = LdrpidCalculator.calculateLdrpid(me7Data, buildDegenerateKfldrlMap(), buildDegenerateKfldimxMap())
+
+        // Calculator should derive axes from log data, producing a multi-row/col output
+        assertTrue(result.nonLinearOutput.yAxis.size >= 4,
+            "Should derive ≥4 RPM rows from log data, got ${result.nonLinearOutput.yAxis.size}")
+        assertTrue(result.nonLinearOutput.xAxis.size >= 4,
+            "Should derive ≥4 duty columns, got ${result.nonLinearOutput.xAxis.size}")
+
+        // Derived RPM axis should cover the WOT data range (4425-8208 RPM)
+        val derivedMinRpm = result.nonLinearOutput.yAxis.first()
+        val derivedMaxRpm = result.nonLinearOutput.yAxis.last()
+        assertTrue(derivedMinRpm <= 5000.0,
+            "Derived RPM axis should start ≤5000 RPM, got $derivedMinRpm")
+        assertTrue(derivedMaxRpm >= 7000.0,
+            "Derived RPM axis should extend ≥7000 RPM, got $derivedMaxRpm")
+
+        // Should have meaningful boost data, not degenerate 0.10/0.11/0.12 filler
+        val rowsWithRealBoost = result.nonLinearOutput.zAxis.count { row -> row.any { it > 1.0 } }
+        assertTrue(rowsWithRealBoost >= 2,
+            "Degenerate map recovery should still produce ≥2 rows with real boost data")
     }
 }

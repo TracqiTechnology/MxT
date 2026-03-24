@@ -703,7 +703,7 @@ private fun LogHeadersSection(navState: NavigationState, modifier: Modifier = Mo
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    "ScorpionEFI / DS1 logs are auto-detected — signal names are matched " +
+                    "Dyno Spectrum (DS1) logs are auto-detected — signal names are matched " +
                         "automatically from CSV headers. No manual log header configuration is needed.",
                     modifier = Modifier.padding(16.dp),
                     style = MaterialTheme.typography.bodySmall,

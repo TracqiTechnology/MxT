@@ -5,7 +5,7 @@ import java.io.File
 import kotlin.test.*
 
 /**
- * Integration tests for [Med17LogParser] using real MED17 ScorpionEFI CSV log files.
+ * Integration tests for [Med17LogParser] using real MED17 Dyno Spectrum (DS1) CSV log files.
  *
  * Log files:
  * - `2025-01-21_16.24.32_log(1).csv` — RS3 2.5T, 949 rows, 530 WOT
@@ -113,7 +113,7 @@ class Med17LogParserTest {
     // ── T2: Header signal name extraction ───────────────────────────
 
     @Test
-    fun `extractSignalName parses standard ScorpionEFI format`() {
+    fun `extractSignalName parses standard Dyno Spectrum format`() {
         // Use reflection to access the private method for testing
         val method = Med17LogParser::class.java.getDeclaredMethod("extractSignalName", String::class.java)
         method.isAccessible = true

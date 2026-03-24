@@ -77,4 +77,49 @@ class KrkteCalculatorTest {
         val result2 = KrkteCalculator.calculateKrkte(1.293, 0.496, 220.0, 0.755, 14.7)
         assertEquals(result1, result2, 0.0, "Same inputs should produce identical output")
     }
+
+    @Test
+    fun `calculateKrkte matches Funktionsrahmen factory KRKATE for EA855 GDI`() {
+        // Funktionsrahmen MED17.1.62 states KRKATE = 0.0367 ms/%
+        // Formula: KRKATE = (rho0Luft * Vhzyl) / (100 * Lst * Normmk * 1.05 * Qstat)
+        // Where Qstat = 679.3 g/min at n-heptane → 944.7 cc/min at gasoline
+        // (injectorSize_cc = Qstat_heptane * 1.05 / gasolineDensity)
+        //
+        // Our formula uses cc/min at gasoline + density instead of the 1.05 factor.
+        // They are mathematically equivalent — this test proves it.
+        val krkate = KrkteCalculator.calculateKrkte(
+            airDensityGramsPerDecimetersCubed = 1.293,     // rho0Luft
+            cylinderDisplacementDecimetersCubed = 0.496,   // Vhzyl (2.48L / 5 cyl)
+            fuelInjectorSizeCubicCentimeters = 944.7,      // Qstat_heptane * 1.05 / 0.755
+            gasolineGramsPerCubicCentimeter = 0.755,        // rho0KS from Funktionsrahmen
+            stoichiometricAirFuelRatio = 14.7               // Lst
+        )
+
+        // Funktionsrahmen reference: 0.0367 ms/%
+        // Allow ±0.5% tolerance for floating point rounding (Normmk = 1/60000 vs 1.6667e-5)
+        assertEquals(0.0367, krkate, 0.0002,
+            "KRKATE should match Funktionsrahmen factory value of 0.0367 ms/%")
+    }
+
+    @Test
+    fun `calculateKrkte matches ME7 magic constant 50_2624`() {
+        // ME7 Funktionsrahmen: KRKTE = 50.2624 * Vhzyl / Qstat
+        // Where Qstat is in g/min (mass flow at n-heptane), NOT cc/min.
+        // For a 220 cc/min (at gasoline) PFI injector:
+        //   Qstat_mass = injSize_cc * gasDensity / 1.05 = 220 * 0.755 / 1.05 = 158.1 g/min
+        // Our formula uses cc/min at gasoline + density directly, which is equivalent.
+        val krkte = KrkteCalculator.calculateKrkte(
+            airDensityGramsPerDecimetersCubed = 1.293,
+            cylinderDisplacementDecimetersCubed = 0.496,
+            fuelInjectorSizeCubicCentimeters = 220.0,
+            gasolineGramsPerCubicCentimeter = 0.755,
+            stoichiometricAirFuelRatio = 14.7
+        )
+
+        // Convert cc/min at gasoline to Qstat in g/min at n-heptane for magic constant
+        val qstatMass = 220.0 * 0.755 / 1.05
+        val me7Expected = 50.2624 * 0.496 / qstatMass
+        assertEquals(me7Expected, krkte, 0.001,
+            "KRKTE should match ME7 magic constant formula: 50.2624 * Vhzyl / Qstat_mass")
+    }
 }

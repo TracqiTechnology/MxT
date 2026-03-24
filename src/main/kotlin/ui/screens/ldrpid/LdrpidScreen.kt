@@ -312,7 +312,7 @@ private fun LdrpidConfigCard(
                     Button(onClick = onLoadLogs) {
                         Text(
                             if (EcuPlatformPreference.platform == EcuPlatform.MED17)
-                                "Load ScorpionEFI Logs" else "Load ME7 Logs"
+                                "Load DS1 Logs" else "Load ME7 Logs"
                         )
                     }
                     if (showProgress) {

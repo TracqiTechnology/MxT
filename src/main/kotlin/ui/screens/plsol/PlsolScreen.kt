@@ -190,7 +190,7 @@ fun PlsolScreen(initialTab: Int = 0) {
                         }
                     }
                 }) {
-                    Text(if (isMed17) "Load ScorpionEFI Logs" else "Load ME7 Logs")
+                    Text(if (isMed17) "Load DS1 Logs" else "Load ME7 Logs")
                 }
                 if (showProgress) {
                     LinearProgressIndicator(

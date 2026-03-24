@@ -15,7 +15,7 @@ import kotlin.test.*
 
 /**
  * End-to-end tests for the MED17 Optimizer pipeline:
- *   XDF+BIN (maps) + ScorpionEFI CSV (log) → OptimizerCalculator
+ *   XDF+BIN (maps) + Dyno Spectrum (DS1) CSV (log) → OptimizerCalculator
  *
  * Tests with real 404E XDF/BIN and WOT log data to verify:
  *  - WOT filtering extracts correct entries

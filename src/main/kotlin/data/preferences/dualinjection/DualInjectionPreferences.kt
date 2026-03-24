@@ -22,9 +22,9 @@ object DualInjectionPreferences {
         get() = prefs.get("direct_flow_rate", "160.0").toDouble()
         set(value) = prefs.put("direct_flow_rate", value.toString())
 
-    /** GDI rail pressure in bar absolute. Typical range: 100–200 bar. */
+    /** GDI rail pressure in bar absolute. Nominal 240 bar at full load, varies with RPM/load. */
     var directInjectorFuelPressureBar: Double
-        get() = prefs.get("direct_fuel_pressure", "200.0").toDouble()
+        get() = prefs.get("direct_fuel_pressure", "240.0").toDouble()
         set(value) = prefs.put("direct_fuel_pressure", value.toString())
 
     var directInjectorDeadTimeMs: Double

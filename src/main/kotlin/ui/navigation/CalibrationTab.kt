@@ -8,9 +8,12 @@ enum class CalibrationTab(
     val tooltip: String,
     val platforms: Set<EcuPlatform> = EcuPlatform.entries.toSet(),
     val labelOverrides: Map<EcuPlatform, String> = emptyMap(),
+    val tooltipOverrides: Map<EcuPlatform, String> = emptyMap(),
     val stability: StabilityLevel = StabilityLevel.STABLE
 ) {
-    FUELING("Fueling", "KRKTE Calculator & Injector Scaling"),
+    FUELING("Fueling", "KRKTE Calculator & Injector Scaling",
+        tooltipOverrides = mapOf(EcuPlatform.MED17 to "KRKATE Calculator & Injector Scaling",
+            EcuPlatform.MED9 to "KRKATE Calculator & Injector Scaling")),
     CLOSED_LOOP("Closed Loop", "Closed Loop MLHFM Compensation",
         platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9, EcuPlatform.MOTRONIC)),
     OPEN_LOOP("Open Loop", "Open Loop MLHFM Compensation",
@@ -42,4 +45,8 @@ enum class CalibrationTab(
     /** Returns the display label appropriate for the active platform. */
     fun labelFor(platform: EcuPlatform): String =
         labelOverrides[platform] ?: label
+
+    /** Returns the tooltip appropriate for the active platform. */
+    fun tooltipFor(platform: EcuPlatform): String =
+        tooltipOverrides[platform] ?: tooltip
 }

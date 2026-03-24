@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/Platform-macOS_|_Windows_|_Linux-lightgrey.svg" alt="Platform">
 </p>
 
-MxT is a calibration and optimization tool for Bosch ECUs. It provides calculators for fueling, injector scaling, torque/load tables, ignition timing, and boost control — plus a log-analysis Optimizer that diagnoses and corrects boost control and volumetric efficiency errors from real-world data. Four ECU platforms are supported: **ME7** (Stable), **MED17** (Beta), **Motronic 3.8x–5.9x** (Alpha), and **MED9** (Alpha). MED17 adds dual injection (port + direct) calibration, fuel trim correction, and ScorpionEFI log parsing. Motronic and MED9 share ME7's MAF-based calibration tools plus the RAM Sniffer and Data Logger.
+MxT is a calibration and optimization tool for Bosch ECUs. It provides calculators for fueling, injector scaling, torque/load tables, ignition timing, and boost control — plus a log-analysis Optimizer that diagnoses and corrects boost control and volumetric efficiency errors from real-world data. Four ECU platforms are supported: **ME7** (Stable), **MED17** (Beta), **Motronic 3.8x–5.9x** (Alpha), and **MED9** (Alpha). MED17 adds dual injection (port + direct) calibration, fuel trim correction, and Dyno Spectrum (DS1) log parsing. Motronic and MED9 share ME7's MAF-based calibration tools plus the RAM Sniffer and Data Logger.
 
 MxT supports any variant of these platforms that has a TunerPro XDF definition file. Bundled profiles are included for the Audi B5 S4/RS4 2.7T, B5/B6 A4 1.8T, Audi TT 1.8T, VW Golf/Jetta 1.8T (ME7), Audi RS3/TTRS 2.5T TFSI (MED17), VW/Audi 1.8T AGU (Motronic), and VW Golf GTI 2.0 TFSI (MED9).
 
@@ -87,7 +87,7 @@ The physics doesn't change between platforms. The ECU's opinion about how to man
 | **Throttle Model** | KFVPDKSD + WDKUGDN (throttle body choke) | Internal — not calibratable here | N/A — no throttle transition map | KFVPDKLD (same concept as KFVPDKSD) |
 | **Boost Control** | KFLDRL / KFLDIMX (pressure-based, mbar) | Same maps, same PID algorithm | KFLDP / KFLDS / KFLDTV (load-based, ms/rev) | KFLDRL / KFLDIMX (same as ME7) |
 | **Fuel Trim** | Closed Loop (narrowband O2 + trims) / Open Loop (wideband) → correct MLHFM | `rk_w` STFT/LTFT → correct base fuel mass map | Closed Loop / Open Loop → correct KFLF (scaling factor) | Closed Loop / Open Loop → generate MAF correction (apply externally) |
-| **Log Format** | ME7Logger CSV (K-line serial) | ScorpionEFI CSV. MxT adapter translates automatically. | ME7Logger CSV (K-line serial) | VCDS / NefMoto (CAN CCP/KWP2000) |
+| **Log Format** | ME7Logger CSV (K-line serial) | Dyno Spectrum (DS1) CSV. MxT adapter translates automatically. | ME7Logger CSV (K-line serial) | VCDS / NefMoto (CAN CCP/KWP2000) |
 | **Optimizer** | 3-phase: boost → VE (KFPBRK) → intervention. MAF saturation detection + MAP auto-classification. | 3-phase: boost → VE (adaptive validation) → intervention. Persistent errors → mechanical issue. | 3-phase: boost → VE → intervention. Load in ms/rev, no MAP sensor. | 3-phase: boost → VE (KFPBRK) → intervention. Same as ME7. |
 | **Architecture** | C166 16-bit, 512 KB–1 MB BIN | TriCore 32-bit, large BIN | C166 16-bit | TriCore 32-bit, 2 MB BIN |
 
@@ -107,7 +107,7 @@ MxT provides the calculations that let you get airflow, pressure, and load measu
 
 ## How MED17 Works (Same Idea, Modern Execution)
 
-MED17 follows the same torque-based architecture as ME7 — torque request → load request → pressure target → boost control. The driver model, torque monitoring, and intervention logic are conceptually identical. The differences are in the details: MED17 uses an adaptive volumetric efficiency model instead of the static KFURL/KFPBRK maps, it has dual injection (port + direct) with separate injector characterization for each bank, and the logging ecosystem is ScorpionEFI instead of ME7Logger.
+MED17 follows the same torque-based architecture as ME7 — torque request → load request → pressure target → boost control. The driver model, torque monitoring, and intervention logic are conceptually identical. The differences are in the details: MED17 uses an adaptive volumetric efficiency model instead of the static KFURL/KFPBRK maps, it has dual injection (port + direct) with separate injector characterization for each bank, and the logging ecosystem is Dyno Spectrum (DS1) instead of ME7Logger.
 
 If you understand ME7's signal chain, you understand MED17's. The map names change (KFMIOP → KFLMIOP, KFMIRL → KFLMIRL), the log signal names change (`pvdks_w` → `psrg_w`, `pssol_w` → `pvds_w`), but the physics doesn't.
 
@@ -228,11 +228,11 @@ You *must* define the headers for the parameters that the log parser uses here.
 
 <img src="/documentation/images/configuration.png" width="800">
 
-#### MED17 Log Headers (ScorpionEFI)
+#### MED17 Log Headers (Dyno Spectrum / DS1)
 
-MED17 cars typically use ScorpionEFI for logging. The signal names differ from ME7Logger — configure these in the Log Headers section:
+MED17 cars typically use Dyno Spectrum (DS1) for logging. The signal names differ from ME7Logger — configure these in the Log Headers section:
 
-| Parameter | ScorpionEFI Header | ME7 Equivalent | Description |
+| Parameter | DS1 Header | ME7 Equivalent | Description |
 |-----------|-------------------|----------------|-------------|
 | RPM | `nmot_w` | `nmot` | Engine speed |
 | Throttle Plate Angle | `wdkba` | `wdkba` | Throttle position (degrees) |
@@ -262,7 +262,7 @@ MxT implements the **full** TunerPro XDF format. This means any ECU binary that 
 | **ME7 RS4 (8D0907551R)** | Audi B5 RS4 2.7T | Higher boost maps; same VE model |
 | **ME7 1.8T (A4/TT/Golf)** | Various 1.8T platforms | Same ME7 software generation; maps compatible |
 | **ME7.1** | Later Audi/VW platforms | Compatible when XDF is available |
-| **MED17.1.62 (8S0907404x)** | Audi RS3 / TTRS 2.5T TFSI (EA855 EVO) | Full support — dual injection, ScorpionEFI logs |
+| **MED17.1.62 (8S0907404x)** | Audi RS3 / TTRS 2.5T TFSI (EA855 EVO) | Full support — dual injection, DS1 logs |
 | **MED17.1 (4.0T)** | Audi RS6/RS7/S6/S7 4.0T TFSI | Compatible when XDF is available |
 | **MED17.1 (5.2 V10)** | Audi R8 / Lamborghini Huracán 5.2 V10 | Compatible when XDF is available |
 | **Motronic 3.8x–5.9x** | VW/Audi 1.8T (AGU, AEB, etc.) | Alpha — C166 16-bit, MAF-based (256-pt MLHFM), load in ms/rev, FGAT0/KHFM fueling, K-line logging |
@@ -399,7 +399,7 @@ For step-by-step instructions, screenshots, and algorithm descriptions, see the 
 |------|:--------:|-------------|
 | **[KRKTE (Primary Fueling)](documentation/me7-calibration-guide.md#fueling-krkte--injector-scaling)** | ME7 | Calculate injector constant and dead time from first principles. The foundation for everything else. |
 | **[Dual Injection](documentation/med17-calibration-guide.md#fueling-dual-injection--krkte_pfi--krkte_gdi)** | MED17 | Port + direct injector scaling (KRKTE_PFI, KRKTE_GDI, TVUB) and fuel split calculator. Two banks of injectors means two banks of math. |
-| **[Fuel Trim (rk_w)](documentation/med17-calibration-guide.md#fuel-trim-rk_w-correction)** | MED17 | Correct the base fuel mass map from ScorpionEFI STFT/LTFT logs. MED17's equivalent of Closed Loop MLHFM — same idea, different correction target. |
+| **[Fuel Trim (rk_w)](documentation/med17-calibration-guide.md#fuel-trim-rk_w-correction)** | MED17 | Correct the base fuel mass map from DS1 STFT/LTFT logs. MED17's equivalent of Closed Loop MLHFM — same idea, different correction target. |
 | **[Closed Loop MLHFM](documentation/me7-calibration-guide.md#closed-loop-mlhfm)** | ME7 | MAF linearization correction via narrowband O2 + fuel trims at part-throttle. |
 | **[Open Loop MLHFM](documentation/me7-calibration-guide.md#open-loop-mlhfm)** | ME7 | MAF linearization correction via wideband O2 at WOT. |
 | **[PLSOL](documentation/me7-calibration-guide.md#plsol---pressure-to-load-conversion)** | All | Pressure ↔ load ↔ airflow ↔ horsepower sanity check calculator. Now with WOT log overlay — load your logs and see actual data points on the chart, with automatic KFURL auto-fill (ME7) or `fupsrls_w` extraction (MED17). |
@@ -489,7 +489,7 @@ If the maps are calibrated correctly, `pssol` should match `pvdks_w` and `rlsol`
 
 For detailed configuration (map definitions, log headers), step-by-step usage, result interpretation, and platform-specific signal names, see the calibration guides:
 - **[ME7 Optimizer](documentation/me7-calibration-guide.md#optimizer)** — ME7Logger signal names, KFPBRK corrections, MAF voltage saturation
-- **[MED17 Optimizer](documentation/med17-calibration-guide.md#optimizer-med17)** — ScorpionEFI signal names, adaptive VE model validation
+- **[MED17 Optimizer](documentation/med17-calibration-guide.md#optimizer-med17)** — DS1 signal names, adaptive VE model validation
 
 ---
 

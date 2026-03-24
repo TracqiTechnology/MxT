@@ -77,8 +77,8 @@ class ProfileManagerTest {
         val di = profile.dualInjection
 
         assertEquals(220.0, di.portInjectorFlowRateCcMin, "portInjectorFlowRateCcMin")
-        assertEquals(160.0, di.directInjectorFlowRateCcMin, "directInjectorFlowRateCcMin")
-        assertEquals(200.0, di.directInjectorFuelPressureBar, "directInjectorFuelPressureBar")
+        assertEquals(380.0, di.directInjectorFlowRateCcMin, "directInjectorFlowRateCcMin")
+        assertEquals(240.0, di.directInjectorFuelPressureBar, "directInjectorFuelPressureBar")
         assertEquals(30.0, di.portSharePercentDefault, "portSharePercentDefault")
         assertEquals(5, di.numPortInjectors, "numPortInjectors")
         assertEquals(5, di.numDirectInjectors, "numDirectInjectors")

@@ -7,7 +7,7 @@ package data.contract
  * dual-injection signals (port + direct injector on-times and fuel share) and does
  * NOT have MAF-based signals (uhfm_w, mshfm_w).
  *
- * Defaults use ScorpionEFI / DynoScorpion signal names. Users can remap
+ * Defaults use Dyno Spectrum (DS1) signal names. Users can remap
  * headers in the Configuration screen via LogHeaderPreference.
  */
 object Med17LogFileContract {

@@ -8,9 +8,9 @@ import java.io.File
 import java.io.FileReader
 
 /**
- * Parser for ScorpionEFI / DynoScorpion MED17 CSV log files.
+ * Parser for Dyno Spectrum (DS1) MED17 CSV log files.
  *
- * ScorpionEFI CSV format:
+ * Dyno Spectrum CSV format:
  *   Line 1: Metadata — `DS1 firmware:...,WUAZZZFFXJ...,MED17_1_62,...`
  *   Line 2: Headers — `Time(s),Description(signal_name) (unit),...`
  *   Line 3+: Numeric data rows
@@ -32,12 +32,22 @@ class Med17LogParser {
         PLSOL
     }
 
+    data class ParseDiagnostics(
+        val matchedHeaders: Set<String>,
+        val missingHeaders: Set<String>,
+        val totalRows: Int
+    )
+
     fun interface ProgressCallback {
         fun onProgress(value: Int, max: Int)
     }
 
     // Column indices resolved from header line
     private var columnIndices = mutableMapOf<Med17LogFileContract.Header, Int>()
+
+    /** Populated after each parse attempt with header match diagnostics. */
+    var lastDiagnostics: ParseDiagnostics? = null
+        private set
 
     fun parseLogDirectory(
         logType: LogType,
@@ -74,6 +84,7 @@ class Med17LogParser {
         map: Map<Med17LogFileContract.Header, MutableList<Double>>
     ) {
         columnIndices.clear()
+        var rowCount = 0
 
         try {
             FileReader(file).use { reader ->
@@ -88,7 +99,7 @@ class Med17LogParser {
                     // Line 1: metadata line (DS1 firmware info) — skip
                     if (isFirstLine) {
                         isFirstLine = false
-                        // Check if this is a ScorpionEFI metadata line
+                        // Check if this is a Dyno Spectrum metadata line
                         if (record.size() > 0) {
                             val first = record.get(0)
                             if (first.contains("firmware") || first.contains("DS1") || first.contains("MED17")) {
@@ -123,6 +134,7 @@ class Med17LogParser {
                     }
 
                     // Parse data rows
+                    rowCount++
                     try {
                         when (logType) {
                             LogType.LDRPID -> parseLdrpidRow(record, map)
@@ -139,10 +151,20 @@ class Med17LogParser {
         } catch (e: Exception) {
             e.printStackTrace()
         }
+
+        // Populate diagnostics after parse attempt
+        val matched = columnIndices.keys.map { it.header }.toSet()
+        val required = requiredHeaders(logType)
+        val missing = required - matched
+        lastDiagnostics = ParseDiagnostics(
+            matchedHeaders = matched,
+            missingHeaders = missing,
+            totalRows = rowCount
+        )
     }
 
     /**
-     * Extract signal name from ScorpionEFI column header format.
+     * Extract signal name from Dyno Spectrum (DS1) column header format.
      *
      * Format: `Description text(signal_name) (unit)`
      * We need the content of the LAST parenthetical group that is NOT the trailing unit.
@@ -344,6 +366,48 @@ class Med17LogParser {
                 val hasLoad = H.ENGINE_LOAD_HEADER in columnIndices
                 hasTime && hasLoad && hasBoost && hasBaro && hasThrottle
             }
+        }
+    }
+
+    /**
+     * Returns the set of required header signal names for a given [LogType].
+     * For headers with alternatives (e.g., WGDC or LDR duty cycle), both are listed —
+     * the requirement is satisfied if at least one is matched (handled by [headersFound]).
+     */
+    private fun requiredHeaders(logType: LogType): Set<String> {
+        val common = setOf(H.TIME_STAMP_COLUMN_HEADER.header)
+        val rpm = H.RPM_COLUMN_HEADER.header
+        val throttle = H.THROTTLE_PLATE_ANGLE_HEADER.header
+        val baro = H.BAROMETRIC_PRESSURE_HEADER.header
+        val boost = H.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER.header
+        val wgdc = H.WASTEGATE_DUTY_CYCLE_HEADER.header
+        val ldr = H.LDR_DUTY_CYCLE_HEADER.header
+
+        return common + when (logType) {
+            LogType.LDRPID -> setOf(rpm, throttle, baro, boost, wgdc, ldr)
+            LogType.OPTIMIZER -> setOf(
+                rpm, throttle, baro, boost, wgdc, ldr,
+                H.REQUESTED_PRESSURE_HEADER.header,
+                H.REQUESTED_LOAD_HEADER.header,
+                H.ENGINE_LOAD_HEADER.header
+            )
+            LogType.FUEL_TRIM -> setOf(
+                rpm,
+                H.ENGINE_LOAD_HEADER.header,
+                H.STFT_COLUMN_HEADER.header,
+                H.STFT_MIXED_COLUMN_HEADER.header,
+                H.LTFT_COLUMN_HEADER.header,
+                H.LONG_TERM_FT_HEADER.header
+            )
+            LogType.PFI_SPLIT -> setOf(
+                rpm,
+                H.PFI_SPLIT_FACTOR_HEADER.header,
+                H.PFI_SPLIT_FACTOR_UNLIM_HEADER.header
+            )
+            LogType.PLSOL -> setOf(
+                H.ENGINE_LOAD_HEADER.header,
+                boost, baro, throttle
+            )
         }
     }
 

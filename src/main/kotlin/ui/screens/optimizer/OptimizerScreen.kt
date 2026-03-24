@@ -485,7 +485,7 @@ fun OptimizerScreen() {
                     }
                 }
             }) {
-                val buttonLabel = if (EcuPlatformPreference.platform == EcuPlatform.MED17) "Load ScorpionEFI Log Directory" else "Load ME7 Log Directory"
+                val buttonLabel = if (EcuPlatformPreference.platform == EcuPlatform.MED17) "Load DS1 Log Directory" else "Load ME7 Log Directory"
                 Text(buttonLabel)
             }
 
