@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import data.parser.csv.WinOlsCsvParser
 import data.parser.kp.KpHintParser
 import data.parser.xdf.TableDefinition
+import domain.model.fueltrim.RkwTableMetadata
 
 @Composable
 fun MapPickerDialog(
@@ -32,7 +33,9 @@ fun MapPickerDialog(
         .removeSuffix(" Map")
         .trim(),
     // Optional: returns true for tables that should be sorted to the top and badged as recommended
-    recommendedPredicate: ((TableDefinition) -> Boolean)? = null
+    recommendedPredicate: ((TableDefinition) -> Boolean)? = null,
+    // Optional: provides a subtitle string for a table (e.g. rk_w metadata display label)
+    subtitleProvider: ((TableDefinition) -> String?)? = null
 ) {
     // Observe KP hints, KP definitions, and CSV definitions.
     val kpHints by KpHintParser.hints.collectAsState()
@@ -227,6 +230,7 @@ fun MapPickerDialog(
                     items(filteredDefinitions) { definition ->
                         val isKpMatch = kpPreferredDefinition == definition
                         val isRecommended = recommendedPredicate?.invoke(definition) == true
+                        val subtitle = subtitleProvider?.invoke(definition)
                         ListItem(
                             headlineContent = {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -262,6 +266,15 @@ fun MapPickerDialog(
                                     }
                                 }
                             },
+                            supportingContent = if (subtitle != null) {
+                                {
+                                    Text(
+                                        text = subtitle,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            } else null,
                             modifier = Modifier.clickable { selectedItem = definition },
                             colors = if (selectedItem == definition) {
                                 ListItemDefaults.colors(
