@@ -57,6 +57,56 @@ class Med17DualInjectionScreenTest : Med17ScreenTestBase() {
     }
 
     @Test
+    fun directInjectorTabHasNoDeadTimeFields() = runComposeUiTest {
+        setContent {
+            ui.screens.dualinjection.DualInjectionScreen()
+        }
+
+        // Switch to Direct Injector tab
+        onNodeWithText("Direct Injector").performClick()
+        waitForIdle()
+
+        // DI tab should NOT have dead time fields — TVUB_GDI is firmware-handled on MED17
+        onAllNodesWithText("Dead Time", substring = true).assertCountEquals(0)
+
+        // But it should still have flow rate and pressure fields
+        onAllNodesWithText("Flow Rate (cc/min)").fetchSemanticsNodes().let { nodes ->
+            assert(nodes.isNotEmpty()) { "DI tab must have flow rate fields" }
+        }
+        onAllNodesWithText("Fuel Pressure (bar, absolute)").fetchSemanticsNodes().let { nodes ->
+            assert(nodes.isNotEmpty()) { "DI tab must have fuel pressure fields" }
+        }
+    }
+
+    @Test
+    fun portInjectorTabStillHasDeadTimeFields() = runComposeUiTest {
+        setContent {
+            ui.screens.dualinjection.DualInjectionScreen()
+        }
+
+        // Port Injector tab is default — TVUB_PFI IS tunable, so dead time must be present
+        onAllNodesWithText("Dead Time", substring = true).fetchSemanticsNodes().let { nodes ->
+            assert(nodes.isNotEmpty()) { "PFI tab must still have dead time fields (TVUB_PFI is tunable)" }
+        }
+    }
+
+    @Test
+    fun directInjectorTabShowsAbsolutePressureLabels() = runComposeUiTest {
+        setContent {
+            ui.screens.dualinjection.DualInjectionScreen()
+        }
+
+        // Switch to Direct Injector tab
+        onNodeWithText("Direct Injector").performClick()
+        waitForIdle()
+
+        // DI pressure fields must say "absolute" (not gauge)
+        onAllNodesWithText("Fuel Pressure (bar, absolute)").fetchSemanticsNodes().let { nodes ->
+            assert(nodes.size >= 2) { "DI tab must have 2 'absolute' pressure fields (stock + new), found ${nodes.size}" }
+        }
+    }
+
+    @Test
     fun splitCalculatorTabRenders() = runComposeUiTest {
         setContent {
             ui.screens.dualinjection.DualInjectionScreen()

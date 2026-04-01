@@ -108,4 +108,16 @@ class Med17KrkteScreenTest : Med17ScreenTestBase() {
         onNodeWithText("Fuel Properties").assertExists()
         onNodeWithText("Fuel Injector").assertExists()
     }
+
+    @Test
+    fun fuelingScreenShowsKrkateTabOnMed17() = runComposeUiTest {
+        // Platform is MED17 (set by Med17ScreenTestBase)
+        setContent {
+            ui.screens.fueling.FuelingScreen()
+        }
+
+        // On MED17, the tab should say "KRKATE" not "KRKTE"
+        onNodeWithText("KRKATE").assertExists()
+        onNodeWithText("Injector Scaling").assertExists()
+    }
 }
