@@ -2,6 +2,7 @@ package domain.model.pfi
 
 import data.contract.Med17LogFileContract
 import data.contract.Med17LogFileContract.Header
+import kotlin.math.abs
 
 /**
  * Result of an RPM-dependent PFI share calculation.
@@ -38,6 +39,46 @@ data class PfiShareResult(
         this == null && other == null -> true
         this != null && other != null -> contentEquals(other)
         else -> false
+    }
+}
+
+/**
+ * Result of a 2D RPM × Load PFI share calculation.
+ *
+ * @property rpmAxis             RPM breakpoints (sorted ascending)
+ * @property loadAxis            Load breakpoints (sorted ascending, %)
+ * @property pfiSharePercent2d   PFI share grid [rpmIdx][loadIdx] in percent (0–100)
+ * @property sampleCounts        Per-cell sample count [rpmIdx][loadIdx]
+ * @property totalSamples        Total log samples processed
+ * @property rpmOnlyCurve        1D RPM-only curve for backward compatibility
+ */
+data class PfiShare2dResult(
+    val rpmAxis: DoubleArray,
+    val loadAxis: DoubleArray,
+    val pfiSharePercent2d: Array<DoubleArray>,
+    val sampleCounts: Array<IntArray>,
+    val totalSamples: Int,
+    val rpmOnlyCurve: PfiShareResult
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is PfiShare2dResult) return false
+        return rpmAxis.contentEquals(other.rpmAxis) &&
+            loadAxis.contentEquals(other.loadAxis) &&
+            pfiSharePercent2d.contentDeepEquals(other.pfiSharePercent2d) &&
+            sampleCounts.contentDeepEquals(other.sampleCounts) &&
+            totalSamples == other.totalSamples &&
+            rpmOnlyCurve == other.rpmOnlyCurve
+    }
+
+    override fun hashCode(): Int {
+        var h = rpmAxis.contentHashCode()
+        h = 31 * h + loadAxis.contentHashCode()
+        h = 31 * h + pfiSharePercent2d.contentDeepHashCode()
+        h = 31 * h + sampleCounts.contentDeepHashCode()
+        h = 31 * h + totalSamples
+        h = 31 * h + rpmOnlyCurve.hashCode()
+        return h
     }
 }
 
@@ -186,5 +227,170 @@ object PfiShareCalculator {
     private fun isSortedAscending(a: DoubleArray): Boolean {
         for (i in 1 until a.size) if (a[i] < a[i - 1]) return false
         return true
+    }
+
+    // ── 2D RPM × Load binning ───────────────────────────────────────────
+
+    /** RPM bins for 2D grid: 1000–7000 @ 500 RPM steps. */
+    val DEFAULT_2D_RPM_BINS = doubleArrayOf(
+        1000.0, 1500.0, 2000.0, 2500.0, 3000.0, 3500.0,
+        4000.0, 4500.0, 5000.0, 5500.0, 6000.0, 6500.0, 7000.0
+    )
+
+    /** Load bins for 2D grid: 20–200 % @ 20 % steps. */
+    val DEFAULT_2D_LOAD_BINS = doubleArrayOf(
+        20.0, 40.0, 60.0, 80.0, 100.0, 120.0, 140.0, 160.0, 180.0, 200.0
+    )
+
+    /**
+     * Extract actual PFI share from MED17 log data, binned into a 2D RPM × Load grid.
+     *
+     * If the log lacks an [Header.ENGINE_LOAD_HEADER] column, falls back to a
+     * [PfiShare2dResult] whose 2D grid is synthesised from the 1D RPM-only curve
+     * (all load columns identical).
+     *
+     * @param logData Parsed MED17 log (header → column of doubles)
+     * @param rpmBins RPM axis for the output grid (default [DEFAULT_2D_RPM_BINS])
+     * @param loadBins Load axis for the output grid (default [DEFAULT_2D_LOAD_BINS])
+     * @return [PfiShare2dResult] with the 2D grid plus a backward-compatible 1D curve
+     */
+    fun refineFromLog2d(
+        logData: Map<Header, List<Double>>,
+        rpmBins: DoubleArray = DEFAULT_2D_RPM_BINS,
+        loadBins: DoubleArray = DEFAULT_2D_LOAD_BINS
+    ): PfiShare2dResult {
+        val rpmColumn = logData[Header.RPM_COLUMN_HEADER]
+        val pfiColumn = logData[Header.PFI_SPLIT_FACTOR_HEADER]
+        val loadColumn = logData[Header.ENGINE_LOAD_HEADER]
+
+        // If no RPM or PFI data, return default 2D result
+        if (rpmColumn.isNullOrEmpty() || pfiColumn.isNullOrEmpty()) {
+            return default2dResult(rpmBins, loadBins)
+        }
+
+        // If no load column, fall back to 1D and replicate across loads
+        if (loadColumn.isNullOrEmpty()) {
+            return fallbackTo1d(logData, rpmBins, loadBins)
+        }
+
+        val rowCount = minOf(rpmColumn.size, pfiColumn.size, loadColumn.size)
+
+        val sums = Array(rpmBins.size) { DoubleArray(loadBins.size) }
+        val counts = Array(rpmBins.size) { IntArray(loadBins.size) }
+
+        for (i in 0 until rowCount) {
+            val rpm = rpmColumn[i]
+            val load = loadColumn[i]
+            val pfi = pfiColumn[i]
+            if (rpm <= 0.0 || load <= 0.0) continue
+
+            val rpmIdx = nearestBinIndex(rpm, rpmBins)
+            val loadIdx = nearestBinIndex(load, loadBins)
+
+            sums[rpmIdx][loadIdx] += pfi
+            counts[rpmIdx][loadIdx]++
+        }
+
+        val pfiPercent2d = Array(rpmBins.size) { r ->
+            DoubleArray(loadBins.size) { l ->
+                if (counts[r][l] > 0) {
+                    (sums[r][l] / counts[r][l] * 100.0).coerceIn(0.0, 100.0)
+                } else {
+                    Double.NaN
+                }
+            }
+        }
+
+        interpolateEmptyCells(pfiPercent2d, counts)
+
+        val rpmOnlyCurve = refineFromLog(logData)
+
+        return PfiShare2dResult(
+            rpmAxis = rpmBins.copyOf(),
+            loadAxis = loadBins.copyOf(),
+            pfiSharePercent2d = pfiPercent2d,
+            sampleCounts = counts,
+            totalSamples = rowCount,
+            rpmOnlyCurve = rpmOnlyCurve
+        )
+    }
+
+    /**
+     * Find the index of the nearest bin to [value].
+     */
+    internal fun nearestBinIndex(value: Double, bins: DoubleArray): Int {
+        var best = 0
+        var bestDist = abs(value - bins[0])
+        for (i in 1 until bins.size) {
+            val dist = abs(value - bins[i])
+            if (dist < bestDist) {
+                bestDist = dist
+                best = i
+            }
+        }
+        return best
+    }
+
+    /**
+     * Fill NaN cells by averaging cardinal neighbours. Cells with no neighbours
+     * at all get the default 50 % PFI share.
+     */
+    internal fun interpolateEmptyCells(grid: Array<DoubleArray>, counts: Array<IntArray>) {
+        for (r in grid.indices) {
+            for (l in grid[r].indices) {
+                if (counts[r][l] == 0) {
+                    val neighbours = mutableListOf<Double>()
+                    if (r > 0 && counts[r - 1][l] > 0) neighbours.add(grid[r - 1][l])
+                    if (r < grid.size - 1 && counts[r + 1][l] > 0) neighbours.add(grid[r + 1][l])
+                    if (l > 0 && counts[r][l - 1] > 0) neighbours.add(grid[r][l - 1])
+                    if (l < grid[r].size - 1 && counts[r][l + 1] > 0) neighbours.add(grid[r][l + 1])
+
+                    grid[r][l] = if (neighbours.isNotEmpty()) {
+                        neighbours.average()
+                    } else {
+                        50.0
+                    }
+                }
+            }
+        }
+    }
+
+    private fun default2dResult(
+        rpmBins: DoubleArray = DEFAULT_2D_RPM_BINS,
+        loadBins: DoubleArray = DEFAULT_2D_LOAD_BINS
+    ): PfiShare2dResult {
+        val defaultCurve = calculateRpmDependentShare()
+        val grid = Array(rpmBins.size) { r ->
+            val pfi = interpolateClamped(rpmBins[r], defaultCurve.rpmAxis, defaultCurve.pfiSharePercent)
+            DoubleArray(loadBins.size) { pfi }
+        }
+        return PfiShare2dResult(
+            rpmAxis = rpmBins.copyOf(),
+            loadAxis = loadBins.copyOf(),
+            pfiSharePercent2d = grid,
+            sampleCounts = Array(rpmBins.size) { IntArray(loadBins.size) },
+            totalSamples = 0,
+            rpmOnlyCurve = defaultCurve
+        )
+    }
+
+    private fun fallbackTo1d(
+        logData: Map<Header, List<Double>>,
+        rpmBins: DoubleArray = DEFAULT_2D_RPM_BINS,
+        loadBins: DoubleArray = DEFAULT_2D_LOAD_BINS
+    ): PfiShare2dResult {
+        val rpmOnlyCurve = refineFromLog(logData)
+        val grid = Array(rpmBins.size) { r ->
+            val pfi = interpolateClamped(rpmBins[r], rpmOnlyCurve.rpmAxis, rpmOnlyCurve.pfiSharePercent)
+            DoubleArray(loadBins.size) { pfi }
+        }
+        return PfiShare2dResult(
+            rpmAxis = rpmBins.copyOf(),
+            loadAxis = loadBins.copyOf(),
+            pfiSharePercent2d = grid,
+            sampleCounts = Array(rpmBins.size) { IntArray(loadBins.size) },
+            totalSamples = logData[Header.RPM_COLUMN_HEADER]?.size ?: 0,
+            rpmOnlyCurve = rpmOnlyCurve
+        )
     }
 }

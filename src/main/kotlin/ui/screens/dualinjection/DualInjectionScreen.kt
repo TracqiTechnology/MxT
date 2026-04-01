@@ -11,6 +11,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -22,12 +23,14 @@ import data.preferences.krkte.KrkteGdiPreferences
 import data.preferences.krkte.KrktePfiPreferences
 import data.writer.BinWriter
 import domain.math.map.Map3d
+import ui.components.MapTable
 import domain.model.injector.InjectorScalingSolver
 import domain.model.injector.InjectorSpec
 import domain.model.injector.KrkteScalingResult
 import domain.model.injector.TvubResult
 import domain.model.pfi.PfiShareCalculator
 import domain.model.pfi.PfiShareResult
+import domain.model.pfi.PfiShare2dResult
 import domain.model.presets.InjectorPresets
 import domain.model.presets.InjectorType
 import kotlinx.coroutines.Dispatchers
@@ -649,6 +652,8 @@ private fun SplitCalculatorTab() {
     var targetRpm by remember { mutableStateOf("5000.0") }
 
     var pfiResult by remember { mutableStateOf<PfiShareResult?>(null) }
+    var pfi2dResult by remember { mutableStateOf<PfiShare2dResult?>(null) }
+    var show2dView by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var logStatus by remember { mutableStateOf<String?>(null) }
     var showProgress by remember { mutableStateOf(false) }
@@ -714,10 +719,13 @@ private fun SplitCalculatorTab() {
                                             Med17LogParser.LogType.PFI_SPLIT, logFile
                                         )
                                         val refined = PfiShareCalculator.refineFromLog(logData)
+                                        val refined2d = PfiShareCalculator.refineFromLog2d(logData)
                                         withContext(Dispatchers.Main) {
                                             pfiResult = refined
+                                            pfi2dResult = refined2d
                                             logStatus = if (refined.loggedRpmAxis != null)
-                                                "✓ Loaded ${refined.loggedRpmAxis!!.size} RPM points from ${logFile.name}"
+                                                "✓ Loaded ${refined.loggedRpmAxis!!.size} RPM points from ${logFile.name}" +
+                                                    if (logData[Med17LogFileContract.Header.ENGINE_LOAD_HEADER]?.isNotEmpty() == true) " (2D load data available)" else ""
                                             else
                                                 "⚠ No PFI split data found in log"
                                             showProgress = false
@@ -736,6 +744,8 @@ private fun SplitCalculatorTab() {
                     }
                     Button(onClick = {
                         pfiResult = PfiShareCalculator.calculateRpmDependentShare()
+                        pfi2dResult = null
+                        show2dView = false
                         logStatus = "Reset to default curve"
                     }, colors = ButtonDefaults.outlinedButtonColors()) {
                         Text("Reset to Default")
@@ -809,6 +819,69 @@ private fun SplitCalculatorTab() {
             }
         }
 
+        // 1D / 2D View Toggle (only visible when 2D data is available)
+        if (pfi2dResult != null) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text("View:", style = MaterialTheme.typography.labelMedium)
+                FilterChip(
+                    selected = !show2dView,
+                    onClick = { show2dView = false },
+                    label = { Text("1D (RPM)") }
+                )
+                FilterChip(
+                    selected = show2dView,
+                    onClick = { show2dView = true },
+                    label = { Text("2D (RPM × Load)") }
+                )
+            }
+        }
+
+        // 2D PFI Share Surface
+        if (show2dView && pfi2dResult != null) {
+            val result2d = pfi2dResult!!
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                tonalElevation = 1.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        "PFI Share Surface (RPM × Load %)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        "Rows = RPM, Columns = Load %. " +
+                            "Green = ≥5 samples, Yellow = 1–4 samples, Default = interpolated.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    val map3d = Map3d(
+                        result2d.loadAxis.map { it }.toTypedArray(),
+                        result2d.rpmAxis.map { it }.toTypedArray(),
+                        result2d.pfiSharePercent2d.map { row -> row.map { it }.toTypedArray() }.toTypedArray()
+                    )
+                    MapTable(
+                        map = map3d,
+                        editable = false,
+                        cellColorProvider = { r, c ->
+                            val count = result2d.sampleCounts[r][c]
+                            when {
+                                count >= 5 -> Color(0x2000C853.toInt())
+                                count in 1..4 -> Color(0x20FFD600.toInt())
+                                else -> null
+                            }
+                        }
+                    )
+                }
+            }
+        }
+
         // On-Time Calculator
         Surface(
             shape = MaterialTheme.shapes.medium,
@@ -851,11 +924,20 @@ private fun SplitCalculatorTab() {
                 require(load > 0) { "Target load must be positive" }
                 require(rpm > 0) { "RPM must be positive" }
 
-                // Look up PFI share from curve at this RPM
-                val curveResult = pfiResult ?: PfiShareCalculator.calculateRpmDependentShare()
-                val pfiShare = PfiShareCalculator.interpolateClamped(
-                    rpm, curveResult.rpmAxis, curveResult.pfiSharePercent
-                ) / 100.0
+                // Look up PFI share — prefer 2D surface when available
+                val pfiShare = if (show2dView && pfi2dResult != null) {
+                    val map3d = Map3d(
+                        pfi2dResult!!.loadAxis.map { it }.toTypedArray(),
+                        pfi2dResult!!.rpmAxis.map { it }.toTypedArray(),
+                        pfi2dResult!!.pfiSharePercent2d.map { row -> row.map { it }.toTypedArray() }.toTypedArray()
+                    )
+                    map3d.lookup(load, rpm) / 100.0
+                } else {
+                    val curveResult = pfiResult ?: PfiShareCalculator.calculateRpmDependentShare()
+                    PfiShareCalculator.interpolateClamped(
+                        rpm, curveResult.rpmAxis, curveResult.pfiSharePercent
+                    ) / 100.0
+                }
 
                 val portOnTime = load * pfiShare * pKrkte
                 val diOnTime = load * (1.0 - pfiShare) * dKrkte

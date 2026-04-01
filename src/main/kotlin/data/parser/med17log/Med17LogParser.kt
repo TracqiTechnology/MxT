@@ -321,6 +321,7 @@ class Med17LogParser {
         map[H.RPM_COLUMN_HEADER]!!.add(rpm)
         map[H.PFI_SPLIT_FACTOR_HEADER]!!.add(pfi)
         getDouble(record, H.PFI_SPLIT_FACTOR_UNLIM_HEADER)?.let { map[H.PFI_SPLIT_FACTOR_UNLIM_HEADER]?.add(it) }
+        getDouble(record, H.ENGINE_LOAD_HEADER)?.let { map[H.ENGINE_LOAD_HEADER]?.add(it) }
     }
 
     private fun getDouble(
@@ -458,6 +459,7 @@ class Med17LogParser {
                 map[H.RPM_COLUMN_HEADER] = mutableListOf()
                 map[H.PFI_SPLIT_FACTOR_HEADER] = mutableListOf()
                 map[H.PFI_SPLIT_FACTOR_UNLIM_HEADER] = mutableListOf()
+                map[H.ENGINE_LOAD_HEADER] = mutableListOf()
             }
             LogType.PLSOL -> {
                 map[H.TIME_STAMP_COLUMN_HEADER] = mutableListOf()
