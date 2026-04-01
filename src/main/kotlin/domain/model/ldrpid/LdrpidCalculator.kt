@@ -15,7 +15,13 @@ object LdrpidCalculator {
         val nonLinearOutput: Map3d,
         val linearOutput: Map3d,
         val kfldrl: Map3d,
-        val kfldimx: Map3d
+        val kfldimx: Map3d,
+        /** Per-cell sample count for the non-linear table [rpmIdx][dutyIdx]. Cells with 0 were interpolated. */
+        val nonLinearSampleCounts: Array<IntArray> = emptyArray(),
+        /** Per-cell sample count for KFLDRL [rpmIdx][pressureIdx]. Derived from non-linear table. */
+        val kfldrlSampleCounts: Array<IntArray> = emptyArray(),
+        /** Per-cell sample count for KFLDIMX [rpmIdx][pressureIdx]. Derived from KFLDRL. */
+        val kfldimxSampleCounts: Array<IntArray> = emptyArray()
     )
 
     private const val DEFAULT_RPM_ROWS = 8
@@ -175,6 +181,106 @@ object LdrpidCalculator {
         return Map3d(dutyAxis, rpmAxis, nonLinearTable)
     }
 
+    /**
+     * Calculate the non-linear boost table and return per-cell sample counts.
+     * Cells with count=0 were interpolated rather than measured.
+     */
+    fun calculateNonLinearTableWithCounts(
+        values: Map<Me7LogFileContract.Header, List<Double>>,
+        kfldrlMap: Map3d
+    ): Pair<Map3d, Array<IntArray>> {
+        val throttlePlateAngles = values[Me7LogFileContract.Header.THROTTLE_PLATE_ANGLE_HEADER]!!
+        val rpms = values[Me7LogFileContract.Header.RPM_COLUMN_HEADER]!!
+        val dutyCycles = values[Me7LogFileContract.Header.WASTEGATE_DUTY_CYCLE_HEADER]!!
+        val barometricPressures = values[Me7LogFileContract.Header.BAROMETRIC_PRESSURE_HEADER]!!
+        val absoluteBoostPressures = values[Me7LogFileContract.Header.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER]!!
+
+        val rpmAxis = deriveRpmAxis(values, kfldrlMap.yAxis)
+        val dutyAxis = deriveDutyAxis(kfldrlMap.xAxis)
+
+        val nonLinearTable = Array(rpmAxis.size) { Array(dutyAxis.size) { 0.0 } }
+        val pressure = Array(rpmAxis.size) { DoubleArray(dutyAxis.size) }
+        val count = Array(rpmAxis.size) { DoubleArray(dutyAxis.size) }
+        val sampleCounts = Array(rpmAxis.size) { IntArray(dutyAxis.size) }
+
+        for (i in throttlePlateAngles.indices) {
+            if (throttlePlateAngles[i] >= 80) {
+                val rpm = rpms[i]
+                val dutyCycle = dutyCycles[i]
+                val barometricPressure = barometricPressures[i]
+                val absoluteBoostPressure = absoluteBoostPressures[i]
+                val relativeBoostPressure = absoluteBoostPressure - barometricPressure
+
+                val rpmIndex = Index.getInsertIndex(rpmAxis.toList(), rpm)
+                val dutyCycleIndex = Index.getInsertIndex(dutyAxis.toList(), dutyCycle)
+
+                if (relativeBoostPressure > 0) {
+                    pressure[rpmIndex][dutyCycleIndex] += relativeBoostPressure
+                    count[rpmIndex][dutyCycleIndex] += 1
+                    sampleCounts[rpmIndex][dutyCycleIndex]++
+                }
+            }
+        }
+
+        for (j in nonLinearTable.indices) {
+            for (k in nonLinearTable[j].indices) {
+                nonLinearTable[j][k] = if (count[j][k] != 0.0) {
+                    (pressure[j][k] / count[j][k]) * 0.0145038
+                } else {
+                    pressure[j][k] * 0.0145038
+                }
+            }
+        }
+
+        for (rowIdx in nonLinearTable.indices) {
+            val row = nonLinearTable[rowIdx]
+            val filledIndices = row.indices.filter { count[rowIdx][it] > 0 }
+
+            if (filledIndices.isEmpty()) {
+                for (i in row.indices) row[i] = 0.1 + i * 0.01
+            } else {
+                for (i in row.indices) {
+                    if (row[i] == 0.0) {
+                        val left = filledIndices.lastOrNull { it < i }
+                        val right = filledIndices.firstOrNull { it > i }
+                        row[i] = when {
+                            left != null && right != null -> {
+                                val t = (i - left).toDouble() / (right - left)
+                                row[left] + t * (row[right] - row[left])
+                            }
+                            left != null -> {
+                                val prevFilled = filledIndices.lastOrNull { it < left }
+                                if (prevFilled != null) {
+                                    val slope = (row[left] - row[prevFilled]) / (left - prevFilled)
+                                    (row[left] + slope * (i - left)).coerceAtLeast(row[left])
+                                } else {
+                                    row[left] * (1.0 + 0.02 * (i - left))
+                                }
+                            }
+                            right != null -> {
+                                val dutyHere = dutyAxis[i].coerceAtLeast(1.0)
+                                val dutyThere = dutyAxis[right].coerceAtLeast(1.0)
+                                (row[right] * dutyHere / dutyThere).coerceAtLeast(0.1)
+                            }
+                            else -> 0.1
+                        }
+                    }
+                }
+            }
+
+            for (i in row.indices) {
+                if (row[i] <= 0.0 || row[i].isNaN()) row[i] = 0.1
+            }
+            for (i in 1 until row.size) {
+                if (row[i] < row[i - 1]) {
+                    row[i] = row[i - 1] + 0.01
+                }
+            }
+        }
+
+        return Pair(Map3d(dutyAxis, rpmAxis, nonLinearTable), sampleCounts)
+    }
+
     fun calculateLinearTable(nonLinearTable: Array<Array<Double>>, kfldrlMap: Map3d): Map3d {
         if (nonLinearTable.isEmpty() || nonLinearTable[0].isEmpty()) {
             return Map3d(kfldrlMap.xAxis, kfldrlMap.yAxis, emptyArray())
@@ -245,6 +351,88 @@ object LdrpidCalculator {
         }
 
         return Map3d(kfldimxXAxis, kfldimxMap.yAxis, kfldimx)
+    }
+
+    /**
+     * Derive KFLDRL sample counts from the non-linear table counts.
+     * For each KFLDRL cell (RPM × pressure), find the non-linear duty column
+     * whose boost contributed via interpolation and copy its count.
+     */
+    fun deriveKfldrlSampleCounts(
+        nonLinearTable: Array<Array<Double>>,
+        linearTable: Array<Array<Double>>,
+        nonLinearCounts: Array<IntArray>,
+        kfldrlMap: Map3d
+    ): Array<IntArray> {
+        if (nonLinearTable.isEmpty() || nonLinearTable[0].isEmpty()) {
+            return Array(kfldrlMap.yAxis.size) { IntArray(kfldrlMap.xAxis.size) }
+        }
+        return Array(nonLinearTable.size) { rpmIdx ->
+            val boostValues = nonLinearTable[rpmIdx]
+            IntArray(linearTable[rpmIdx].size) { colIdx ->
+                val targetBoost = linearTable[rpmIdx][colIdx]
+                val nearestDutyIdx = boostValues.indices.minByOrNull {
+                    kotlin.math.abs(boostValues[it] - targetBoost)
+                } ?: 0
+                if (rpmIdx < nonLinearCounts.size && nearestDutyIdx < nonLinearCounts[rpmIdx].size) {
+                    nonLinearCounts[rpmIdx][nearestDutyIdx]
+                } else 0
+            }
+        }
+    }
+
+    /**
+     * Derive KFLDIMX sample counts from KFLDRL counts.
+     * For each KFLDIMX cell, find the corresponding KFLDRL column via index lookup.
+     */
+    fun deriveKfldimxSampleCounts(
+        kfldrlCounts: Array<IntArray>,
+        kfldrlMap: Map3d,
+        kfldimxMap: Map3d
+    ): Array<IntArray> {
+        if (kfldrlCounts.isEmpty()) {
+            return Array(kfldimxMap.yAxis.size) { IntArray(kfldimxMap.xAxis.size) }
+        }
+        return Array(kfldimxMap.yAxis.size) { rpmIdx ->
+            val kfldrlRpmIdx = if (kfldrlMap.yAxis.isNotEmpty()) {
+                Index.getInsertIndex(kfldrlMap.yAxis.toList(), kfldimxMap.yAxis.getOrElse(rpmIdx) { 0.0 })
+            } else rpmIdx
+            IntArray(kfldimxMap.xAxis.size) { colIdx ->
+                val kfldrlColIdx = if (kfldrlMap.xAxis.isNotEmpty()) {
+                    Index.getInsertIndex(kfldrlMap.xAxis.toList(), kfldimxMap.xAxis.getOrElse(colIdx) { 0.0 })
+                } else colIdx
+                if (kfldrlRpmIdx < kfldrlCounts.size && kfldrlColIdx < kfldrlCounts[kfldrlRpmIdx].size) {
+                    kfldrlCounts[kfldrlRpmIdx][kfldrlColIdx]
+                } else 0
+            }
+        }
+    }
+
+    /**
+     * Calculate all LDRPID tables with per-cell sample counts for confidence display.
+     */
+    fun calculateWithCounts(
+        values: Map<Me7LogFileContract.Header, List<Double>>,
+        kfldrlMap: Map3d,
+        kfldimxMap: Map3d
+    ): LdrpidResult {
+        val (nonLinearMap3d, nonLinearCounts) = calculateNonLinearTableWithCounts(values, kfldrlMap)
+        val linearTable = calculateLinearTable(nonLinearMap3d.zAxis, kfldrlMap)
+        val kfldrl = calculateKfldrl(nonLinearMap3d.zAxis, linearTable.zAxis, kfldrlMap)
+        val kfldimxMap3d = calculateKfldimx(nonLinearMap3d.zAxis, linearTable.zAxis, kfldrlMap, kfldimxMap)
+
+        val kfldrlCounts = deriveKfldrlSampleCounts(nonLinearMap3d.zAxis, linearTable.zAxis, nonLinearCounts, kfldrlMap)
+        val kfldimxCounts = deriveKfldimxSampleCounts(kfldrlCounts, kfldrl, kfldimxMap3d)
+
+        return LdrpidResult(
+            nonLinearOutput = nonLinearMap3d,
+            linearOutput = linearTable,
+            kfldrl = kfldrl,
+            kfldimx = kfldimxMap3d,
+            nonLinearSampleCounts = nonLinearCounts,
+            kfldrlSampleCounts = kfldrlCounts,
+            kfldimxSampleCounts = kfldimxCounts
+        )
     }
 
     fun calculateLdrpid(values: Map<Me7LogFileContract.Header, List<Double>>, kfldrlMap: Map3d, kfldimxMap: Map3d): LdrpidResult {

@@ -44,7 +44,8 @@ private fun hsbColor(value: Double): Color {
 fun MapTable(
     map: Map3d,
     editable: Boolean = true,
-    onMapChanged: ((Map3d) -> Unit)? = null
+    onMapChanged: ((Map3d) -> Unit)? = null,
+    cellColorProvider: ((rowIdx: Int, colIdx: Int) -> Color?)? = null
 ) {
     val zAxis = map.zAxis
     if (zAxis.isEmpty() || zAxis[0].isEmpty()) return
@@ -217,7 +218,7 @@ fun MapTable(
 
                                 val bgColor = when {
                                     isSelected -> Color.Cyan.copy(alpha = 0.3f)
-                                    else -> hsbColor(norm)
+                                    else -> cellColorProvider?.invoke(r, c) ?: hsbColor(norm)
                                 }
 
                                 Box(

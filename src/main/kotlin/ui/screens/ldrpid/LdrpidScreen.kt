@@ -9,6 +9,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import data.parser.bin.BinParser
 import data.parser.me7log.Me7LogParser
@@ -61,6 +62,10 @@ fun LdrpidScreen() {
     var kfldrlMap by remember { mutableStateOf<Map3d?>(null) }
     var kfldimxMap by remember { mutableStateOf<Map3d?>(null) }
     var kfldimxXAxis by remember { mutableStateOf<Array<Array<Double>>?>(null) }
+    // Sample count state for confidence display
+    var nonLinearSampleCounts by remember { mutableStateOf<Array<IntArray>?>(null) }
+    var kfldrlSampleCounts by remember { mutableStateOf<Array<IntArray>?>(null) }
+    var kfldimxSampleCounts by remember { mutableStateOf<Array<IntArray>?>(null) }
 
     // Initialize maps from preferences (only set KFLDRL/KFLDIMX definitions, not empty zeros)
     LaunchedEffect(kfldrlPair, kfldimxPair) {
@@ -230,13 +235,16 @@ fun LdrpidScreen() {
                             val kfldimxDef = KfldimxPreferences.getSelectedMap()
                             val kfldrlDef = KfldrlPreferences.getSelectedMap()
                             if (kfldimxDef != null && kfldrlDef != null) {
-                                val result = LdrpidCalculator.calculateLdrpid(values, kfldrlDef.second, kfldimxDef.second)
+                                val result = LdrpidCalculator.calculateWithCounts(values, kfldrlDef.second, kfldimxDef.second)
                                 withContext(Dispatchers.Main) {
                                     nonLinearMap = result.nonLinearOutput
                                     linearMap = result.linearOutput
                                     kfldrlMap = result.kfldrl
                                     kfldimxMap = result.kfldimx
                                     kfldimxXAxis = arrayOf(result.kfldimx.xAxis)
+                                    nonLinearSampleCounts = result.nonLinearSampleCounts
+                                    kfldrlSampleCounts = result.kfldrlSampleCounts
+                                    kfldimxSampleCounts = result.kfldimxSampleCounts
                                     showProgress = false
                                 }
                             }
@@ -282,7 +290,10 @@ fun LdrpidScreen() {
             kfldrlMap = kfldrlMap,
             kfldimxMap = kfldimxMap,
             kfldimxXAxis = kfldimxXAxis,
-            onNonLinearChanged = { recomputeFromNonLinear(it) }
+            onNonLinearChanged = { recomputeFromNonLinear(it) },
+            nonLinearSampleCounts = nonLinearSampleCounts,
+            kfldrlSampleCounts = kfldrlSampleCounts,
+            kfldimxSampleCounts = kfldimxSampleCounts
         )
 
         // ── Write to Binary Section ───────────────────────────────────
@@ -378,6 +389,19 @@ private fun LdrpidConfigCard(
 
 // ── Tabbed Comparison Area ────────────────────────────────────────────
 
+/** Build a cellColorProvider from sample counts: green=high confidence, yellow=low, null=interpolated */
+private fun sampleCountColorProvider(counts: Array<IntArray>?): ((Int, Int) -> Color?)? {
+    if (counts == null) return null
+    return { rowIdx, colIdx ->
+        val count = counts.getOrNull(rowIdx)?.getOrNull(colIdx) ?: 0
+        when {
+            count >= 5 -> Color(0x4000C853)   // green — high confidence
+            count >= 1 -> Color(0x40FFD600)   // yellow — low confidence
+            else -> null                       // interpolated — fall back to default HSB
+        }
+    }
+}
+
 @Composable
 private fun LdrpidComparisonArea(
     modifier: Modifier = Modifier,
@@ -388,7 +412,10 @@ private fun LdrpidComparisonArea(
     kfldrlMap: Map3d?,
     kfldimxMap: Map3d?,
     kfldimxXAxis: Array<Array<Double>>?,
-    onNonLinearChanged: (Map3d) -> Unit
+    onNonLinearChanged: (Map3d) -> Unit,
+    nonLinearSampleCounts: Array<IntArray>? = null,
+    kfldrlSampleCounts: Array<IntArray>? = null,
+    kfldimxSampleCounts: Array<IntArray>? = null
 ) {
     Column(modifier = modifier) {
         PrimaryTabRow(selectedTabIndex = selectedTab) {
@@ -398,9 +425,9 @@ private fun LdrpidComparisonArea(
         }
 
         when (selectedTab) {
-            0 -> BoostTablesTab(nonLinearMap, linearMap, onNonLinearChanged, Modifier.fillMaxWidth().weight(1f))
-            1 -> KfldrlTab(kfldrlMap, Modifier.fillMaxWidth().weight(1f))
-            2 -> KfldimxTab(kfldimxMap, kfldimxXAxis, Modifier.fillMaxWidth().weight(1f))
+            0 -> BoostTablesTab(nonLinearMap, linearMap, onNonLinearChanged, Modifier.fillMaxWidth().weight(1f), nonLinearSampleCounts)
+            1 -> KfldrlTab(kfldrlMap, Modifier.fillMaxWidth().weight(1f), kfldrlSampleCounts)
+            2 -> KfldimxTab(kfldimxMap, kfldimxXAxis, Modifier.fillMaxWidth().weight(1f), kfldimxSampleCounts)
         }
     }
 }
@@ -410,7 +437,8 @@ private fun BoostTablesTab(
     nonLinearMap: Map3d?,
     linearMap: Map3d?,
     onNonLinearChanged: (Map3d) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    nonLinearSampleCounts: Array<IntArray>? = null
 ) {
     Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         // Non-Linear Boost (editable)
@@ -423,7 +451,12 @@ private fun BoostTablesTab(
             )
             if (nonLinearMap != null && nonLinearMap.zAxis.isNotEmpty()) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    MapTable(map = nonLinearMap, editable = true, onMapChanged = { onNonLinearChanged(it) })
+                    MapTable(
+                        map = nonLinearMap,
+                        editable = true,
+                        onMapChanged = { onNonLinearChanged(it) },
+                        cellColorProvider = sampleCountColorProvider(nonLinearSampleCounts)
+                    )
                 }
             } else {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -462,7 +495,7 @@ private fun BoostTablesTab(
 }
 
 @Composable
-private fun KfldrlTab(kfldrlMap: Map3d?, modifier: Modifier = Modifier) {
+private fun KfldrlTab(kfldrlMap: Map3d?, modifier: Modifier = Modifier, sampleCounts: Array<IntArray>? = null) {
     Column(modifier = modifier) {
         Text(
             text = "KFLDRL \u2014 Linearized Wastegate Duty Cycle",
@@ -472,7 +505,11 @@ private fun KfldrlTab(kfldrlMap: Map3d?, modifier: Modifier = Modifier) {
         )
         if (kfldrlMap != null && kfldrlMap.zAxis.isNotEmpty()) {
             Box(modifier = Modifier.fillMaxSize()) {
-                MapTable(map = kfldrlMap, editable = false)
+                MapTable(
+                    map = kfldrlMap,
+                    editable = false,
+                    cellColorProvider = sampleCountColorProvider(sampleCounts)
+                )
             }
         } else {
             Text("No map data", style = MaterialTheme.typography.bodyMedium)
@@ -484,7 +521,8 @@ private fun KfldrlTab(kfldrlMap: Map3d?, modifier: Modifier = Modifier) {
 private fun KfldimxTab(
     kfldimxMap: Map3d?,
     kfldimxXAxis: Array<Array<Double>>?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    sampleCounts: Array<IntArray>? = null
 ) {
     Column(modifier = modifier) {
         if (kfldimxXAxis != null) {
@@ -513,7 +551,11 @@ private fun KfldimxTab(
         )
         if (kfldimxMap != null && kfldimxMap.zAxis.isNotEmpty()) {
             Box(modifier = Modifier.fillMaxSize()) {
-                MapTable(map = kfldimxMap, editable = false)
+                MapTable(
+                    map = kfldimxMap,
+                    editable = false,
+                    cellColorProvider = sampleCountColorProvider(sampleCounts)
+                )
             }
         } else {
             Text("No map data", style = MaterialTheme.typography.bodyMedium)
