@@ -288,6 +288,7 @@ class Med17LogParser {
         }
         getDouble(record, H.FUEL_MASS_REL_HEADER)?.let { map[H.FUEL_MASS_REL_HEADER]?.add(it) }
         getDouble(record, H.LAMBDA_CONTROL_ACTIVE_HEADER)?.let { map[H.LAMBDA_CONTROL_ACTIVE_HEADER]?.add(it) }
+        getDouble(record, H.REQUESTED_LAMBDA_HEADER)?.let { map[H.REQUESTED_LAMBDA_HEADER]?.add(it) }
     }
 
     private fun parsePlsolRow(
@@ -453,6 +454,7 @@ class Med17LogParser {
                 map[H.LONG_TERM_FT_HEADER] = mutableListOf()
                 map[H.FUEL_MASS_REL_HEADER] = mutableListOf()
                 map[H.LAMBDA_CONTROL_ACTIVE_HEADER] = mutableListOf()
+                map[H.REQUESTED_LAMBDA_HEADER] = mutableListOf()
             }
             LogType.PFI_SPLIT -> {
                 map[H.TIME_STAMP_COLUMN_HEADER] = mutableListOf()

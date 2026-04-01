@@ -10,6 +10,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import data.contract.Med17LogFileContract
@@ -22,7 +23,9 @@ import data.preferences.rkw.RkwPreferences
 import data.writer.BinWriter
 import domain.math.map.Map3d
 import domain.model.fueltrim.FuelTrimAnalyzer
+import domain.model.fueltrim.FuelTrimDiagnosticResult
 import domain.model.fueltrim.FuelTrimResult
+import domain.model.fueltrim.RkwTableMetadata
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -63,6 +66,13 @@ fun FuelTrimScreen() {
     val rkwPair = remember(mapList, mapVersion) { findMap(mapList, RkwPreferences) }
     val inputRkw = rkwPair?.second
 
+    // ── Parse rk_w table metadata for display ──
+    val rkwMetadata: RkwTableMetadata? = remember(rkwPair) {
+        rkwPair?.first?.let { def ->
+            RkwTableMetadata.parse(def.tableName, def.tableDescription)
+        }
+    }
+
     // ── Map-switch warning: detect native rk_w selection when MAP variants exist ──
     val mapSwitchWarning: String? = remember(mapList, mapVersion) {
         val mapSwitchRkwTables = mapList.filter { (def, _) ->
@@ -90,6 +100,7 @@ fun FuelTrimScreen() {
 
     // ── Log analysis state ──
     var trimResult by remember { mutableStateOf<FuelTrimResult?>(null) }
+    var diagnosticResult by remember { mutableStateOf<FuelTrimDiagnosticResult?>(null) }
     var logStatus by remember { mutableStateOf<String?>(null) }
     var showProgress by remember { mutableStateOf(false) }
 
@@ -219,6 +230,13 @@ fun FuelTrimScreen() {
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.Bold
                 )
+                if (rkwMetadata != null) {
+                    Text(
+                        rkwMetadata.displayLabel,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
                 Spacer(modifier = Modifier.height(8.dp))
                 if (inputRkw != null) {
                     val tableHeight = ((inputRkw.yAxis.size + 1) * 24 + 4).dp
@@ -284,11 +302,13 @@ fun FuelTrimScreen() {
                                             ?: FuelTrimAnalyzer.DEFAULT_RPM_BINS
                                         val loadBins = inputRkw?.xAxis?.map { it }?.toDoubleArray()
                                             ?: FuelTrimAnalyzer.DEFAULT_LOAD_BINS
-                                        val analyzed = FuelTrimAnalyzer.analyzeMed17Trims(
+                                        val diagResult = FuelTrimAnalyzer.analyzeMed17TrimsWithDiagnostics(
                                             allLogData, rpmBins, loadBins
                                         )
+                                        val analyzed = diagResult.toFuelTrimResult()
                                         withContext(Dispatchers.Main) {
                                             trimResult = analyzed
+                                            diagnosticResult = diagResult
                                             val totalBins = analyzed.corrections.sumOf { row ->
                                                 row.count { it != 0.0 }
                                             }
@@ -315,6 +335,7 @@ fun FuelTrimScreen() {
                     if (trimResult != null) {
                         OutlinedButton(onClick = {
                             trimResult = null
+                            diagnosticResult = null
                             logStatus = "Cleared"
                         }) {
                             Text("Clear")
@@ -334,6 +355,23 @@ fun FuelTrimScreen() {
 
         // Results
         trimResult?.let { fuelTrimResult ->
+            // Diagnostic summary banner
+            diagnosticResult?.let { diag ->
+                Surface(
+                    shape = MaterialTheme.shapes.medium,
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        "Processed %,d samples (%,d filtered: closed-loop only) | %d bins with data, %d rejected (high variance)"
+                            .format(diag.totalSamplesProcessed, diag.samplesFilteredOut, diag.binsWithData, diag.binsRejected),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+            }
+
             // Average Trims Grid
             Surface(
                 shape = MaterialTheme.shapes.medium,
@@ -355,7 +393,7 @@ fun FuelTrimScreen() {
                 }
             }
 
-            // Output: corrected rk_w
+            // Output: corrected rk_w with diagnostic cell coloring
             Surface(
                 shape = MaterialTheme.shapes.medium,
                 tonalElevation = 1.dp,
@@ -370,8 +408,17 @@ fun FuelTrimScreen() {
                     Spacer(modifier = Modifier.height(8.dp))
                     if (outputRkw != null) {
                         val outHeight = ((outputRkw.yAxis.size + 1) * 24 + 4).dp
+                        val colorProvider: ((Int, Int) -> Color?)? = diagnosticResult?.let { diag ->
+                            { rowIdx: Int, colIdx: Int ->
+                                cellDiagnosticColor(diag, outputRkw, rowIdx, colIdx)
+                            }
+                        }
                         Box(modifier = Modifier.fillMaxWidth().height(outHeight)) {
-                            MapTable(map = outputRkw, editable = false)
+                            MapTable(
+                                map = outputRkw,
+                                editable = false,
+                                cellColorProvider = colorProvider
+                            )
                         }
                     } else if (inputRkw == null) {
                         Text(
@@ -443,5 +490,36 @@ fun FuelTrimScreen() {
                 WriteStatus.Idle -> {}
             }
         }
+    }
+}
+
+/**
+ * Map a diagnostic result cell to a background colour for the corrected rk_w MapTable.
+ *
+ * - **Green** (0x4000C853): correction applied, low std_dev
+ * - **Yellow** (0x40FFD600): correction applied, moderate std_dev (> 3%)
+ * - **Red** (0x40FF1744): bin rejected (high std_dev or insufficient samples)
+ * - **null**: no data — default MapTable colouring
+ */
+private fun cellDiagnosticColor(
+    diag: FuelTrimDiagnosticResult,
+    outputRkw: Map3d,
+    rowIdx: Int,
+    colIdx: Int
+): Color? {
+    val rpmVal = if (rowIdx < outputRkw.yAxis.size) outputRkw.yAxis[rowIdx] else return null
+    val loadVal = if (colIdx < outputRkw.xAxis.size) outputRkw.xAxis[colIdx] else return null
+
+    val rIdx = FuelTrimAnalyzer.nearestBinIndex(rpmVal, diag.rpmBins)
+    val lIdx = FuelTrimAnalyzer.nearestBinIndex(loadVal, diag.loadBins)
+    val cell = diag.diagnostics[rIdx][lIdx]
+
+    return when {
+        cell.sampleCount == 0 -> null
+        cell.rejected -> Color(0x40FF1744)                        // red — rejected
+        cell.correctionApplied != 0.0 && cell.stdDevPercent > 3.0 ->
+            Color(0x40FFD600)                                     // yellow — correction with moderate σ
+        cell.correctionApplied != 0.0 -> Color(0x4000C853)        // green — good correction
+        else -> null
     }
 }
