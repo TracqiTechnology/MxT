@@ -240,10 +240,11 @@ fun OptimizerScreen() {
     var selectedTab by remember { mutableStateOf(0) }
 
     val isMed17 = EcuPlatformPreference.platform == EcuPlatform.MED17
-    val tabTitles = if (isMed17) {
-        listOf("Overview", "Per-Link", "Boost Control", "Calibration", "Prediction", "Pulls", "Export")
-    } else {
+    val hasKfpbrk = kfpbrkPair != null
+    val tabTitles = if (hasKfpbrk) {
         listOf("Overview", "Per-Link", "Boost Control", "VE Model", "Calibration", "Prediction", "Pulls", "Export")
+    } else {
+        listOf("Overview", "Per-Link", "Boost Control", "Calibration", "Prediction", "Pulls", "Export")
     }
 
     Column(
@@ -545,14 +546,14 @@ fun OptimizerScreen() {
             Spacer(Modifier.height(8.dp))
 
             when (selectedTab) {
-                0 -> OverviewTab(result!!)
-                1 -> PerLinkTab(result!!)
+                0 -> OverviewTab(result!!, isMed17)
+                1 -> PerLinkTab(result!!, isMed17)
                 2 -> BoostControlTab(result!!, kfldrlPair, kfldimxPair)
-                3 -> if (isMed17) CalibrationTab(result!!) else VeModelTab(result!!, kfpbrkPair, kfpbrknwPair)
-                4 -> if (isMed17) PredictionTab(result!!) else CalibrationTab(result!!)
-                5 -> if (isMed17) PullsTab(result!!) else PredictionTab(result!!)
-                6 -> if (isMed17) ExportTab(result!!, kfldrlPair, kfldimxPair, kfpbrkPair, kfmiopPair, kfmirlPair) else PullsTab(result!!)
-                7 -> if (!isMed17) ExportTab(result!!, kfldrlPair, kfldimxPair, kfpbrkPair, kfmiopPair, kfmirlPair)
+                3 -> if (hasKfpbrk) VeModelTab(result!!, kfpbrkPair, kfpbrknwPair) else CalibrationTab(result!!, kfpbrkPair, kfmirlPair)
+                4 -> if (hasKfpbrk) CalibrationTab(result!!, kfpbrkPair, kfmirlPair) else PredictionTab(result!!)
+                5 -> if (hasKfpbrk) PredictionTab(result!!) else PullsTab(result!!)
+                6 -> if (hasKfpbrk) PullsTab(result!!) else ExportTab(result!!, kfldrlPair, kfldimxPair, kfpbrkPair, kfmiopPair, kfmirlPair)
+                7 -> if (hasKfpbrk) ExportTab(result!!, kfldrlPair, kfldimxPair, kfpbrkPair, kfmiopPair, kfmirlPair)
             }
         }
     }
@@ -771,7 +772,7 @@ private fun VeModelTab(
 // ── Tab: Overview (Dashboard) ──────────────────────────────────────────
 
 @Composable
-private fun OverviewTab(result: OptimizerCalculator.OptimizerResult) {
+private fun OverviewTab(result: OptimizerCalculator.OptimizerResult, isMed17: Boolean = false) {
     Column(modifier = Modifier.fillMaxWidth()) {
         val diag = result.chainDiagnosis
         val entries = result.wotEntries
@@ -819,9 +820,13 @@ private fun OverviewTab(result: OptimizerCalculator.OptimizerResult) {
                     "Link 1: LDRXN → rlsol (Torque — no high-RPM data)"
                 }
                 ChainLinkBar(link1Label, 100.0 - diag.torqueCappedPercent)
-                ChainLinkBar("Link 2: rlsol → pssol (VE Model)", 100.0 - diag.pssolErrorPercent)
+                if (!isMed17) {
+                    ChainLinkBar("Link 2: rlsol → pssol (VE Model)", 100.0 - diag.pssolErrorPercent)
+                }
                 ChainLinkBar("Link 3: pssol → pvdks (Boost Control)", 100.0 - diag.boostShortfallPercent)
-                ChainLinkBar("Link 4: pvdks → rl_w (VE Readback)", 100.0 - diag.veMismatchPercent)
+                if (!isMed17) {
+                    ChainLinkBar("Link 4: pvdks → rl_w (VE Readback)", 100.0 - diag.veMismatchPercent)
+                }
 
                 Spacer(Modifier.height(8.dp))
                 val (dominantIcon, dominantTint, dominantLabel) = when (diag.dominantError) {
@@ -1141,13 +1146,19 @@ private fun PidIndicator(label: String, triggered: Boolean, detail: String) {
 // ── Tab: Per-Link Analysis ────────────────────────────────────────────
 
 @Composable
-private fun PerLinkTab(result: OptimizerCalculator.OptimizerResult) {
+private fun PerLinkTab(result: OptimizerCalculator.OptimizerResult, isMed17: Boolean = false) {
     var selectedLink by remember { mutableStateOf(0) }
-    val linkNames = listOf("Link 3: Boost", "Link 4: VE", "Link 1: Torque", "Link 2: PLSOL")
+    // MED17 only has meaningful Boost (Link 3) and Torque (Link 1) diagnostics.
+    // Links 2 (PLSOL) and 4 (VE) use adaptive fupsrl_w, not static maps.
+    val linkEntries = if (isMed17) {
+        listOf("Link 3: Boost" to 0, "Link 1: Torque" to 2)
+    } else {
+        listOf("Link 3: Boost" to 0, "Link 4: VE" to 1, "Link 1: Torque" to 2, "Link 2: PLSOL" to 3)
+    }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 8.dp)) {
-            linkNames.forEachIndexed { index, name ->
+            linkEntries.forEachIndexed { index, (name, _) ->
                 FilterChip(
                     selected = selectedLink == index,
                     onClick = { selectedLink = index },
@@ -1156,7 +1167,8 @@ private fun PerLinkTab(result: OptimizerCalculator.OptimizerResult) {
             }
         }
 
-        when (selectedLink) {
+        val contentIndex = linkEntries.getOrNull(selectedLink)?.second ?: 0
+        when (contentIndex) {
             0 -> PerLinkBoostContent(result)
             1 -> PerLinkVeContent(result)
             2 -> PerLinkTorqueContent(result)
@@ -1413,7 +1425,11 @@ private fun PerRpmTable(
 // ── Tab: Calibration (Before / After / Delta) ─────────────────────────
 
 @Composable
-private fun CalibrationTab(result: OptimizerCalculator.OptimizerResult) {
+private fun CalibrationTab(
+    result: OptimizerCalculator.OptimizerResult,
+    kfpbrkPair: Pair<data.parser.xdf.TableDefinition, domain.math.map.Map3d>? = null,
+    kfmirlPair: Pair<data.parser.xdf.TableDefinition, domain.math.map.Map3d>? = null
+) {
     Column(modifier = Modifier.fillMaxWidth()) {
         val sm = result.suggestedMaps
 
@@ -1421,7 +1437,7 @@ private fun CalibrationTab(result: OptimizerCalculator.OptimizerResult) {
             Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("No map corrections available.", style = MaterialTheme.typography.titleMedium)
-                    Text("Ensure KFLDRL and KFPBRK are configured in the Configuration tab.", style = MaterialTheme.typography.bodyMedium)
+                    Text("Ensure KFLDRL is configured in the Configuration tab.", style = MaterialTheme.typography.bodyMedium)
                 }
             }
             return
