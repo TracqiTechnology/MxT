@@ -239,7 +239,12 @@ fun OptimizerScreen() {
     var showProgress by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableStateOf(0) }
 
-    val tabTitles = listOf("Overview", "Per-Link", "Boost Control", "VE Model", "Calibration", "Prediction", "Pulls", "Export")
+    val isMed17 = EcuPlatformPreference.platform == EcuPlatform.MED17
+    val tabTitles = if (isMed17) {
+        listOf("Overview", "Per-Link", "Boost Control", "Calibration", "Prediction", "Pulls", "Export")
+    } else {
+        listOf("Overview", "Per-Link", "Boost Control", "VE Model", "Calibration", "Prediction", "Pulls", "Export")
+    }
 
     Column(
         modifier = Modifier
@@ -543,11 +548,11 @@ fun OptimizerScreen() {
                 0 -> OverviewTab(result!!)
                 1 -> PerLinkTab(result!!)
                 2 -> BoostControlTab(result!!, kfldrlPair, kfldimxPair)
-                3 -> VeModelTab(result!!, kfpbrkPair, kfpbrknwPair)
-                4 -> CalibrationTab(result!!)
-                5 -> PredictionTab(result!!)
-                6 -> PullsTab(result!!)
-                7 -> ExportTab(result!!, kfldrlPair, kfldimxPair, kfpbrkPair, kfmiopPair, kfmirlPair)
+                3 -> if (isMed17) CalibrationTab(result!!) else VeModelTab(result!!, kfpbrkPair, kfpbrknwPair)
+                4 -> if (isMed17) PredictionTab(result!!) else CalibrationTab(result!!)
+                5 -> if (isMed17) PullsTab(result!!) else PredictionTab(result!!)
+                6 -> if (isMed17) ExportTab(result!!, kfldrlPair, kfldimxPair, kfpbrkPair, kfmiopPair, kfmirlPair) else PullsTab(result!!)
+                7 -> if (!isMed17) ExportTab(result!!, kfldrlPair, kfldimxPair, kfpbrkPair, kfmiopPair, kfmirlPair)
             }
         }
     }
