@@ -30,7 +30,9 @@ fun MapPickerDialog(
     initialFilter: String = title
         .removePrefix("Select ")
         .removeSuffix(" Map")
-        .trim()
+        .trim(),
+    // Optional: returns true for tables that should be sorted to the top and badged as recommended
+    recommendedPredicate: ((TableDefinition) -> Boolean)? = null
 ) {
     // Observe KP hints, KP definitions, and CSV definitions.
     val kpHints by KpHintParser.hints.collectAsState()
@@ -64,8 +66,8 @@ fun MapPickerDialog(
     }
     val filterText = filterField.text
 
-    val filteredDefinitions = remember(filterText, tableDefinitions) {
-        if (filterText.isBlank()) tableDefinitions
+    val filteredDefinitions = remember(filterText, tableDefinitions, recommendedPredicate) {
+        val base = if (filterText.isBlank()) tableDefinitions
         else {
             val filter = filterText.lowercase()
             tableDefinitions.filter {
@@ -73,6 +75,9 @@ fun MapPickerDialog(
                     it.tableDescription.lowercase().contains(filter)
             }
         }
+        if (recommendedPredicate != null) {
+            base.sortedByDescending { recommendedPredicate(it) }
+        } else base
     }
 
     // When a KP hint/definition or CSV hint with an address is available,
@@ -90,11 +95,17 @@ fun MapPickerDialog(
         } else null
     }
 
-    // Start with: KP-address-matched definition > existing selection > first filtered result
-    var selectedItem by remember(filteredDefinitions, kpPreferredDefinition) {
+    // Start with: KP-address-matched definition > existing selection >
+    // first recommended item (if predicate provided) > first filtered result
+    val firstRecommended = remember(filteredDefinitions, recommendedPredicate) {
+        if (recommendedPredicate != null) filteredDefinitions.firstOrNull { recommendedPredicate(it) }
+        else null
+    }
+    var selectedItem by remember(filteredDefinitions, kpPreferredDefinition, firstRecommended) {
         mutableStateOf(
             kpPreferredDefinition
                 ?: initialValue
+                ?: firstRecommended
                 ?: if (initialFilter.isNotBlank()) filteredDefinitions.firstOrNull() else null
         )
     }
@@ -214,15 +225,28 @@ fun MapPickerDialog(
                         }
                     }
                     items(filteredDefinitions) { definition ->
-                        // Highlight KP-address-matched definitions with a subtle indicator
                         val isKpMatch = kpPreferredDefinition == definition
+                        val isRecommended = recommendedPredicate?.invoke(definition) == true
                         ListItem(
                             headlineContent = {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(definition.toString())
+                                    if (isRecommended) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.tertiaryContainer,
+                                            shape = MaterialTheme.shapes.extraSmall
+                                        ) {
+                                            Text(
+                                                text = "★ Recommended",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
                                     if (isKpMatch) {
                                         Spacer(Modifier.width(6.dp))
-                                        // Show "CSV" badge if matched via CSV, "KP" if via KP binary
                                         val badgeLabel = if (csvHint != null && csvHint.hasAddress) "CSV" else "KP"
                                         Surface(
                                             color = MaterialTheme.colorScheme.primaryContainer,

@@ -145,6 +145,34 @@ object FuelTrimAnalyzer {
         return FuelTrimResult(rpmBins, loadBins, avgTrims, corrections, warnings)
     }
 
+    // ── map-switch detection ────────────────────────────────────────
+
+    /**
+     * Returns `true` when [tableDescription] contains markers that identify
+     * a DS1 map-switch variant (e.g. `InjSys_RelMCorHom1_MAP Gasoline 0`).
+     *
+     * On MED17 with DS1, map-switch rk_w tables overwrite native ones at
+     * runtime, so editing a native table has no effect.
+     */
+    fun isMapSwitchTable(tableDescription: String): Boolean {
+        val d = tableDescription
+        return d.contains("_MAP ", ignoreCase = true) ||
+                d.contains("_MAP\t", ignoreCase = true) ||
+                d.endsWith("_MAP", ignoreCase = true) ||
+                d.contains("MAP Gasoline", ignoreCase = true) ||
+                d.contains("MAP Ethanol", ignoreCase = true)
+    }
+
+    /**
+     * Returns `true` when [tableDescription] looks like an rk_w
+     * (relative fuel-mass correction) table based on its Funktionsrahmen
+     * identifier.
+     */
+    fun isRkwTable(tableDescription: String): Boolean {
+        return tableDescription.contains("RelMCor", ignoreCase = true) ||
+                tableDescription.contains("rk_w", ignoreCase = true)
+    }
+
     // ── helpers ──────────────────────────────────────────────────────
 
     /** Return the first non-empty signal list from the candidates, or null. */

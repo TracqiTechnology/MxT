@@ -1,8 +1,11 @@
 package ui.screens.fueltrim
 
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -59,6 +62,31 @@ fun FuelTrimScreen() {
 
     val rkwPair = remember(mapList, mapVersion) { findMap(mapList, RkwPreferences) }
     val inputRkw = rkwPair?.second
+
+    // ── Map-switch warning: detect native rk_w selection when MAP variants exist ──
+    val mapSwitchWarning: String? = remember(mapList, mapVersion) {
+        val mapSwitchRkwTables = mapList.filter { (def, _) ->
+            FuelTrimAnalyzer.isRkwTable(def.tableDescription) &&
+                FuelTrimAnalyzer.isMapSwitchTable(def.tableDescription)
+        }
+        when {
+            mapSwitchRkwTables.isEmpty() -> null
+            rkwPair == null -> {
+                val suggested = mapSwitchRkwTables.firstOrNull { (def, _) ->
+                    def.tableDescription.contains("Gasoline 0", ignoreCase = true)
+                } ?: mapSwitchRkwTables.first()
+                "No rk_w table configured. ${mapSwitchRkwTables.size} map-switch variant(s) detected " +
+                    "in this BIN. On DS1 tunes, map-switch tables overwrite native ones — select a " +
+                    "map-switch variant (e.g. \"${suggested.first.tableName}\") in Configuration."
+            }
+            !FuelTrimAnalyzer.isMapSwitchTable(rkwPair.first.tableDescription) -> {
+                "You've selected the native rk_w table. On DS1 tunes, map-switch tables overwrite " +
+                    "native ones, so editing this table may have no effect. Consider selecting " +
+                    "a map-switch variant instead (${mapSwitchRkwTables.size} available)."
+            }
+            else -> null
+        }
+    }
 
     // ── Log analysis state ──
     var trimResult by remember { mutableStateOf<FuelTrimResult?>(null) }
@@ -150,6 +178,32 @@ fun FuelTrimScreen() {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+            }
+        }
+
+        // Map-switch warning banner
+        AnimatedVisibility(visible = mapSwitchWarning != null) {
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.errorContainer,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = "Warning",
+                        tint = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Text(
+                        mapSwitchWarning ?: "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
             }
         }
 
