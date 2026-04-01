@@ -412,4 +412,50 @@ class LdrpidMed17E2ETest {
         assertTrue(rowsWithRealBoost >= 2,
             "Degenerate map recovery should still produce ≥2 rows with real boost data")
     }
+
+    // ── 15. Log consistency check — single file is always clean ────
+
+    @Test
+    fun `single log file produces no consistency warning`() {
+        val parser = Med17LogParser()
+        val data = parser.parseLogFile(LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
+        val me7Data = Med17LogAdapter.toMe7LdrpidFormat(data)
+        val warning = LdrpidCalculator.checkLogConsistency(listOf(me7Data))
+        assertNull(warning, "Single log should never trigger consistency warning")
+    }
+
+    // ── 16. Conflicting logs from different tune stages trigger warning ─
+
+    @Test
+    fun `mixing logs from different tune stages triggers consistency warning`() {
+        val parser = Med17LogParser()
+        // 2025 log: aggressive tune, 2000-3400 hPa boost, duty 43-100%
+        val aggressive = Med17LogAdapter.toMe7LdrpidFormat(
+            parser.parseLogFile(LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
+        )
+        // 2026 log: low boost, 300-700 hPa, duty pinned at ~20%
+        val lowBoost = Med17LogAdapter.toMe7LdrpidFormat(
+            Med17LogParser().parseLogFile(LogType.LDRPID, logFile("2026-03-22_18.13.11_log.csv"))
+        )
+        val warning = LdrpidCalculator.checkLogConsistency(listOf(aggressive, lowBoost))
+        assertNotNull(warning, "Mixing aggressive and low-boost logs should trigger warning")
+        assertTrue(warning.contains("different tune stages"),
+            "Warning should mention 'different tune stages'")
+    }
+
+    // ── 17. Consistent logs from same tune stage produce no warning ──
+
+    @Test
+    fun `consistent logs from similar tune stage produce no warning`() {
+        val parser = Med17LogParser()
+        // Two logs from similar tune stages
+        val log1 = Med17LogAdapter.toMe7LdrpidFormat(
+            parser.parseLogFile(LogType.LDRPID, logFile("2023-05-19_21.31.12_log.csv"))
+        )
+        val log2 = Med17LogAdapter.toMe7LdrpidFormat(
+            Med17LogParser().parseLogFile(LogType.LDRPID, logFile("2024-10-25_17.50.39_log.csv"))
+        )
+        val warning = LdrpidCalculator.checkLogConsistency(listOf(log1, log2))
+        assertNull(warning, "Similar-stage logs should not produce a warning")
+    }
 }

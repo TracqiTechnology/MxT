@@ -321,4 +321,68 @@ class LdrpidCalculatorTest {
             }
         }
     }
+
+    // ── 10. Log consistency detection ───────────────────────────────
+
+    @Test
+    fun `checkLogConsistency returns no warning for single file`() {
+        val fileData = listOf(
+            buildLogData(
+                rpms           = listOf(4000.0, 5000.0, 6000.0),
+                throttles      = listOf(95.0,   95.0,   95.0),
+                dutyCycles     = listOf(60.0,   55.0,   50.0),
+                baroPressures  = listOf(1013.0, 1013.0, 1013.0),
+                boostPressures = listOf(2500.0, 2600.0, 2700.0)
+            )
+        )
+        val warning = LdrpidCalculator.checkLogConsistency(fileData)
+        assertNull(warning, "Single file should never produce a consistency warning")
+    }
+
+    @Test
+    fun `checkLogConsistency returns no warning for consistent files`() {
+        // Two logs from the same tune stage — similar boost at similar duty
+        val fileData = listOf(
+            buildLogData(
+                rpms           = listOf(4000.0, 5000.0, 6000.0),
+                throttles      = listOf(95.0,   95.0,   95.0),
+                dutyCycles     = listOf(60.0,   55.0,   50.0),
+                baroPressures  = listOf(1013.0, 1013.0, 1013.0),
+                boostPressures = listOf(2500.0, 2600.0, 2700.0)
+            ),
+            buildLogData(
+                rpms           = listOf(4500.0, 5500.0),
+                throttles      = listOf(90.0,   90.0),
+                dutyCycles     = listOf(58.0,   52.0),
+                baroPressures  = listOf(1013.0, 1013.0),
+                boostPressures = listOf(2550.0, 2650.0)
+            )
+        )
+        val warning = LdrpidCalculator.checkLogConsistency(fileData)
+        assertNull(warning, "Consistent logs should not produce a warning")
+    }
+
+    @Test
+    fun `checkLogConsistency returns warning for conflicting tune stages`() {
+        // Log 1: high boost at moderate duty (aggressive tune)
+        // Log 2: low boost at low duty (stock/detuned)
+        val fileData = listOf(
+            buildLogData(
+                rpms           = listOf(5000.0, 5000.0, 6000.0, 6000.0),
+                throttles      = listOf(95.0,   95.0,   95.0,   95.0),
+                dutyCycles     = listOf(50.0,   60.0,   50.0,   60.0),
+                baroPressures  = listOf(1013.0, 1013.0, 1013.0, 1013.0),
+                boostPressures = listOf(2800.0, 3000.0, 2900.0, 3100.0)
+            ),
+            buildLogData(
+                rpms           = listOf(5000.0, 5000.0, 6000.0, 6000.0),
+                throttles      = listOf(95.0,   95.0,   95.0,   95.0),
+                dutyCycles     = listOf(20.0,   20.0,   20.0,   20.0),
+                baroPressures  = listOf(1013.0, 1013.0, 1013.0, 1013.0),
+                boostPressures = listOf(1300.0, 1400.0, 1350.0, 1450.0)
+            )
+        )
+        val warning = LdrpidCalculator.checkLogConsistency(fileData)
+        assertNotNull(warning, "Conflicting tune stages should produce a warning")
+    }
 }

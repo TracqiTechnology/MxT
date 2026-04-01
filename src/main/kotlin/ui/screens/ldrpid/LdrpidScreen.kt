@@ -92,6 +92,7 @@ fun LdrpidScreen() {
     var progressMax by remember { mutableStateOf(1) }
     var showProgress by remember { mutableStateOf(false) }
     var logDirName by remember { mutableStateOf("No Directory Selected") }
+    var consistencyWarning by remember { mutableStateOf<String?>(null) }
 
     // Write state
     val binFile by BinFilePreferences.file.collectAsState()
@@ -192,16 +193,31 @@ fun LdrpidScreen() {
                     scope.launch {
                         withContext(Dispatchers.IO) {
                             val values = if (EcuPlatformPreference.platform == EcuPlatform.MED17) {
+                                // Parse each file individually for consistency check
+                                val csvFiles = selectedDir.listFiles()
+                                    ?.filter { it.isFile && it.name.endsWith(".csv", ignoreCase = true) }
+                                    ?: emptyList()
+                                val perFileData = mutableListOf<Map<data.contract.Me7LogFileContract.Header, List<Double>>>()
+                                csvFiles.forEachIndexed { idx, csvFile ->
+                                    val parser = Med17LogParser()
+                                    val fileData = parser.parseLogFile(Med17LogParser.LogType.LDRPID, csvFile)
+                                    perFileData.add(Med17LogAdapter.toMe7LdrpidFormat(fileData))
+                                    progressValue = idx + 1
+                                    progressMax = csvFiles.size
+                                    showProgress = idx < csvFiles.size - 1
+                                }
+                                // Check consistency across files
+                                val warning = LdrpidCalculator.checkLogConsistency(perFileData)
+                                withContext(Dispatchers.Main) { consistencyWarning = warning }
+
+                                // Aggregate: parse as directory for combined output
                                 val med17Parser = Med17LogParser()
                                 val med17Values = med17Parser.parseLogDirectory(
                                     Med17LogParser.LogType.LDRPID, selectedDir
-                                ) { value, max ->
-                                    progressValue = value
-                                    progressMax = max
-                                    showProgress = value < max - 1
-                                }
+                                ) { _, _ -> }
                                 Med17LogAdapter.toMe7LdrpidFormat(med17Values)
                             } else {
+                                consistencyWarning = null
                                 val parser = Me7LogParser()
                                 parser.parseLogDirectory(
                                     Me7LogParser.LogType.LDRPID, selectedDir
@@ -229,6 +245,32 @@ fun LdrpidScreen() {
                 }
             }
         )
+
+        // ── Log Consistency Warning ───────────────────────────────────
+        AnimatedVisibility(visible = consistencyWarning != null) {
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.errorContainer,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = "Warning",
+                        tint = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Text(
+                        consistencyWarning ?: "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+        }
 
         // ── Tabbed Comparison Area ────────────────────────────────────
         LdrpidComparisonArea(

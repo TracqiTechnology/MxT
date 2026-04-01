@@ -255,4 +255,49 @@ object LdrpidCalculator {
 
         return LdrpidResult(nonLinearTable, linearTable, kfldrl, kfldimxMap3d)
     }
+
+    /**
+     * Check whether multiple log files have consistent boost/duty relationships.
+     * Returns a warning message if files appear to be from different tune stages,
+     * or null if the data looks consistent (or there's only one file).
+     *
+     * The check computes a "tune signature" per file: the median relative boost
+     * pressure observed during WOT. If the signatures differ by more than 50%
+     * (ratio of max to min), the logs likely come from different calibrations
+     * and will produce unreliable KFLDRL output.
+     */
+    fun checkLogConsistency(
+        perFileData: List<Map<Me7LogFileContract.Header, List<Double>>>
+    ): String? {
+        if (perFileData.size <= 1) return null
+
+        val signatures = perFileData.mapNotNull { fileData ->
+            val throttles = fileData[Me7LogFileContract.Header.THROTTLE_PLATE_ANGLE_HEADER] ?: return@mapNotNull null
+            val boosts = fileData[Me7LogFileContract.Header.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER] ?: return@mapNotNull null
+            val baros = fileData[Me7LogFileContract.Header.BAROMETRIC_PRESSURE_HEADER] ?: return@mapNotNull null
+
+            val wotBoosts = throttles.indices
+                .filter { throttles[it] >= 80.0 }
+                .map { boosts[it] - baros[it] }
+                .filter { it > 0 }
+
+            if (wotBoosts.isEmpty()) return@mapNotNull null
+            wotBoosts.sorted()[wotBoosts.size / 2]  // median relative boost
+        }
+
+        if (signatures.size <= 1) return null
+
+        val minSig = signatures.min()
+        val maxSig = signatures.max()
+
+        if (minSig <= 0) return null
+
+        val ratio = maxSig / minSig
+        return if (ratio > 2.0) {
+            "Warning: Loaded log files appear to be from different tune stages " +
+                "(boost levels vary by %.0f%%). ".format((ratio - 1) * 100) +
+                "Mixing logs from different calibrations may produce unreliable " +
+                "KFLDRL/KFLDIMX output. Use logs from a single tune stage for best results."
+        } else null
+    }
 }
