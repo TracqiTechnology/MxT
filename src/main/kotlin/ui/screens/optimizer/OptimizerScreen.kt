@@ -13,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -561,12 +562,68 @@ fun OptimizerScreen() {
 
 // ── Tab: Boost Control ────────────────────────────────────────────────
 
+/**
+ * Returns a cellColorProvider lambda that maps [MapDelta.Confidence] to a tinted background color.
+ */
+private fun confidenceColorProvider(mapDelta: MapDelta?): ((Int, Int) -> Color?)? {
+    if (mapDelta == null) return null
+    return { rowIdx, colIdx ->
+        when (mapDelta.cellConfidence(rowIdx, colIdx)) {
+            MapDelta.Confidence.HIGH -> Color(0x2000C853)
+            MapDelta.Confidence.MEDIUM -> Color(0x202196F3)
+            MapDelta.Confidence.LOW -> Color(0x20FFD600)
+            MapDelta.Confidence.NONE -> null
+        }
+    }
+}
+
+/**
+ * Formats a coverage summary string for a [MapDelta].
+ */
+private fun coverageSummary(mapDelta: MapDelta): String {
+    val pct = "%.0f".format(mapDelta.coverage * 100)
+    val avg = "%.1f".format(mapDelta.avgSamplesPerModifiedCell)
+    return "Coverage: $pct% (${mapDelta.cellsWithData}/${mapDelta.totalCells} cells) | Avg samples: $avg/cell"
+}
+
+@Composable
+private fun ConfidenceLegend() {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(top = 8.dp)
+    ) {
+        LegendItem(color = Color(0x2000C853).compositeOver(Color.Black), label = "High (>20)")
+        LegendItem(color = Color(0x202196F3).compositeOver(Color.Black), label = "Medium (5–20)")
+        LegendItem(color = Color(0x20FFD600).compositeOver(Color.Black), label = "Low (1–4)")
+        LegendItem(color = Color(0xFF303030), label = "Interpolated (0)")
+    }
+}
+
+@Composable
+private fun LegendItem(color: Color, label: String) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(12.dp)
+                .background(color, RoundedCornerShape(2.dp))
+        )
+        Text(label, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
 @Composable
 private fun BoostControlTab(
     result: OptimizerCalculator.OptimizerResult,
     kfldrlPair: Pair<TableDefinition, Map3d>?,
     kfldimxPair: Pair<TableDefinition, Map3d>?
 ) {
+    val kfldrlDelta = result.suggestedMaps.kfldrl
+    val kfldimxDelta = result.suggestedMaps.kfldimx
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -598,7 +655,18 @@ private fun BoostControlTab(
                 Text("Suggested KFLDRL", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(bottom = 8.dp))
                 if (result.suggestedKfldrl != null) {
                     Box(modifier = Modifier.heightIn(max = 400.dp)) {
-                        MapTable(map = result.suggestedKfldrl, editable = false)
+                        MapTable(
+                            map = result.suggestedKfldrl,
+                            editable = false,
+                            cellColorProvider = confidenceColorProvider(kfldrlDelta)
+                        )
+                    }
+                    if (kfldrlDelta != null) {
+                        Text(
+                            coverageSummary(kfldrlDelta),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
                     }
                     Spacer(Modifier.height(8.dp))
                     Button(onClick = {
@@ -647,7 +715,18 @@ private fun BoostControlTab(
                 Text("Suggested KFLDIMX", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(bottom = 8.dp))
                 if (result.suggestedKfldimx != null) {
                     Box(modifier = Modifier.heightIn(max = 400.dp)) {
-                        MapTable(map = result.suggestedKfldimx, editable = false)
+                        MapTable(
+                            map = result.suggestedKfldimx,
+                            editable = false,
+                            cellColorProvider = confidenceColorProvider(kfldimxDelta)
+                        )
+                    }
+                    if (kfldimxDelta != null) {
+                        Text(
+                            coverageSummary(kfldimxDelta),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
                     }
                     Spacer(Modifier.height(8.dp))
                     Button(onClick = {
@@ -666,6 +745,9 @@ private fun BoostControlTab(
                 }
             }
         }
+
+        // Confidence legend
+        ConfidenceLegend()
     }
 }
 
