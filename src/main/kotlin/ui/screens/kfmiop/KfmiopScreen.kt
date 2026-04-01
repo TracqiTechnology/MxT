@@ -631,7 +631,7 @@ private fun OutputAxisBanner(outputKfmiop: Map3d) {
             val xAxisData = remember(outputKfmiop) {
                 arrayOf(outputKfmiop.xAxis.copyOf())
             }
-            MapAxis(data = xAxisData, editable = true)
+            MapAxis(data = xAxisData, editable = false)
         }
     }
 }

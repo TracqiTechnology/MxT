@@ -79,10 +79,14 @@ fun MapTable(
     var editingCol by remember { mutableStateOf(-1) }
     var editText by remember { mutableStateOf("") }
 
-    fun notifyChanged(newZAxis: Array<Array<Double>>) {
+    fun notifyChanged(newZAxis: Array<Array<Double>>, debounce: Boolean = false) {
         debounceJob?.cancel()
-        debounceJob = scope.launch {
-            delay(100)
+        if (debounce) {
+            debounceJob = scope.launch {
+                delay(100)
+                onMapChanged?.invoke(Map3d(map.xAxis.clone(), map.yAxis.clone(), newZAxis))
+            }
+        } else {
             onMapChanged?.invoke(Map3d(map.xAxis.clone(), map.yAxis.clone(), newZAxis))
         }
     }
@@ -123,7 +127,7 @@ fun MapTable(
                 }
             }
         }
-        notifyChanged(newZAxis)
+        notifyChanged(newZAxis, debounce = true)
     }
 
     val horizontalScroll = rememberScrollState()

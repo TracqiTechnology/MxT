@@ -76,10 +76,14 @@ fun MapAxis(
     var editingCol by remember { mutableStateOf(-1) }
     var editText by remember { mutableStateOf("") }
 
-    fun notifyChanged(newData: Array<Array<Double>>) {
+    fun notifyChanged(newData: Array<Array<Double>>, debounce: Boolean = false) {
         debounceJob?.cancel()
-        debounceJob = scope.launch {
-            delay(100)
+        if (debounce) {
+            debounceJob = scope.launch {
+                delay(100)
+                onDataChanged?.invoke(newData)
+            }
+        } else {
             onDataChanged?.invoke(newData)
         }
     }
@@ -109,7 +113,7 @@ fun MapAxis(
                 if (parsed != null) newData[selectedRow][c] = parsed
             }
         }
-        notifyChanged(newData)
+        notifyChanged(newData, debounce = true)
     }
 
     val horizontalScroll = rememberScrollState()

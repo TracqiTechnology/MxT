@@ -505,9 +505,15 @@ fun OptimizerScreen() {
                         style = MaterialTheme.typography.titleSmall
                     )
                     if (r.wotEntries.isEmpty()) {
+                        val isMed17 = EcuPlatformPreference.platform == EcuPlatform.MED17
+                        val headerList = if (isMed17) {
+                            "nmot_w, rl_w, rlsol_w (or rlmds_w), psrg_w, pvds_w, pu_w, tvldste_w (or ldtvm_w), wdkba"
+                        } else {
+                            "nmot, rl_w, rlsol_w, pvdks_w, pssol_w, pus_w, ldtvm, wdkba"
+                        }
                         Text(
                             "No WOT data found. Ensure your log contains the required headers " +
-                                "(pssol_w, rlsol_w, rl_w, pvdks_w, ldtvm, wdkba, nmot, pus_w) " +
+                                "($headerList) " +
                                 "and that throttle angle exceeds the minimum threshold.",
                             color = MaterialTheme.colorScheme.error
                         )

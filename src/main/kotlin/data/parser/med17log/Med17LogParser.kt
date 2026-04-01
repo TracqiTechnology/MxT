@@ -227,7 +227,8 @@ class Med17LogParser {
         val baro = getDouble(record, H.BAROMETRIC_PRESSURE_HEADER) ?: return
         val absBoost = getDouble(record, H.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER) ?: return
         val reqPressure = getDouble(record, H.REQUESTED_PRESSURE_HEADER) ?: return
-        val reqLoad = getDouble(record, H.REQUESTED_LOAD_HEADER) ?: return
+        val reqLoad = getDouble(record, H.REQUESTED_LOAD_HEADER)
+            ?: getDouble(record, H.REQUESTED_LOAD_ALT_HEADER) ?: return
         val engLoad = getDouble(record, H.ENGINE_LOAD_HEADER) ?: return
 
         map[H.TIME_STAMP_COLUMN_HEADER]!!.add(time)
@@ -347,7 +348,8 @@ class Med17LogParser {
             LogType.OPTIMIZER -> hasTime && hasRpm && hasThrottle && hasBaro && hasBoost &&
                     hasWgdc &&
                     H.REQUESTED_PRESSURE_HEADER in columnIndices &&
-                    H.REQUESTED_LOAD_HEADER in columnIndices &&
+                    (H.REQUESTED_LOAD_HEADER in columnIndices ||
+                     H.REQUESTED_LOAD_ALT_HEADER in columnIndices) &&
                     H.ENGINE_LOAD_HEADER in columnIndices
             LogType.FUEL_TRIM -> {
                 val hasStft = H.STFT_COLUMN_HEADER in columnIndices ||
@@ -389,6 +391,7 @@ class Med17LogParser {
                 rpm, throttle, baro, boost, wgdc, ldr,
                 H.REQUESTED_PRESSURE_HEADER.header,
                 H.REQUESTED_LOAD_HEADER.header,
+                H.REQUESTED_LOAD_ALT_HEADER.header,
                 H.ENGINE_LOAD_HEADER.header
             )
             LogType.FUEL_TRIM -> setOf(

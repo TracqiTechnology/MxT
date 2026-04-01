@@ -30,6 +30,7 @@ object Med17LogFileContract {
     const val WIDE_BAND_O2_LABEL = "lamsoni_w"
     const val REQUESTED_PRESSURE_LABEL = "pvds_w"
     const val REQUESTED_LOAD_LABEL = "rlsol_w"
+    const val REQUESTED_LOAD_ALT_LABEL = "rlmds_w"
     const val ACTUAL_LOAD_LABEL = "rl"
     const val PORT_FUEL_SHARE_LABEL = "tqfuel_pfi_w"
     const val DIRECT_FUEL_SHARE_LABEL = "tqfuel_gdi_w"
@@ -70,6 +71,7 @@ object Med17LogFileContract {
         WIDE_BAND_O2_HEADER(WIDE_BAND_O2_LABEL, "Wide Band O2"),
         REQUESTED_PRESSURE_HEADER(REQUESTED_PRESSURE_LABEL, "Requested Pressure"),
         REQUESTED_LOAD_HEADER(REQUESTED_LOAD_LABEL, "Requested Load"),
+        REQUESTED_LOAD_ALT_HEADER(REQUESTED_LOAD_ALT_LABEL, "Requested Load (Alt)"),
         ACTUAL_LOAD_HEADER(ACTUAL_LOAD_LABEL, "Actual Load"),
         PORT_FUEL_SHARE_HEADER(PORT_FUEL_SHARE_LABEL, "Port Fuel Share"),
         DIRECT_FUEL_SHARE_HEADER(DIRECT_FUEL_SHARE_LABEL, "Direct Fuel Share"),

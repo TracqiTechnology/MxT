@@ -434,7 +434,8 @@ private fun FuelPropertiesSection(
                         label = "Gasoline Density",
                         value = e0Density,
                         unit = "g/cc",
-                        tooltip = "E0 (pure gasoline) density for flex fuel blending.",
+                        tooltip = "E0 (pure gasoline) density for flex fuel blending. Default 0.755 g/cc per FR BGKV; " +
+                            "some references use 0.7135 g/cc (see gasoline density tooltip for details).",
                         onValueChange = {
                             e0Density = it
                             it.toDoubleOrNull()?.let { v -> PrimaryFuelingPreferences.e0Density = v }
@@ -501,7 +502,11 @@ private fun FuelPropertiesSection(
                     label = "Gasoline Density",
                     value = gasolineDensity,
                     unit = "g/cc\u00B3",
-                    tooltip = "Mass of gasoline per cubic centimetre (g/cc). Used in KRKTE fuel-mass calculation. Standard pump gasoline ≈ 0.745 g/cc at 20°C.",
+                    tooltip = "Mass of gasoline per cubic centimetre (g/cc). Default: 0.755 g/cc per the Funktionsrahmen " +
+                        "BGKV section (ρ₀ₖₛ = 755 g/dm³). Note: the ME7.5 guide and the FR KRKATE section derive " +
+                        "the 1.05 valve correction factor from 0.7135 g/cc, creating a contradiction. " +
+                        "Using 0.7135 produces a richer calibration (safer for modified injectors). " +
+                        "Editable — enter any value to match your fuel or preference.",
                     onValueChange = onGasolineDensityChange
                 )
 

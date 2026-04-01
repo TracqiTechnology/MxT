@@ -131,6 +131,7 @@
         "RPM_COLUMN_HEADER": "nmot_w",
         "ENGINE_LOAD_HEADER": "rl_w",
         "REQUESTED_LOAD_HEADER": "rlsol_w",
+        "REQUESTED_LOAD_ALT_HEADER": "rlmds_w",
         "THROTTLE_PLATE_ANGLE_HEADER": "wdkba",
         "WASTEGATE_DUTY_CYCLE_HEADER": "tvldste_w",
         "LDR_DUTY_CYCLE_HEADER": "ldtvm_w",
