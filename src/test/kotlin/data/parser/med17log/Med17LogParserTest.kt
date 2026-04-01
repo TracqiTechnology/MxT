@@ -255,6 +255,54 @@ class Med17LogParserTest {
         assertTrue(loadList.isNotEmpty(), "PLSOL should parse 2026 log (doesn't need rlsol_w)")
     }
 
+    @Test
+    fun `PLSOL parse produces all required signals for chart display`() {
+        // Bug: customer says "nothing displays when I upload a log"
+        // Verify ALL signals the PlsolScreen needs are populated.
+        val result = parser.parseLogFile(Med17LogParser.LogType.PLSOL, logFile("2025-01-21_16.24.32_log(1).csv"))
+
+        val loads = result[H.ENGINE_LOAD_HEADER] ?: emptyList()
+        val pressures = result[H.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER] ?: emptyList()
+        val baros = result[H.BAROMETRIC_PRESSURE_HEADER] ?: emptyList()
+        val throttles = result[H.THROTTLE_PLATE_ANGLE_HEADER] ?: emptyList()
+        val fupsrls = result[H.FUPSRLS_HEADER] ?: emptyList()
+
+        assertTrue(loads.isNotEmpty(), "ENGINE_LOAD should be populated")
+        assertTrue(pressures.isNotEmpty(), "BOOST PRESSURE should be populated")
+        assertTrue(baros.isNotEmpty(), "BARO should be populated")
+        assertTrue(throttles.isNotEmpty(), "THROTTLE should be populated")
+        assertTrue(fupsrls.isNotEmpty(), "FUPSRLS should be populated from log")
+
+        // All lists should have same length (one entry per parsed row)
+        assertEquals(loads.size, pressures.size, "loads and pressures should have same count")
+        assertEquals(loads.size, baros.size, "loads and baros should have same count")
+        assertEquals(loads.size, throttles.size, "loads and throttles should have same count")
+        // fupsrls may be shorter if some rows lack it, but should not be empty
+    }
+
+    @Test
+    fun `PLSOL WOT filter passes rows from WOT log`() {
+        // PlsolScreen.kt filters to throttle > 90%. Verify WOT log has qualifying rows.
+        val result = parser.parseLogFile(Med17LogParser.LogType.PLSOL, logFile("2025-01-21_16.24.32_log(1).csv"))
+
+        val throttles = result[H.THROTTLE_PLATE_ANGLE_HEADER] ?: emptyList()
+        val wotCount = throttles.count { it > 90.0 }
+
+        assertTrue(wotCount > 0,
+            "WOT log should have rows with throttle > 90%. " +
+            "Max throttle: ${throttles.maxOrNull()}, total rows: ${throttles.size}")
+    }
+
+    @Test
+    fun `PLSOL parse extracts intake temperature from log`() {
+        val result = parser.parseLogFile(Med17LogParser.LogType.PLSOL, logFile("2025-01-21_16.24.32_log(1).csv"))
+
+        val intakeTemps = result[H.INTAKE_TEMPERATURE_HEADER] ?: emptyList()
+        assertTrue(intakeTemps.isNotEmpty(), "Intake temperature (tans) should be parsed from log")
+        assertTrue(intakeTemps.all { it in -40.0..100.0 },
+            "Intake temps should be physically plausible (-40°C to 100°C)")
+    }
+
     // ── PFI_SPLIT log type ──────────────────────────────────────────
 
     @Test

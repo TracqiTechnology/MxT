@@ -88,7 +88,7 @@ data class DualInjectionConfig(
     val portInjectorFlowRateCcMin: Double = 220.0,
     val portInjectorFuelPressureBar: Double = 4.0,
     val directInjectorFlowRateCcMin: Double = 160.0,
-    val directInjectorFuelPressureBar: Double = 200.0,
+    val directInjectorFuelPressureBar: Double = 240.0,
     val portSharePercentDefault: Double = 30.0,
     val numPortInjectors: Int = 5,
     val numDirectInjectors: Int = 5

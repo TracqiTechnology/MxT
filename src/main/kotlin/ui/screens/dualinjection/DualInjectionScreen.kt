@@ -370,7 +370,7 @@ private fun DirectInjectorTab() {
     var oldPressure by remember { mutableStateOf(DualInjectionPreferences.directInjectorFuelPressureBar.toString()) }
     var oldDeadTime by remember { mutableStateOf(DualInjectionPreferences.directInjectorDeadTimeMs.let { if (it > 0) it.toString() else "" }) }
     var newFlowRate by remember { mutableStateOf("") }
-    var newPressure by remember { mutableStateOf("200.0") }
+    var newPressure by remember { mutableStateOf("240.0") }
     var newDeadTime by remember { mutableStateOf("") }
 
     var scalingResult by remember { mutableStateOf<KrkteScalingResult?>(null) }
@@ -422,7 +422,7 @@ private fun DirectInjectorTab() {
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    "Note: DI dead time (TVUB_GDI) may not be tunable on MED17.1.62. " +
+                    "Note: DI dead time (TVUB_GDI) is not tunable on MED17. " +
                         "The DI driver firmware handles injector timing internally.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.tertiary
@@ -466,9 +466,7 @@ private fun DirectInjectorTab() {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedTextField(value = oldFlowRate, onValueChange = { oldFlowRate = it }, label = { Text("Flow Rate (cc/min)") }, modifier = Modifier.weight(1f), singleLine = true)
                     OutlinedTextField(value = oldPressure, onValueChange = { oldPressure = it }, label = { Text("Fuel Pressure (bar, absolute)") }, modifier = Modifier.weight(1f), singleLine = true)
-                    OutlinedTextField(value = oldDeadTime, onValueChange = { oldDeadTime = it }, label = { Text("Dead Time @ 14V (ms)") }, modifier = Modifier.weight(1f), singleLine = true)
-                }
-            }
+                }            }
         }
 
         // New DI injector
@@ -483,7 +481,6 @@ private fun DirectInjectorTab() {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     OutlinedTextField(value = newFlowRate, onValueChange = { newFlowRate = it }, label = { Text("Flow Rate (cc/min)") }, modifier = Modifier.weight(1f), singleLine = true)
                     OutlinedTextField(value = newPressure, onValueChange = { newPressure = it }, label = { Text("Fuel Pressure (bar, absolute)") }, modifier = Modifier.weight(1f), singleLine = true)
-                    OutlinedTextField(value = newDeadTime, onValueChange = { newDeadTime = it }, label = { Text("Dead Time @ 14V (ms)") }, modifier = Modifier.weight(1f), singleLine = true)
                 }
             }
         }
@@ -681,8 +678,8 @@ private fun SplitCalculatorTab() {
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
                     "The 2.5T EA855 EVO PFI share varies with RPM: port injectors ramp up towards " +
-                        "torque peak (~4500 RPM), hold steady through mid-range, then decline towards " +
-                        "redline where the GDI share increases to handle the majority of fuel delivery. Load a WOT/cruise log to " +
+                        "torque peak (~4500 RPM), hold steady through mid-range, then taper towards " +
+                        "redline as the GDI share increases. Load a WOT/cruise log to " +
                         "see your actual InjSys_facPrtnPfi curve overlaid on the default.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant

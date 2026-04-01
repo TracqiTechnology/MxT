@@ -141,6 +141,50 @@ class PresetsTest {
         }
     }
 
+    // ── Injector preset correctness (Phase 2 — customer feedback) ──
+
+    @Test
+    fun `DAZA GDI has smaller flow rate than DNWA GDI`() {
+        // DAZA (FL 400PS) has smaller DI injectors than DNWA (PFL 367PS).
+        // Smaller injector → higher KRKATE (0.0322 > 0.0260).
+        assertTrue(
+            InjectorPresets.DAZA_GDI.flowRateCcPerMin < InjectorPresets.DNWA_GDI.flowRateCcPerMin,
+            "DAZA GDI (${InjectorPresets.DAZA_GDI.flowRateCcPerMin}) must have lower flow than DNWA GDI (${InjectorPresets.DNWA_GDI.flowRateCcPerMin})"
+        )
+    }
+
+    @Test
+    fun `GDI presets use 240 bar nominal HPFP pressure`() {
+        InjectorPresets.byType(InjectorType.GDI).forEach {
+            assertEquals(240.0, it.fuelPressureBar, "${it.name} must use 240 bar (HPFP nominal)")
+        }
+    }
+
+    @Test
+    fun `PFI presets use 4 bar absolute pressure`() {
+        // Port fuel rail runs at 3 bar gauge = 4 bar absolute
+        InjectorPresets.byType(InjectorType.PFI).forEach {
+            assertEquals(4.0, it.fuelPressureBar, "${it.name} must use 4.0 bar (3 bar gauge + 1 bar atm)")
+        }
+    }
+
+    @Test
+    fun `DAZA and DNWA PFI have identical flow rate — same part number`() {
+        // Customer confirms DAZA and DNWA port injectors are identical parts.
+        assertEquals(
+            InjectorPresets.DAZA_PFI.flowRateCcPerMin,
+            InjectorPresets.DNWA_PFI.flowRateCcPerMin,
+            "DAZA and DNWA PFI must have identical flow (same part)"
+        )
+    }
+
+    @Test
+    fun `DualInjectionConfig defaults to 240 bar DI pressure`() {
+        val config = data.profile.DualInjectionConfig()
+        assertEquals(240.0, config.directInjectorFuelPressureBar,
+            "Default DI pressure must be 240 bar (HPFP nominal), not 200")
+    }
+
     // ── Fuel blend with custom endpoints ─────────────────────────
 
     @Test

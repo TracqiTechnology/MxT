@@ -117,20 +117,57 @@ object LdrpidCalculator {
             }
         }
 
-        for (array in nonLinearTable) {
-            array.sort()
-            for (i in 0 until array.size - 1) {
-                if (array[i] == 0.0) array[i] = 0.1
-                if (array[i] >= array[i + 1]) {
-                    array[i + 1] = if (i > 0) {
-                        val theta = array[i] / array[i - 1]
-                        array[i] * (1 + (theta - 1) / 2)
-                    } else {
-                        array[i] * 1.1
+        // Interpolate empty cells and enforce monotonicity.
+        // Empty cells are filled using physical model: boost scales with duty cycle.
+        for (rowIdx in nonLinearTable.indices) {
+            val row = nonLinearTable[rowIdx]
+            val filledIndices = row.indices.filter { count[rowIdx][it] > 0 }
+
+            if (filledIndices.isEmpty()) {
+                // No data in this RPM row — fill with small ascending placeholders
+                for (i in row.indices) row[i] = 0.1 + i * 0.01
+            } else {
+                // Interpolate/extrapolate empty cells
+                for (i in row.indices) {
+                    if (row[i] == 0.0) {
+                        val left = filledIndices.lastOrNull { it < i }
+                        val right = filledIndices.firstOrNull { it > i }
+                        row[i] = when {
+                            left != null && right != null -> {
+                                // Between two data points: linear interpolation
+                                val t = (i - left).toDouble() / (right - left)
+                                row[left] + t * (row[right] - row[left])
+                            }
+                            left != null -> {
+                                // Beyond rightmost data: gentle upward extrapolation
+                                val prevFilled = filledIndices.lastOrNull { it < left }
+                                if (prevFilled != null) {
+                                    val slope = (row[left] - row[prevFilled]) / (left - prevFilled)
+                                    (row[left] + slope * (i - left)).coerceAtLeast(row[left])
+                                } else {
+                                    row[left] * (1.0 + 0.02 * (i - left))
+                                }
+                            }
+                            right != null -> {
+                                // Before leftmost data: scale down proportionally to duty.
+                                // Physically, lower duty → lower boost (wastegate more open).
+                                val dutyHere = dutyAxis[i].coerceAtLeast(1.0)
+                                val dutyThere = dutyAxis[right].coerceAtLeast(1.0)
+                                (row[right] * dutyHere / dutyThere).coerceAtLeast(0.1)
+                            }
+                            else -> 0.1
+                        }
                     }
-                    if (array[i + 1].isNaN() || array[i + 1] == 0.0) {
-                        array[i + 1] = array[i] + 0.1
-                    }
+                }
+            }
+
+            // Enforce minimum and monotonicity (higher duty → higher or equal boost)
+            for (i in row.indices) {
+                if (row[i] <= 0.0 || row[i].isNaN()) row[i] = 0.1
+            }
+            for (i in 1 until row.size) {
+                if (row[i] < row[i - 1]) {
+                    row[i] = row[i - 1] + 0.01
                 }
             }
         }
@@ -160,11 +197,13 @@ object LdrpidCalculator {
     fun calculateKfldrl(nonLinearTable: Array<Array<Double>>, linearTable: Array<Array<Double>>, kfldrlMap: Map3d): Map3d {
         val dutyAxis = if (kfldrlMap.xAxis.size >= 2) kfldrlMap.xAxis else deriveDutyAxis(kfldrlMap.xAxis)
         val kfldrl = Array(nonLinearTable.size) { i ->
+            // Pair boost→duty and sort by boost so interpolation x-axis is ascending
+            val pairs = nonLinearTable[i].zip(dutyAxis).sortedBy { it.first }
+            val sortedBoost = pairs.map { it.first }.toTypedArray()
+            val sortedDuty = pairs.map { it.second }.toTypedArray()
             Array(nonLinearTable[i].size) { j ->
-                val x = nonLinearTable[i]
-                val y = dutyAxis
                 val xi = arrayOf(linearTable[i][j])
-                val result = LinearInterpolation.interpolate(x, y, xi)[0]
+                val result = LinearInterpolation.interpolate(sortedBoost, sortedDuty, xi)[0]
                 if (result.isNaN()) 0.0 else result
             }
         }
@@ -195,11 +234,13 @@ object LdrpidCalculator {
         }
 
         val kfldimx = Array(nonLinearTable.size) { i ->
+            // Pair linearBoostMax→duty and sort by boost for correct interpolation
+            val pairs = linearBoostMax.zip(dutyAxis).sortedBy { it.first }
+            val sortedBoost = pairs.map { it.first }.toTypedArray()
+            val sortedDuty = pairs.map { it.second }.toTypedArray()
             Array(kfldimxXAxis.size) { j ->
-                val x = linearBoostMax
-                val y = dutyAxis
                 val xi = arrayOf(kfldimxXAxis[j])
-                LinearInterpolation.interpolate(x, y, xi)[0]
+                LinearInterpolation.interpolate(sortedBoost, sortedDuty, xi)[0]
             }
         }
 

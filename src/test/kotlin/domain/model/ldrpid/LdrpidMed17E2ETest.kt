@@ -312,7 +312,77 @@ class LdrpidMed17E2ETest {
         assertTrue(hasBoostData, "WOT log should produce non-trivial boost values")
     }
 
-    // ── 11. Degenerate maps (partial BIN) produce sensible output ─────
+    // ── 11. NonLinear boost values are in correct duty-column positions ──
+
+    @Test
+    fun `nonLinear boost at RPM 5000 has data spread across columns not just right edge`() {
+        // Bug: sort() pushed real boost data to the rightmost columns and
+        // filled left columns with 0.10/0.11/0.12 filler. After fix, data
+        // should appear in the actual duty-cycle columns where it was measured.
+        val parser = Med17LogParser()
+        val med17Data = parser.parseLogFile(LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
+        val me7Data = Med17LogAdapter.toMe7LdrpidFormat(med17Data)
+
+        val result = LdrpidCalculator.calculateLdrpid(me7Data, buildKfldrlMap(), buildKfldimxMap())
+
+        // RPM=5000 is index 2. The log has WOT data at various duty cycles for this RPM.
+        // After fix, real boost data should NOT all be crammed into the last 4-5 columns.
+        val row5000 = result.nonLinearOutput.zAxis[2]
+
+        // Count columns with filler-level values (< 0.5 PSI)
+        val fillerCount = row5000.count { it < 0.5 }
+
+        // With the sort bug, 5 of 10 columns are filler (0.10-0.12).
+        // After fix, at most 2-3 columns should be filler (duty ranges with no WOT data)
+        assertTrue(fillerCount <= 4,
+            "RPM=5000 row should not have >4 filler columns. Got $fillerCount filler in: ${row5000.map { "%.2f".format(it) }}")
+    }
+
+    // ── 12. KFLDRL at low RPM should NOT echo the duty axis ────────
+
+    @Test
+    fun `KFLDRL at populated RPMs is not a duty axis echo`() {
+        // Bug: When nonLinear was all ~0.12, KFLDRL echoed [10,20,30,...,95].
+        // After fix, KFLDRL at RPMs with actual WOT data should have meaningful
+        // duty corrections, not a 1:1 echo of the duty axis.
+        val parser = Med17LogParser()
+        val med17Data = parser.parseLogFile(LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
+        val me7Data = Med17LogAdapter.toMe7LdrpidFormat(med17Data)
+
+        val result = LdrpidCalculator.calculateLdrpid(me7Data, buildKfldrlMap(), buildKfldimxMap())
+
+        // RPM=5500 (index 3) has WOT data in the log. KFLDRL should NOT echo axis.
+        val kfldrlRow = result.kfldrl.zAxis[3]
+        val isExactAxisEcho = kfldrlRow.zip(dutyAxis).all { (v, d) ->
+            kotlin.math.abs(v - d) < 0.01
+        }
+        assertFalse(isExactAxisEcho,
+            "KFLDRL at RPM=5500 should NOT be an exact echo of the duty axis. " +
+            "Got: ${kfldrlRow.map { "%.2f".format(it) }}")
+
+        // RPMs with no WOT data (like 3000) may echo the axis — that's acceptable
+        // since placeholder values produce proportional duty output.
+    }
+
+    // ── 13. KFLDIMX has values below max duty ──────────────────────
+
+    @Test
+    fun `KFLDIMX values span a range not all clamped to max`() {
+        val parser = Med17LogParser()
+        val med17Data = parser.parseLogFile(LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
+        val me7Data = Med17LogAdapter.toMe7LdrpidFormat(med17Data)
+
+        val result = LdrpidCalculator.calculateLdrpid(me7Data, buildKfldrlMap(), buildKfldimxMap())
+
+        val kfldimxFlat = result.kfldimx.zAxis.flatMap { it.toList() }
+        val distinctRounded = kfldimxFlat.map { "%.0f".format(it) }.distinct()
+
+        assertTrue(distinctRounded.size >= 3,
+            "KFLDIMX should have at least 3 distinct values, not all clamped. " +
+            "Distinct values: $distinctRounded")
+    }
+
+    // ── 14. Degenerate maps (partial BIN) produce sensible output ─────
 
     @Test
     fun `degenerate 1-row map from partial BIN derives RPM axis from log data`() {

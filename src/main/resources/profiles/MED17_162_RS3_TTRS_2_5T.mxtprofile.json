@@ -164,7 +164,8 @@
         "FUEL_INJECTOR_ON_TIME_PORT_HEADER": "ti_b1_pfi",
         "FUEL_PRESSURE_DIRECT_HEADER": "pfuel_hde_w",
         "FUEL_PRESSURE_PORT_HEADER": "pfuel_pfi_w",
-        "PORT_FUEL_SHARE_HEADER": "tqfuel_pfi_w"
+        "PORT_FUEL_SHARE_HEADER": "tqfuel_pfi_w",
+        "INTAKE_TEMPERATURE_HEADER": "tans"
     },
     "multiMapDefinitions": {
         "KFZW_SWITCH": [

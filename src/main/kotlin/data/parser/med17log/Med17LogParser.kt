@@ -307,6 +307,7 @@ class Med17LogParser {
         map[H.THROTTLE_PLATE_ANGLE_HEADER]!!.add(throttle)
 
         getDouble(record, H.FUPSRLS_HEADER)?.let { map[H.FUPSRLS_HEADER]?.add(it) }
+        getDouble(record, H.INTAKE_TEMPERATURE_HEADER)?.let { map[H.INTAKE_TEMPERATURE_HEADER]?.add(it) }
     }
 
     private fun parsePfiSplitRow(
@@ -465,6 +466,7 @@ class Med17LogParser {
                 map[H.BAROMETRIC_PRESSURE_HEADER] = mutableListOf()
                 map[H.THROTTLE_PLATE_ANGLE_HEADER] = mutableListOf()
                 map[H.FUPSRLS_HEADER] = mutableListOf()
+                map[H.INTAKE_TEMPERATURE_HEADER] = mutableListOf()
             }
         }
 
