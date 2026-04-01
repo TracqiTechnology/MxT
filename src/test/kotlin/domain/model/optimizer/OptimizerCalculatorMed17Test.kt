@@ -4,6 +4,7 @@ import data.contract.Me7LogFileContract
 import data.contract.Med17LogFileContract
 import data.parser.med17log.Med17LogAdapter
 import data.parser.med17log.Med17LogParser
+import domain.model.simulator.Me7Simulator
 import java.io.File
 import kotlin.test.*
 
@@ -191,5 +192,133 @@ class OptimizerCalculatorMed17Test {
 
         assertNotNull(result)
         assertEquals(0, result.wotEntries.size, "No WOT entries from cruise log")
+    }
+
+    // ── MED17 Prediction Tests ──────────────────────────────────────
+
+    private fun buildTestKfldrl(): domain.math.map.Map3d {
+        val pressureAxis = arrayOf(0.0, 5.0, 10.0, 15.0, 20.0, 25.0, 30.0)
+        val rpmAxis = arrayOf(2000.0, 3000.0, 4000.0, 5000.0, 6000.0, 7000.0)
+        val zAxis = Array(rpmAxis.size) { Array(pressureAxis.size) { idx -> (idx + 1) * 12.0 } }
+        return domain.math.map.Map3d(pressureAxis, rpmAxis, zAxis)
+    }
+
+    @Test
+    fun `analyzeMed17 with KFLDRL map produces non-null prediction`() {
+        val me7Data = parseAndAdapt("2025-01-21_16.24.32_log(1).csv")
+        val kfldrl = buildTestKfldrl()
+
+        val result = OptimizerCalculator.analyzeMed17(
+            values = me7Data,
+            kfldrlMap = kfldrl,
+            kfldimxMap = null
+        )
+
+        assertNotNull(result.prediction, "MED17 prediction should be non-null when KFLDRL is configured")
+    }
+
+    @Test
+    fun `MED17 prediction has pressure series matching WOT entry count`() {
+        val me7Data = parseAndAdapt("2025-01-21_16.24.32_log(1).csv")
+        val kfldrl = buildTestKfldrl()
+
+        val result = OptimizerCalculator.analyzeMed17(
+            values = me7Data,
+            kfldrlMap = kfldrl,
+            kfldimxMap = null
+        )
+
+        val pred = result.prediction!!
+        assertEquals(result.wotEntries.size, pred.predictedPressureSeries.size,
+            "Predicted pressure series should have one entry per WOT sample")
+    }
+
+    @Test
+    fun `MED17 prediction shows reduced pressure error`() {
+        val me7Data = parseAndAdapt("2025-01-21_16.24.32_log(1).csv")
+        val kfldrl = buildTestKfldrl()
+
+        val result = OptimizerCalculator.analyzeMed17(
+            values = me7Data,
+            kfldrlMap = kfldrl,
+            kfldimxMap = null
+        )
+
+        val pred = result.prediction!!
+        assertTrue(pred.predictedAvgPressureError <= pred.currentAvgPressureError,
+            "Predicted pressure error (${pred.predictedAvgPressureError}) should be <= current (${pred.currentAvgPressureError})")
+    }
+
+    @Test
+    fun `MED17 prediction convergenceImprovement is between 0 and 100`() {
+        val me7Data = parseAndAdapt("2025-01-21_16.24.32_log(1).csv")
+        val kfldrl = buildTestKfldrl()
+
+        val result = OptimizerCalculator.analyzeMed17(
+            values = me7Data,
+            kfldrlMap = kfldrl,
+            kfldimxMap = null
+        )
+
+        val pred = result.prediction!!
+        assertTrue(pred.convergenceImprovement in 0.0..100.0,
+            "Convergence improvement should be 0-100%, got ${pred.convergenceImprovement}")
+    }
+
+    @Test
+    fun `analyzeMed17 without KFLDRL produces null prediction`() {
+        val me7Data = parseAndAdapt("2025-01-21_16.24.32_log(1).csv")
+
+        val result = OptimizerCalculator.analyzeMed17(
+            values = me7Data,
+            kfldrlMap = null,
+            kfldimxMap = null
+        )
+
+        assertNull(result.prediction, "Prediction should be null when KFLDRL is not configured")
+    }
+
+    @Test
+    fun `MED17 prediction predicted chain health has zero VE mismatch`() {
+        val me7Data = parseAndAdapt("2025-01-21_16.24.32_log(1).csv")
+        val kfldrl = buildTestKfldrl()
+
+        val result = OptimizerCalculator.analyzeMed17(
+            values = me7Data,
+            kfldrlMap = kfldrl,
+            kfldimxMap = null
+        )
+
+        val pred = result.prediction!!
+        assertEquals(0.0, pred.predictedChainHealth.pssolErrorPercent,
+            "MED17 predicted chain should have 0% pssol error (no VE model)")
+        assertEquals(0.0, pred.predictedChainHealth.veMismatchPercent,
+            "MED17 predicted chain should have 0% VE mismatch (no VE model)")
+    }
+
+    // ── MED17 Chain Diagnosis DS1 Context ────────────────────────────
+
+    @Test
+    fun `buildMed17ChainDiagnosis with no torque capping reports OK status`() {
+        // Create WOT entries that are all on-target (no torque capping)
+        val entries = (1..20).map {
+            OptimizerCalculator.WotLogEntry(
+                rpm = 4000.0 + it * 100,
+                requestedLoad = 191.0,
+                actualLoad = 190.0,
+                requestedMap = 2500.0,
+                actualMap = 2480.0,
+                barometricPressure = 1013.0,
+                wgdc = 60.0,
+                throttleAngle = 95.0
+            )
+        }
+
+        val diag = OptimizerCalculator.buildMed17ChainDiagnosis(entries, 191.0, 30.0)
+
+        assertTrue(diag.torqueCappedPercent < 5.0,
+            "No torque capping should be detected for entries at ldrxn target")
+        assertEquals(Me7Simulator.ErrorSource.ON_TARGET, diag.dominantError,
+            "Dominant error should be ON_TARGET when all entries are on-target")
     }
 }

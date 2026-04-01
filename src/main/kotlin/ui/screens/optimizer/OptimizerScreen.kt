@@ -550,8 +550,8 @@ fun OptimizerScreen() {
                 1 -> PerLinkTab(result!!, isMed17)
                 2 -> BoostControlTab(result!!, kfldrlPair, kfldimxPair)
                 3 -> if (hasKfpbrk) VeModelTab(result!!, kfpbrkPair, kfpbrknwPair) else CalibrationTab(result!!, kfpbrkPair, kfmirlPair)
-                4 -> if (hasKfpbrk) CalibrationTab(result!!, kfpbrkPair, kfmirlPair) else PredictionTab(result!!)
-                5 -> if (hasKfpbrk) PredictionTab(result!!) else PullsTab(result!!)
+                4 -> if (hasKfpbrk) CalibrationTab(result!!, kfpbrkPair, kfmirlPair) else PredictionTab(result!!, isMed17)
+                5 -> if (hasKfpbrk) PredictionTab(result!!, isMed17) else PullsTab(result!!)
                 6 -> if (hasKfpbrk) PullsTab(result!!) else ExportTab(result!!, kfldrlPair, kfldimxPair, kfpbrkPair, kfmiopPair, kfmirlPair)
                 7 -> if (hasKfpbrk) ExportTab(result!!, kfldrlPair, kfldimxPair, kfpbrkPair, kfmiopPair, kfmirlPair)
             }
@@ -847,6 +847,26 @@ private fun OverviewTab(result: OptimizerCalculator.OptimizerResult, isMed17: Bo
                     Spacer(Modifier.width(4.dp))
                     Text("Dominant Issue: $dominantLabel",
                         style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                }
+
+                // DS1 torque bypass info note for MED17
+                if (isMed17 && diag.torqueCappedPercent < 5.0) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Filled.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "DS1 typically reduces KFMIOP/KFMIRL to scalar values, bypassing the torque model. " +
+                                "Low torque capping is expected when using DS1.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
@@ -1498,7 +1518,7 @@ private fun MapDeltaCard(delta: MapDelta, chainLink: String) {
 // ── Tab: Prediction ───────────────────────────────────────────────────
 
 @Composable
-private fun PredictionTab(result: OptimizerCalculator.OptimizerResult) {
+private fun PredictionTab(result: OptimizerCalculator.OptimizerResult, isMed17: Boolean = false) {
     Column(modifier = Modifier.fillMaxWidth()) {
         val pred = result.prediction
 
@@ -1506,7 +1526,11 @@ private fun PredictionTab(result: OptimizerCalculator.OptimizerResult) {
             Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("No prediction data available.", style = MaterialTheme.typography.titleMedium)
-                    Text("Ensure map corrections have been computed (KFLDRL and/or KFPBRK configured).", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (isMed17) "Ensure KFLDRL is configured and WOT log data has been loaded."
+                        else "Ensure map corrections have been computed (KFLDRL and/or KFPBRK configured).",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
                 }
             }
             return
@@ -1531,7 +1555,9 @@ private fun PredictionTab(result: OptimizerCalculator.OptimizerResult) {
                     Text("Change", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                 }
                 HorizontalDivider()
-                PredictionRow("Avg Load Deficit", pred.currentAvgLoadDeficit, pred.predictedAvgLoadDeficit, "%")
+                if (!isMed17) {
+                    PredictionRow("Avg Load Deficit", pred.currentAvgLoadDeficit, pred.predictedAvgLoadDeficit, "%")
+                }
                 PredictionRow("Avg Pressure Error", pred.currentAvgPressureError, pred.predictedAvgPressureError, " mbar")
             }
         }
@@ -1543,9 +1569,13 @@ private fun PredictionTab(result: OptimizerCalculator.OptimizerResult) {
                 Spacer(Modifier.height(8.dp))
                 val predDiag = pred.predictedChainHealth
                 ChainLinkBar("Link 1: LDRXN → rlsol", 100.0 - predDiag.torqueCappedPercent)
-                ChainLinkBar("Link 2: rlsol → pssol", 100.0 - predDiag.pssolErrorPercent)
+                if (!isMed17) {
+                    ChainLinkBar("Link 2: rlsol → pssol", 100.0 - predDiag.pssolErrorPercent)
+                }
                 ChainLinkBar("Link 3: pssol → pvdks", 100.0 - predDiag.boostShortfallPercent)
-                ChainLinkBar("Link 4: pvdks → rl_w", 100.0 - predDiag.veMismatchPercent)
+                if (!isMed17) {
+                    ChainLinkBar("Link 4: pvdks → rl_w", 100.0 - predDiag.veMismatchPercent)
+                }
             }
         }
 
