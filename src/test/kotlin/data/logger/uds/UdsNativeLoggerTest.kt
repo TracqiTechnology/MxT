@@ -187,12 +187,12 @@ class PcanTransportTest {
 
     @Test
     fun `PCAN bitrate conversion`() {
-        // Verify bitrate constants map correctly
-        assertEquals(0x001C, PcanTransport.bitrateToTpcan(500_000))
-        assertEquals(0x011C, PcanTransport.bitrateToTpcan(250_000))
-        assertEquals(0x031C, PcanTransport.bitrateToTpcan(125_000))
-        assertEquals(0x0014, PcanTransport.bitrateToTpcan(1_000_000))
+        // Verify bitrate constants map correctly to TPCANBaudrate enums
+        assertEquals(peak.can.basic.TPCANBaudrate.PCAN_BAUD_500K, PcanTransport.bitrateToTpcan(500_000))
+        assertEquals(peak.can.basic.TPCANBaudrate.PCAN_BAUD_250K, PcanTransport.bitrateToTpcan(250_000))
+        assertEquals(peak.can.basic.TPCANBaudrate.PCAN_BAUD_125K, PcanTransport.bitrateToTpcan(125_000))
+        assertEquals(peak.can.basic.TPCANBaudrate.PCAN_BAUD_1M, PcanTransport.bitrateToTpcan(1_000_000))
         // Unknown bitrate defaults to 500k
-        assertEquals(0x001C, PcanTransport.bitrateToTpcan(333_333))
+        assertEquals(peak.can.basic.TPCANBaudrate.PCAN_BAUD_500K, PcanTransport.bitrateToTpcan(333_333))
     }
 }

@@ -56,12 +56,21 @@ fun LoggerScreen(loggerManager: LoggerManager? = null) {
     // Logger mode selection
     var loggerMode by remember { mutableStateOf(LoggerMode.ME7LOGGER_EXE) }
 
-    // Create logger based on mode (re-created when mode changes)
-    val modeLogger: LoggerManager = remember(loggerMode) {
+    // CAN adapter type — declared before logger so it can be a remember key
+    var canAdapterType by remember { mutableStateOf(CanAdapterType.SLCAN) }
+
+    // Create logger based on mode and adapter type (re-created when either changes)
+    val modeLogger: LoggerManager = remember(loggerMode, canAdapterType) {
         loggerManager ?: when (loggerMode) {
             LoggerMode.ME7LOGGER_EXE -> Me7LoggerProcess()
             LoggerMode.NATIVE_KWP2000 -> Kwp2000NativeLogger(FakeSerialPortProvider())
-            LoggerMode.NATIVE_UDS -> UdsNativeLogger(FakeCanTransport())
+            LoggerMode.NATIVE_UDS -> {
+                val transport: CanTransport = when (canAdapterType) {
+                    CanAdapterType.SLCAN -> SlcanTransport(FakeSerialPortProvider())
+                    CanAdapterType.PCAN -> PcanTransport()
+                }
+                UdsNativeLogger(transport)
+            }
         }
     }
 
@@ -104,7 +113,6 @@ fun LoggerScreen(loggerManager: LoggerManager? = null) {
     var realTimeWrite by remember { mutableStateOf(false) }
 
     // Native mode state
-    var canAdapterType by remember { mutableStateOf(CanAdapterType.SLCAN) }
     var canBitrate by remember { mutableStateOf("500000") }
     var canTxId by remember { mutableStateOf("7E0") }
     var canRxId by remember { mutableStateOf("7E8") }
@@ -655,16 +663,15 @@ private fun ConnectionTab(
                     SegmentedButton(
                         shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
                         onClick = { onCanAdapterTypeChange(CanAdapterType.PCAN) },
-                        selected = canAdapterType == CanAdapterType.PCAN,
-                        enabled = PcanTransport.isAvailable()
+                        selected = canAdapterType == CanAdapterType.PCAN
                     ) { Text("PCAN", style = MaterialTheme.typography.labelSmall) }
                 }
 
-                if (!PcanTransport.isAvailable() && canAdapterType == CanAdapterType.PCAN) {
+                if (canAdapterType == CanAdapterType.PCAN) {
                     Text(
-                        "PCAN drivers not detected. Install from peak-system.com",
+                        "Requires Peak PCAN-USB drivers — peak-system.com",
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(bottom = 4.dp)
                     )
                 }
