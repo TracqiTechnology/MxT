@@ -371,15 +371,13 @@ private fun QuickSetupSection(navState: NavigationState) {
     val allUserProfiles by ProfileManager.userProfiles.collectAsState()
     var statusMessage by remember { mutableStateOf<String?>(null) }
 
-    // Group all profiles by platform (show all, not just current)
-    val defaultByPlatform = remember(allDefaultProfiles) {
-        allDefaultProfiles.groupBy { it.ecuPlatform }
+    // Filter profiles to current platform only
+    val currentPlatform = navState.ecuPlatform.name
+    val defaultsForPlatform = remember(allDefaultProfiles, currentPlatform) {
+        allDefaultProfiles.filter { it.ecuPlatform == currentPlatform }
     }
-    val userByPlatform = remember(allUserProfiles) {
-        allUserProfiles.groupBy { it.ecuPlatform }
-    }
-    val allPlatformKeys = remember(defaultByPlatform, userByPlatform) {
-        (defaultByPlatform.keys + userByPlatform.keys).distinct().sorted()
+    val usersForPlatform = remember(allUserProfiles, currentPlatform) {
+        allUserProfiles.filter { it.ecuPlatform == currentPlatform }
     }
 
     /** Switch platform to match the profile (if needed) then apply. */
@@ -409,32 +407,27 @@ private fun QuickSetupSection(navState: NavigationState) {
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                for (platformKey in allPlatformKeys) {
-                    val defaults = defaultByPlatform[platformKey].orEmpty()
-                    val users = userByPlatform[platformKey].orEmpty()
-                    if (defaults.isEmpty() && users.isEmpty()) continue
+                for (profile in defaultsForPlatform) {
+                    ProfileRow(profile = profile, onApply = {
+                        ProfileManager.applyProfile(profile)
+                        statusMessage = "Applied profile: ${profile.name}"
+                    })
+                }
+                for (profile in usersForPlatform) {
+                    ProfileRow(profile = profile, onApply = {
+                        ProfileManager.applyProfile(profile)
+                        statusMessage = "Applied profile: ${profile.name}"
+                    })
+                }
 
-                    // Platform section header
+                if (defaultsForPlatform.isEmpty() && usersForPlatform.isEmpty()) {
                     Text(
-                        text = platformKey,
-                        style = MaterialTheme.typography.labelMedium,
+                        text = "No bundled profiles for ${currentPlatform}. Load a custom profile below.",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                        modifier = Modifier.padding(vertical = 8.dp)
                     )
-
-                    for (profile in defaults) {
-                        ProfileRow(profile = profile, onApply = {
-                            applyWithPlatformSwitch(profile)
-                            statusMessage = "Applied profile: ${profile.name}"
-                        })
-                    }
-                    for (profile in users) {
-                        ProfileRow(profile = profile, onApply = {
-                            applyWithPlatformSwitch(profile)
-                            statusMessage = "Applied profile: ${profile.name}"
-                        })
-                    }
-
+                } else {
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                 }
 
