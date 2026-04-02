@@ -10,6 +10,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import ui.components.StabilityBadge
 import ui.screens.a2lecu.A2lToEcuScreen
+import ui.screens.axisrescaler.AxisRescalerScreen
 import ui.screens.logger.LoggerScreen
 import ui.screens.sniffer.RamSnifferScreen
 
@@ -43,7 +44,7 @@ fun ToolsContent(navState: NavigationState) {
                 ToolsTab.A2L_GENERATOR -> A2lToEcuScreen()
                 ToolsTab.LOGGER -> LoggerScreen()
                 ToolsTab.RAM_SNIFFER -> RamSnifferScreen()
-                else -> {}
+                ToolsTab.AXIS_RESCALER -> AxisRescalerScreen()
             }
         }
     }
