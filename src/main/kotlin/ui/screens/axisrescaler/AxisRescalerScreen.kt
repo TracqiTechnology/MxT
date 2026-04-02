@@ -287,12 +287,12 @@ private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Un
 @Composable
 private fun DiagnosticChip(label: String, value: String, highlight: Boolean = false) {
     val containerColor = if (highlight) {
-        MaterialTheme.colorScheme.errorContainer
+        MaterialTheme.colorScheme.tertiaryContainer
     } else {
         MaterialTheme.colorScheme.secondaryContainer
     }
     val textColor = if (highlight) {
-        MaterialTheme.colorScheme.onErrorContainer
+        MaterialTheme.colorScheme.onTertiaryContainer
     } else {
         MaterialTheme.colorScheme.onSecondaryContainer
     }

@@ -832,7 +832,7 @@ private fun ScalarRescaleConfigCard(
             if (extrapolatedCount > 0) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
                     shape = MaterialTheme.shapes.small,
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -842,15 +842,15 @@ private fun ScalarRescaleConfigCard(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Warning,
-                            contentDescription = "Extrapolation warning",
-                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            contentDescription = "Extrapolation notice",
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "⚠ $extrapolatedCount of $totalCells cells required extrapolation (outside original axis range)",
+                            text = "$extrapolatedCount of $totalCells cells were extrapolated beyond the original axis range — edge values were held constant",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
                         )
                     }
                 }
@@ -957,7 +957,7 @@ private fun ConfigurationCard(
             if (extrapolatedCount > 0) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Surface(
-                    color = MaterialTheme.colorScheme.errorContainer,
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
                     shape = MaterialTheme.shapes.small,
                     modifier = Modifier.fillMaxWidth()
                 ) {
@@ -967,15 +967,15 @@ private fun ConfigurationCard(
                     ) {
                         Icon(
                             imageVector = Icons.Default.Warning,
-                            contentDescription = "Extrapolation warning",
-                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            contentDescription = "Extrapolation notice",
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = "⚠ $extrapolatedCount of $totalCells cells required extrapolation (outside original axis range)",
+                            text = "$extrapolatedCount of $totalCells cells were extrapolated beyond the original axis range — edge values were held constant",
                             style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onErrorContainer
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
                         )
                     }
                 }
