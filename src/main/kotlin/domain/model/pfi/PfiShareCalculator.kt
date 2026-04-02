@@ -3,6 +3,61 @@ package domain.model.pfi
 import data.contract.Med17LogFileContract
 import data.contract.Med17LogFileContract.Header
 import kotlin.math.abs
+import kotlin.math.min
+
+/**
+ * Status of an injector at a given operating point.
+ */
+enum class InjectorStatus {
+    /** Both injectors within safe limits. */
+    OK,
+    /** DI on-time is within 80–100% of the HPFP limit. */
+    DI_NEAR_LIMIT,
+    /** DI on-time exceeds the HPFP limit. */
+    DI_OVER_LIMIT,
+    /** PFI on-time exceeds 85% of the available injection window. */
+    PFI_NEAR_LIMIT
+}
+
+/**
+ * A single row of an RPM sweep timing table.
+ */
+data class RpmSweepRow(
+    val rpm: Double,
+    val pfiSharePercent: Double,
+    val portOnTimeMs: Double,
+    val directOnTimeMs: Double,
+    val totalFuelMs: Double,
+    val status: InjectorStatus
+)
+
+/**
+ * Result of the reverse PFI share calculator: for each (RPM, load) cell,
+ * the suggested PFI share that keeps DI on-time at or below a target.
+ */
+data class ReversePfiResult(
+    val rpmAxis: DoubleArray,
+    val loadAxis: DoubleArray,
+    val suggestedPfiShare: Array<DoubleArray>,
+    val constraintFlags: Array<Array<InjectorStatus>>
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is ReversePfiResult) return false
+        return rpmAxis.contentEquals(other.rpmAxis) &&
+            loadAxis.contentEquals(other.loadAxis) &&
+            suggestedPfiShare.contentDeepEquals(other.suggestedPfiShare) &&
+            constraintFlags.contentDeepEquals(other.constraintFlags)
+    }
+
+    override fun hashCode(): Int {
+        var h = rpmAxis.contentHashCode()
+        h = 31 * h + loadAxis.contentHashCode()
+        h = 31 * h + suggestedPfiShare.contentDeepHashCode()
+        h = 31 * h + constraintFlags.contentDeepHashCode()
+        return h
+    }
+}
 
 /**
  * Result of an RPM-dependent PFI share calculation.
@@ -201,6 +256,150 @@ object PfiShareCalculator {
             pfiSharePercent = defaultResult.pfiSharePercent,
             loggedRpmAxis = logRpm,
             loggedPfiPercent = logPfi
+        )
+    }
+
+    // ── RPM Sweep Timing Table ──────────────────────────────────────────
+
+    /** Threshold (fraction of DI max on-time) above which DI is flagged near-limit. */
+    private const val DI_NEAR_LIMIT_FRACTION = 0.80
+
+    /** Threshold (fraction of available injection window) above which PFI is flagged near-limit. */
+    private const val PFI_NEAR_LIMIT_FRACTION = 0.85
+
+    /**
+     * Compute a table of DI/PFI injection on-times across the RPM range at a fixed load.
+     *
+     * For each RPM step the PFI share is looked up from [pfiShareCurve] and
+     * multiplied by [loadPercent] and the respective KRKTE values to yield
+     * port and direct injector on-times.
+     *
+     * @param rpmStart       First RPM in the sweep (default 1000)
+     * @param rpmEnd         Last RPM in the sweep (default 7000)
+     * @param rpmStep        RPM increment between rows (default 500)
+     * @param loadPercent    Fixed engine load for the sweep (default 100 %)
+     * @param pfiShareCurve  1D RPM→PFI% curve to look up PFI share
+     * @param portKrkte      KRKTE for port injectors (ms/%)
+     * @param directKrkte    KRKTE for GDI injectors (ms/%)
+     * @param diMaxOnTimeMs  Max DI on-time before HPFP limit (default 6.0 ms)
+     * @return ordered list of [RpmSweepRow], one per RPM step
+     */
+    fun calculateRpmSweep(
+        rpmStart: Double = 1000.0,
+        rpmEnd: Double = 7000.0,
+        rpmStep: Double = 500.0,
+        loadPercent: Double = 100.0,
+        pfiShareCurve: PfiShareResult,
+        portKrkte: Double,
+        directKrkte: Double,
+        diMaxOnTimeMs: Double = 6.0
+    ): List<RpmSweepRow> {
+        require(rpmStep > 0) { "rpmStep must be positive" }
+        require(portKrkte > 0) { "portKrkte must be positive" }
+        require(directKrkte > 0) { "directKrkte must be positive" }
+
+        val rows = mutableListOf<RpmSweepRow>()
+        var rpm = rpmStart
+        while (rpm <= rpmEnd + rpmStep * 0.01) {
+            val pfiPercent = interpolateClamped(
+                rpm, pfiShareCurve.rpmAxis, pfiShareCurve.pfiSharePercent
+            ).coerceIn(0.0, 100.0)
+            val pfiShare = pfiPercent / 100.0
+
+            val portOnTime = loadPercent * pfiShare * portKrkte
+            val directOnTime = loadPercent * (1.0 - pfiShare) * directKrkte
+            val totalFuel = portOnTime + directOnTime
+
+            val availableWindow = if (rpm > 0) 120_000.0 / rpm else Double.MAX_VALUE
+
+            val status = when {
+                directOnTime > diMaxOnTimeMs -> InjectorStatus.DI_OVER_LIMIT
+                directOnTime > diMaxOnTimeMs * DI_NEAR_LIMIT_FRACTION -> InjectorStatus.DI_NEAR_LIMIT
+                portOnTime > availableWindow * PFI_NEAR_LIMIT_FRACTION -> InjectorStatus.PFI_NEAR_LIMIT
+                else -> InjectorStatus.OK
+            }
+
+            rows.add(
+                RpmSweepRow(
+                    rpm = rpm,
+                    pfiSharePercent = pfiPercent,
+                    portOnTimeMs = portOnTime,
+                    directOnTimeMs = directOnTime,
+                    totalFuelMs = totalFuel,
+                    status = status
+                )
+            )
+            rpm += rpmStep
+        }
+        return rows
+    }
+
+    // ── Reverse PFI Share Calculator ────────────────────────────────────
+
+    /**
+     * Reverse-calculate the PFI share needed to keep DI on-time at or below
+     * [targetDiOnTimeMs] across an RPM × load grid.
+     *
+     * For each cell the baseline total fuel is `load × directKrkte` (100% DI).
+     * The required DI portion is `min(targetDiOnTimeMs, totalFuel)`.
+     * PFI share = `1.0 − requiredDI / totalFuel`, clamped to [0, 100] %.
+     *
+     * @param targetDiOnTimeMs Desired maximum DI on-time (ms)
+     * @param rpmBins          RPM axis for the output grid
+     * @param loadBins         Load axis for the output grid
+     * @param portKrkte        KRKTE for port injectors (ms/%)
+     * @param directKrkte      KRKTE for GDI injectors (ms/%)
+     * @param diMaxOnTimeMs    HPFP hard limit for DI on-time (default 6.0 ms)
+     * @return [ReversePfiResult] with suggested PFI shares and constraint flags
+     */
+    fun reverseCalculate(
+        targetDiOnTimeMs: Double,
+        rpmBins: DoubleArray,
+        loadBins: DoubleArray,
+        portKrkte: Double,
+        directKrkte: Double,
+        diMaxOnTimeMs: Double = 6.0
+    ): ReversePfiResult {
+        require(portKrkte > 0) { "portKrkte must be positive" }
+        require(directKrkte > 0) { "directKrkte must be positive" }
+        require(targetDiOnTimeMs > 0) { "targetDiOnTimeMs must be positive" }
+
+        val shares = Array(rpmBins.size) { DoubleArray(loadBins.size) }
+        val flags = Array(rpmBins.size) { Array(loadBins.size) { InjectorStatus.OK } }
+
+        for (r in rpmBins.indices) {
+            for (l in loadBins.indices) {
+                val load = loadBins[l]
+
+                val totalFuel = load * directKrkte
+                if (totalFuel <= 0.0) {
+                    shares[r][l] = 0.0
+                    flags[r][l] = InjectorStatus.OK
+                    continue
+                }
+
+                val requiredDi = min(targetDiOnTimeMs, totalFuel)
+                val pfiShareFraction = (1.0 - requiredDi / totalFuel).coerceIn(0.0, 1.0)
+                shares[r][l] = (pfiShareFraction * 100.0)
+
+                val actualDiOnTime = load * (1.0 - pfiShareFraction) * directKrkte
+                val pfiOnTime = load * pfiShareFraction * portKrkte
+                val availableWindow = if (rpmBins[r] > 0) 120_000.0 / rpmBins[r] else Double.MAX_VALUE
+
+                flags[r][l] = when {
+                    actualDiOnTime > diMaxOnTimeMs -> InjectorStatus.DI_OVER_LIMIT
+                    actualDiOnTime > diMaxOnTimeMs * DI_NEAR_LIMIT_FRACTION -> InjectorStatus.DI_NEAR_LIMIT
+                    pfiOnTime > availableWindow * PFI_NEAR_LIMIT_FRACTION -> InjectorStatus.PFI_NEAR_LIMIT
+                    else -> InjectorStatus.OK
+                }
+            }
+        }
+
+        return ReversePfiResult(
+            rpmAxis = rpmBins.copyOf(),
+            loadAxis = loadBins.copyOf(),
+            suggestedPfiShare = shares,
+            constraintFlags = flags
         )
     }
 
