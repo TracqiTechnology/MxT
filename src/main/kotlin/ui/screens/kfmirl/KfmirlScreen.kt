@@ -18,6 +18,8 @@ import data.preferences.bin.BinFilePreferences
 import data.preferences.kfmiop.KfmiopPreferences
 import data.preferences.kfmirl.KfmirlPreferences
 import data.writer.BinWriter
+import data.preferences.SharedAxisPreferences
+import domain.math.AxisRescaler
 import domain.math.Inverse
 import domain.math.RescaleMap
 import domain.math.map.Map3d
@@ -89,6 +91,15 @@ fun KfmirlScreen() {
         mutableStateOf(if (!kfmiopIsScalar) inputKfmiop?.let { Map3d(it) } else null)
     }
 
+    // Editable Y-axis (RPM breakpoints) for KFMIRL output
+    var editedYAxis by remember(kfmirlPair, kfmiopIsScalar) {
+        val kfmirlY = kfmirlPair?.second?.yAxis
+        mutableStateOf(
+            if (kfmirlY != null && kfmirlY.isNotEmpty()) arrayOf(kfmirlY.copyOf())
+            else arrayOf(emptyArray<Double>())
+        )
+    }
+
     // Calculate KFMIRL output — different path for scalar vs 2D KFMIOP
     val outputKfmirl = remember(editedInputMap, editedXAxis, kfmirlPair, kfmiopIsScalar, targetMaxLoad) {
         val kfmirlBase = kfmirlPair?.second
@@ -114,12 +125,36 @@ fun KfmirlScreen() {
         }
     }
 
+    // Rescale KFMIRL output when Y-axis is edited
+    val yAxisRescaleResult = remember(outputKfmirl, editedYAxis) {
+        val output = outputKfmirl ?: return@remember null
+        val hasYAxisEdit = editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty()
+        if (!hasYAxisEdit) return@remember null
+        try {
+            AxisRescaler.rescaleMap(output, newYAxis = editedYAxis[0])
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+
+    val finalOutputKfmirl = yAxisRescaleResult?.rescaledMap ?: outputKfmirl
+
+    // Emit Y-axis edits for cross-screen sync
+    LaunchedEffect(editedYAxis) {
+        if (editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty()) {
+            SharedAxisPreferences.setKfmirlEditedYAxis(editedYAxis[0])
+        }
+    }
+
+    // Collect Y-axis edits from KFMIOP for sync
+    val kfmiopSyncYAxis by SharedAxisPreferences.kfmiopEditedYAxis.collectAsState(initial = null)
+
     // Write prerequisites — scalar mode only needs KFMIRL configured
     val binFile by BinFilePreferences.file.collectAsState()
     val binLoaded = binFile.exists() && binFile.isFile
     val kfmiopMapConfigured = kfmiopPair != null
     val kfmirlMapConfigured = kfmirlPair != null
-    val canWrite = binLoaded && kfmirlMapConfigured && outputKfmirl != null &&
+    val canWrite = binLoaded && kfmirlMapConfigured && finalOutputKfmirl != null &&
         (kfmiopIsScalar || kfmiopMapConfigured)
 
     var showWriteConfirmation by remember { mutableStateOf(false) }
@@ -163,9 +198,9 @@ fun KfmirlScreen() {
                 TextButton(onClick = {
                     showWriteConfirmation = false
                     val tableDef = kfmirlPair?.first
-                    if (outputKfmirl != null && tableDef != null) {
+                    if (finalOutputKfmirl != null && tableDef != null) {
                         try {
-                            BinWriter.write(BinFilePreferences.file.value, tableDef, outputKfmirl)
+                            BinWriter.write(BinFilePreferences.file.value, tableDef, finalOutputKfmirl)
                             writeStatus = WriteStatus.Success
                         } catch (e: Exception) {
                             e.printStackTrace()
@@ -232,7 +267,13 @@ fun KfmirlScreen() {
                     editedInputMap?.let { currentMap ->
                         editedInputMap = Map3d(newData[0], currentMap.yAxis, currentMap.zAxis)
                     }
-                }
+                },
+                editedYAxis = editedYAxis,
+                onYAxisChanged = { editedYAxis = it },
+                extrapolatedCount = yAxisRescaleResult?.extrapolatedCount ?: 0,
+                totalCells = yAxisRescaleResult?.totalCells ?: 0,
+                syncYAxis = kfmiopSyncYAxis,
+                onApplySyncYAxis = { syncAxis -> editedYAxis = arrayOf(syncAxis) }
             )
         }
 
@@ -245,7 +286,7 @@ fun KfmirlScreen() {
             editedInputMap = editedInputMap,
             onInputMapChanged = { editedInputMap = it },
             originalKfmirl = kfmirlPair?.second,
-            outputKfmirl = outputKfmirl
+            outputKfmirl = finalOutputKfmirl
         )
 
         WriteToBinarySection(
@@ -328,7 +369,13 @@ private fun ConfigurationCard(
     onSelectKfmiop: () -> Unit,
     onSelectKfmirl: () -> Unit,
     editedXAxis: Array<Array<Double>>,
-    onXAxisChanged: (Array<Array<Double>>) -> Unit
+    onXAxisChanged: (Array<Array<Double>>) -> Unit,
+    editedYAxis: Array<Array<Double>> = arrayOf(emptyArray()),
+    onYAxisChanged: (Array<Array<Double>>) -> Unit = {},
+    extrapolatedCount: Int = 0,
+    totalCells: Int = 0,
+    syncYAxis: Array<Double>? = null,
+    onApplySyncYAxis: (Array<Double>) -> Unit = {}
 ) {
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -383,6 +430,87 @@ private fun ConfigurationCard(
                     editable = true,
                     onDataChanged = onXAxisChanged
                 )
+            }
+
+            // Y-axis (RPM) editing
+            if (editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(bottom = 4.dp)
+                ) {
+                    Text(
+                        text = "$kfmirlLabel RPM Axis (Editable)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "(defines the output RPM breakpoints)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                MapAxis(
+                    data = editedYAxis,
+                    editable = true,
+                    onDataChanged = onYAxisChanged
+                )
+            }
+
+            // Extrapolation warning
+            if (extrapolatedCount > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Extrapolation warning",
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "⚠ $extrapolatedCount of $totalCells cells required extrapolation (outside original axis range)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+            }
+
+            // Sync banner from KFMIOP
+            if (syncYAxis != null && syncYAxis.isNotEmpty() &&
+                editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty() &&
+                !syncYAxis.contentEquals(editedYAxis[0])) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Text(
+                            text = "$kfmiopLabel RPM axis was edited.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { onApplySyncYAxis(syncYAxis) }) {
+                            Text("Apply to $kfmirlLabel")
+                        }
+                    }
+                }
             }
         }
     }
