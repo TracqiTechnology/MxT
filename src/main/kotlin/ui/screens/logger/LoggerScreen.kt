@@ -558,17 +558,19 @@ private fun ConnectionTab(
         when (loggerMode) {
             LoggerMode.ME7LOGGER_EXE -> {
                 // Existing COM / FTDI selector
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.padding(bottom = 8.dp)) {
+                SingleChoiceSegmentedButtonRow(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                ) {
                     SegmentedButton(
                         shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
                         onClick = { onConnectionTypeChange(ConnectionType.COM_PORT) },
                         selected = connectionType == ConnectionType.COM_PORT
-                    ) { Text("COM Port", style = MaterialTheme.typography.labelSmall) }
+                    ) { Text("COM Port", style = MaterialTheme.typography.labelSmall, maxLines = 1) }
                     SegmentedButton(
                         shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
                         onClick = { onConnectionTypeChange(ConnectionType.FTDI) },
                         selected = connectionType == ConnectionType.FTDI
-                    ) { Text("FTDI", style = MaterialTheme.typography.labelSmall) }
+                    ) { Text("FTDI", style = MaterialTheme.typography.labelSmall, maxLines = 1) }
                 }
 
                 if (connectionType == ConnectionType.COM_PORT) {
@@ -654,17 +656,19 @@ private fun ConnectionTab(
             LoggerMode.NATIVE_UDS -> {
                 // CAN adapter type selector
                 Text("CAN Adapter", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(bottom = 4.dp))
-                SingleChoiceSegmentedButtonRow(modifier = Modifier.padding(bottom = 8.dp)) {
+                SingleChoiceSegmentedButtonRow(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)
+                ) {
                     SegmentedButton(
                         shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
                         onClick = { onCanAdapterTypeChange(CanAdapterType.SLCAN) },
                         selected = canAdapterType == CanAdapterType.SLCAN
-                    ) { Text("SLCAN", style = MaterialTheme.typography.labelSmall) }
+                    ) { Text("SLCAN", style = MaterialTheme.typography.labelSmall, maxLines = 1) }
                     SegmentedButton(
                         shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
                         onClick = { onCanAdapterTypeChange(CanAdapterType.PCAN) },
                         selected = canAdapterType == CanAdapterType.PCAN
-                    ) { Text("PCAN", style = MaterialTheme.typography.labelSmall) }
+                    ) { Text("PCAN", style = MaterialTheme.typography.labelSmall, maxLines = 1) }
                 }
 
                 if (canAdapterType == CanAdapterType.PCAN) {
