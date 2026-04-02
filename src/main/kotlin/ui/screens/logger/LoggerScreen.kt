@@ -32,7 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import data.logger.*
 import data.logger.kwp2000.Kwp2000NativeLogger
-import data.logger.protocol.FakeSerialPortProvider
+import data.logger.protocol.JSerialCommProvider
 import data.logger.protocol.SerialPortEnumerator
 import data.logger.uds.*
 import ui.components.ChartSeries
@@ -63,10 +63,10 @@ fun LoggerScreen(loggerManager: LoggerManager? = null) {
     val modeLogger: LoggerManager = remember(loggerMode, canAdapterType) {
         loggerManager ?: when (loggerMode) {
             LoggerMode.ME7LOGGER_EXE -> Me7LoggerProcess()
-            LoggerMode.NATIVE_KWP2000 -> Kwp2000NativeLogger(FakeSerialPortProvider())
+            LoggerMode.NATIVE_KWP2000 -> Kwp2000NativeLogger(JSerialCommProvider())
             LoggerMode.NATIVE_UDS -> {
                 val transport: CanTransport = when (canAdapterType) {
-                    CanAdapterType.SLCAN -> SlcanTransport(FakeSerialPortProvider())
+                    CanAdapterType.SLCAN -> SlcanTransport(JSerialCommProvider())
                     CanAdapterType.PCAN -> PcanTransport()
                 }
                 UdsNativeLogger(transport)
