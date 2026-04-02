@@ -158,21 +158,6 @@ class KLineTransport(
 
         // Read data + checksum
         val remaining = ByteArray(length + 1) // data bytes + checksum
-        var read = 0
-        while (read < remaining.size) {
-            val n = p.read(
-                ByteArray(remaining.size - read).also { buf ->
-                    // Read into temp, then copy
-                },
-                ProtocolConstants.KWP_P1_MAX_MS * 2
-            )
-            if (n <= 0) break
-
-            // Re-read properly
-            break // handled below
-        }
-
-        // Simpler approach: read all remaining bytes at once
         val restRead = p.read(remaining, ProtocolConstants.KWP_P1_MAX_MS * (length + 1))
         if (restRead < length + 1) {
             throw KLineException("Incomplete frame: expected ${length + 1} bytes, got $restRead")
