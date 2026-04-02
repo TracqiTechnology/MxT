@@ -191,15 +191,12 @@ class Kwp2000NativeLogger(
     private fun resolveLogEntries(): List<EcuEntry> {
         val ecu = ecuFile ?: return emptyList()
         val cfg = cfgFile
+        val selected = config?.selectedVariableNames ?: emptyList()
 
-        return if (cfg != null) {
-            // Use .cfg variable list, resolve against .ecu entries
-            cfg.variables.mapNotNull { cfgVar ->
-                ecu.entries[cfgVar.name]
-            }
-        } else {
-            // No .cfg — use first N entries from .ecu (fallback)
-            ecu.entries.values.take(20).toList()
+        return when {
+            selected.isNotEmpty() -> selected.mapNotNull { name -> ecu.entries[name] }
+            cfg != null -> cfg.variables.mapNotNull { cfgVar -> ecu.entries[cfgVar.name] }
+            else -> ecu.entries.values.take(20).toList()
         }
     }
 

@@ -111,7 +111,9 @@ data class LoggerConfig(
     val canAdapterType: data.logger.uds.CanAdapterType = data.logger.uds.CanAdapterType.SLCAN,
     val canBitrate: Int = 500_000,
     val canTxId: Int = 0x7E0,
-    val canRxId: Int = 0x7E8
+    val canRxId: Int = 0x7E8,
+    // Variable selection (from UI picker — overrides .cfg when non-empty)
+    val selectedVariableNames: List<String> = emptyList()
 )
 
 /**

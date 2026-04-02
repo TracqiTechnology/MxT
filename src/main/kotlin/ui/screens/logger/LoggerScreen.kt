@@ -36,6 +36,11 @@ import data.logger.protocol.JSerialCommProvider
 import data.logger.protocol.SerialPortEnumerator
 import data.logger.uds.*
 import data.model.EcuPlatform
+import data.parser.a2l.EcuEntry
+import data.parser.ecu.CfgFileParser
+import data.parser.ecu.EcuFile
+import data.parser.ecu.EcuFileParser
+import data.writer.EcuWriter
 import ui.components.ChartSeries
 import ui.components.LineChart
 import ui.components.niceTickValues
@@ -126,6 +131,10 @@ fun LoggerScreen(ecuPlatform: EcuPlatform = EcuPlatform.ME7, loggerManager: Logg
     var canRxId by remember { mutableStateOf("7E8") }
     val serialPorts = remember { mutableStateListOf<String>() }
 
+    // Variable picker state
+    var parsedEcuFile by remember { mutableStateOf<EcuFile?>(null) }
+    var selectedVariableNames by remember { mutableStateOf<Set<String>>(emptySet()) }
+
     // Refresh serial ports on mode change
     LaunchedEffect(loggerMode) {
         if (loggerMode != LoggerMode.ME7LOGGER_EXE) {
@@ -137,9 +146,44 @@ fun LoggerScreen(ecuPlatform: EcuPlatform = EcuPlatform.ME7, loggerManager: Logg
         }
     }
 
+    // Parse .ecu file when path changes
+    LaunchedEffect(ecuFile) {
+        if (ecuFile.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val f = File(ecuFile)
+                    if (f.exists()) {
+                        parsedEcuFile = EcuFileParser.parse(f)
+                    }
+                } catch (_: Exception) {
+                    parsedEcuFile = null
+                }
+            }
+        } else {
+            parsedEcuFile = null
+        }
+    }
+
+    // Pre-select variables when .cfg file is loaded
+    LaunchedEffect(cfgFile) {
+        if (cfgFile.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val f = File(cfgFile)
+                    if (f.exists()) {
+                        val cfg = CfgFileParser.parse(f)
+                        selectedVariableNames = cfg.variables.map { it.name }.toSet()
+                    }
+                } catch (_: Exception) {
+                    // Keep existing selection
+                }
+            }
+        }
+    }
+
     // UI state
     var selectedTab by remember { mutableStateOf(0) }
-    val tabTitles = listOf("Connection", "Live Data", "Chart")
+    val tabTitles = listOf("Connection", "Variables", "Live Data", "Chart")
 
     // Track latest samples for live display
     var latestSample by remember { mutableStateOf<LogSample?>(null) }
@@ -186,7 +230,7 @@ fun LoggerScreen(ecuPlatform: EcuPlatform = EcuPlatform.ME7, loggerManager: Logg
                                 latestSample = null
                                 mock.connectWithFile(logFile)
                                 mock.startLogging()
-                                selectedTab = 2  // Switch to Chart tab
+                                selectedTab = 3  // Switch to Chart tab
                             }
                         } else {
                             // Stop dev mode — save log
@@ -226,7 +270,8 @@ fun LoggerScreen(ecuPlatform: EcuPlatform = EcuPlatform.ME7, loggerManager: Logg
                         Icon(
                             when (index) {
                                 0 -> Icons.Default.Settings
-                                1 -> Icons.Default.Speed
+                                1 -> Icons.Default.Checklist
+                                2 -> Icons.Default.Speed
                                 else -> Icons.Default.ShowChart
                             },
                             contentDescription = null,
@@ -376,7 +421,8 @@ fun LoggerScreen(ecuPlatform: EcuPlatform = EcuPlatform.ME7, loggerManager: Logg
                                     canAdapterType = canAdapterType,
                                     canBitrate = canBitrate.toIntOrNull() ?: 500_000,
                                     canTxId = canTxId.toIntOrNull(16) ?: 0x7E0,
-                                    canRxId = canRxId.toIntOrNull(16) ?: 0x7E8
+                                    canRxId = canRxId.toIntOrNull(16) ?: 0x7E8,
+                                    selectedVariableNames = selectedVariableNames.toList()
                                 )
                             )
                         }
@@ -398,7 +444,7 @@ fun LoggerScreen(ecuPlatform: EcuPlatform = EcuPlatform.ME7, loggerManager: Logg
                             recentSamples.clear()
                             recentSamples.addAll(session.samples.takeLast(maxRecentSamples))
                             latestSample = session.samples.lastOrNull()
-                            selectedTab = 1
+                            selectedTab = 2  // Live Data tab
                         }
                     },
                     onExportCsv = { file ->
@@ -409,11 +455,34 @@ fun LoggerScreen(ecuPlatform: EcuPlatform = EcuPlatform.ME7, loggerManager: Logg
                         }
                     }
                 )
-                1 -> LiveDataTab(
+                1 -> VariablesTab(
+                    ecuFile = parsedEcuFile,
+                    selectedNames = selectedVariableNames,
+                    onSelectionChange = { selectedVariableNames = it },
+                    ecuFilePath = ecuFile,
+                    onSaveAsCfg = { outputFile, varNames ->
+                        scope.launch {
+                            withContext(Dispatchers.IO) {
+                                val ecuName = File(ecuFile).name
+                                val triples = varNames.map { name ->
+                                    val entry = parsedEcuFile?.entries?.get(name)
+                                    Triple(name, entry?.alias ?: "", entry?.comment ?: "")
+                                }
+                                EcuWriter.writeCfgFile(
+                                    outputFile = outputFile,
+                                    ecuFilename = ecuName,
+                                    variables = triples,
+                                    description = "Custom log configuration"
+                                )
+                            }
+                        }
+                    }
+                )
+                2 -> LiveDataTab(
                     variables = variables,
                     latestSample = latestSample
                 )
-                2 -> ChartTab(
+                3 -> ChartTab(
                     variables = variables,
                     recentSamples = recentSamples
                 )
@@ -960,6 +1029,260 @@ private fun FilePickerRow(
             }
         }) {
             Icon(Icons.Default.FolderOpen, contentDescription = "Browse")
+        }
+    }
+}
+
+@Composable
+private fun VariablesTab(
+    ecuFile: EcuFile?,
+    selectedNames: Set<String>,
+    onSelectionChange: (Set<String>) -> Unit,
+    ecuFilePath: String,
+    onSaveAsCfg: (File, List<String>) -> Unit
+) {
+    if (ecuFile == null) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.fillMaxSize()
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Icon(
+                    Icons.Default.Checklist,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(48.dp)
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    "No .ecu file loaded",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Select an .ecu file in the Connection tab to browse variables.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        return
+    }
+
+    val allEntries = remember(ecuFile) {
+        ecuFile.entries.values.sortedBy { it.name.lowercase() }
+    }
+    var searchQuery by remember { mutableStateOf("") }
+
+    val filteredEntries = remember(allEntries, searchQuery) {
+        if (searchQuery.isBlank()) allEntries
+        else {
+            val q = searchQuery.lowercase()
+            allEntries.filter {
+                it.name.lowercase().contains(q) ||
+                    it.alias.lowercase().contains(q) ||
+                    it.comment.lowercase().contains(q) ||
+                    it.unit.lowercase().contains(q)
+            }
+        }
+    }
+
+    Column(modifier = Modifier.fillMaxSize()) {
+        // Toolbar: search + presets + count
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+                // Search bar
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    label = { Text("Filter variables") },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    trailingIcon = {
+                        if (searchQuery.isNotEmpty()) {
+                            IconButton(onClick = { searchQuery = "" }) {
+                                Icon(Icons.Default.Clear, contentDescription = "Clear")
+                            }
+                        }
+                    },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                    textStyle = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace)
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Preset buttons row + count
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    val availableNames = remember(allEntries) { allEntries.map { it.name }.toSet() }
+
+                    FilterChip(
+                        selected = false,
+                        onClick = {
+                            val basicNames = EcuWriter.BASIC_VARIABLES.map { it.first }.toSet()
+                            onSelectionChange(selectedNames + basicNames.intersect(availableNames))
+                        },
+                        label = { Text("+ Basic", style = MaterialTheme.typography.labelSmall) },
+                        leadingIcon = { Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                    )
+
+                    FilterChip(
+                        selected = false,
+                        onClick = {
+                            val ldrpidNames = EcuWriter.LDRPID_VARIABLES.map { it.first }.toSet()
+                            onSelectionChange(selectedNames + ldrpidNames.intersect(availableNames))
+                        },
+                        label = { Text("+ LDRPID", style = MaterialTheme.typography.labelSmall) },
+                        leadingIcon = { Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                    )
+
+                    FilterChip(
+                        selected = false,
+                        onClick = { onSelectionChange(emptySet()) },
+                        label = { Text("Clear All", style = MaterialTheme.typography.labelSmall) },
+                        leadingIcon = { Icon(Icons.Default.Clear, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                    )
+
+                    Spacer(modifier = Modifier.weight(1f))
+
+                    // Save as .cfg
+                    OutlinedButton(
+                        onClick = {
+                            val dialog = FileDialog(Frame(), "Save .cfg File", FileDialog.SAVE)
+                            dialog.file = File(ecuFilePath).nameWithoutExtension + "_custom.cfg"
+                            dialog.isVisible = true
+                            if (dialog.directory != null && dialog.file != null) {
+                                onSaveAsCfg(File(dialog.directory, dialog.file), selectedNames.toList())
+                            }
+                        },
+                        enabled = selectedNames.isNotEmpty()
+                    ) {
+                        Icon(Icons.Default.Save, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Save .cfg", style = MaterialTheme.typography.labelSmall)
+                    }
+
+                    // Selected count badge
+                    Surface(
+                        color = if (selectedNames.isNotEmpty()) MaterialTheme.colorScheme.primaryContainer
+                        else MaterialTheme.colorScheme.surfaceContainerHigh,
+                        shape = MaterialTheme.shapes.small
+                    ) {
+                        Text(
+                            "${selectedNames.size} of ${allEntries.size} selected",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (selectedNames.isNotEmpty()) MaterialTheme.colorScheme.onPrimaryContainer
+                            else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Table header
+        Surface(
+            color = MaterialTheme.colorScheme.surfaceContainerHigh,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Row(
+                modifier = Modifier.padding(start = 48.dp, end = 16.dp, top = 6.dp, bottom = 6.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Name", style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1.5f))
+                Text("Alias", style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(1.5f))
+                Text("Address", style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(0.8f))
+                Text("Size", style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(0.4f))
+                Text("Unit", style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(0.6f))
+                Text("Description", style = MaterialTheme.typography.labelSmall, modifier = Modifier.weight(2.5f))
+            }
+        }
+
+        // Variable list with checkboxes
+        Box(modifier = Modifier.weight(1f)) {
+            val listState = rememberLazyListState()
+
+            LazyColumn(state = listState, modifier = Modifier.fillMaxSize()) {
+                items(filteredEntries, key = { it.name }) { entry ->
+                    val isSelected = entry.name in selectedNames
+
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 4.dp, end = 16.dp, top = 0.dp, bottom = 0.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = isSelected,
+                            onCheckedChange = { checked ->
+                                onSelectionChange(
+                                    if (checked) selectedNames + entry.name
+                                    else selectedNames - entry.name
+                                )
+                            },
+                            modifier = Modifier.size(36.dp)
+                        )
+
+                        Text(
+                            entry.name,
+                            style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                            modifier = Modifier.weight(1.5f),
+                            maxLines = 1
+                        )
+                        Text(
+                            entry.alias,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (entry.alias.isNotEmpty()) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
+                            modifier = Modifier.weight(1.5f),
+                            maxLines = 1
+                        )
+                        Text(
+                            "0x${String.format("%06X", entry.address)}",
+                            style = MaterialTheme.typography.bodySmall.copy(
+                                fontFamily = FontFamily.Monospace,
+                                fontSize = 11.sp
+                            ),
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(0.8f),
+                            maxLines = 1
+                        )
+                        Text(
+                            "${entry.size}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(0.4f),
+                            maxLines = 1
+                        )
+                        Text(
+                            entry.unit,
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(0.6f),
+                            maxLines = 1
+                        )
+                        Text(
+                            entry.comment,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            modifier = Modifier.weight(2.5f),
+                            maxLines = 1
+                        )
+                    }
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f))
+                }
+            }
+
+            VerticalScrollbar(
+                adapter = rememberScrollbarAdapter(listState),
+                modifier = Modifier.align(Alignment.CenterEnd).fillMaxHeight()
+            )
         }
     }
 }
