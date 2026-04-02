@@ -412,6 +412,344 @@ temp     ;{CoolTemp}
     }
 }
 
+/**
+ * End-to-end integration test for the SLCAN transport path.
+ * Exercises the full stack: SlcanTransport → ISO-TP → UDS → poll loop
+ * using FakeSerialPortWrapper to simulate a CANable/USBtin SLCAN adapter.
+ *
+ * Verifies:
+ * - SLCAN open sequence (C → S6 → O)
+ * - Frame hex encoding/decoding through serial layer
+ * - Full UDS session through SLCAN (session start, DID define, poll, stop)
+ * - Physical value conversion end-to-end
+ * - Transmitted SLCAN command correctness
+ */
+class SlcanLoggingE2ETest {
+
+    /**
+     * Encode a CAN frame as an SLCAN ASCII string (with \r terminator).
+     * Standard (11-bit ID): tIIILDD..\r
+     * Extended (29-bit ID): TIIIIIIIILDD..\r
+     */
+    private fun encodeSlcan(frame: CanFrame): String = buildString {
+        if (frame.id > 0x7FF) {
+            append('T')
+            append(String.format("%08X", frame.id))
+        } else {
+            append('t')
+            append(String.format("%03X", frame.id))
+        }
+        append(frame.data.size)
+        for (b in frame.data) {
+            append(String.format("%02X", b.toInt() and 0xFF))
+        }
+        append('\r')
+    }
+
+    /**
+     * Queue a single-frame ISO-TP CAN response as SLCAN bytes.
+     */
+    private fun queueSlcanSingleFrame(port: data.logger.protocol.FakeSerialPortWrapper, rxId: Int, data: ByteArray) {
+        val frame = ByteArray(8)
+        frame[0] = data.size.toByte()
+        data.copyInto(frame, 1)
+        val slcan = encodeSlcan(CanFrame(rxId, frame))
+        port.queueResponseBytes(slcan.toByteArray(Charsets.US_ASCII))
+    }
+
+    /**
+     * Queue a multi-frame ISO-TP CAN response as SLCAN bytes (FF + CFs).
+     */
+    private fun queueSlcanMultiFrame(port: data.logger.protocol.FakeSerialPortWrapper, rxId: Int, data: ByteArray) {
+        val totalLen = data.size
+
+        // First Frame
+        val ff = ByteArray(8)
+        ff[0] = (0x10 or ((totalLen shr 8) and 0x0F)).toByte()
+        ff[1] = (totalLen and 0xFF).toByte()
+        val ffDataLen = minOf(6, data.size)
+        data.copyInto(ff, 2, 0, ffDataLen)
+        port.queueResponseBytes(encodeSlcan(CanFrame(rxId, ff)).toByteArray(Charsets.US_ASCII))
+
+        // Consecutive Frames
+        var offset = ffDataLen
+        var seq = 1
+        while (offset < data.size) {
+            val cf = ByteArray(8)
+            cf[0] = (0x20 or (seq and 0x0F)).toByte()
+            val cfDataLen = minOf(7, data.size - offset)
+            data.copyInto(cf, 1, offset, offset + cfDataLen)
+            port.queueResponseBytes(encodeSlcan(CanFrame(rxId, cf)).toByteArray(Charsets.US_ASCII))
+            offset += cfDataLen
+            seq++
+        }
+    }
+
+    /**
+     * Queue a Flow Control frame as SLCAN bytes.
+     */
+    private fun queueSlcanFlowControl(port: data.logger.protocol.FakeSerialPortWrapper, rxId: Int) {
+        val fc = ByteArray(8)
+        fc[0] = 0x30 // FC: CTS
+        fc[1] = 0x00 // BS=0 (unlimited)
+        fc[2] = 0x00 // STmin=0
+        port.queueResponseBytes(encodeSlcan(CanFrame(rxId, fc)).toByteArray(Charsets.US_ASCII))
+    }
+
+    private fun createTestEcuFile(): File {
+        val content = """
+;
+; Minimal test ECU file for SLCAN E2E testing
+;
+
+[Version]
+Version           = 1.10
+
+[Communication]
+Connect           = SLOW-0x01
+Communicate       = HM0
+LogSpeed          = 500000
+
+[Identification]
+HWNumber          = {TEST_HW}
+SWNumber          = {TEST_SW}
+PartNumber        = {TEST_PART}
+SWVersion         = {0001}
+EngineId          = {2.5L R5 TFSI}
+
+[Measurements]
+rpm_w,            {RPM},       0x001000, 2, 0xFFFF, {RPM},  0, 0, 0.25, 0,  {Engine speed}
+load_w,           {Load},      0x001002, 2, 0xFFFF, {%},    0, 0, 0.1,  0,  {Engine load}
+temp,             {CoolTemp},  0x001004, 1, 0xFF,   {C},    0, 0, 1.0,  40, {Coolant temperature}
+""".trimIndent()
+        return File.createTempFile("slcan_e2e", ".ecu").apply {
+            writeText(content)
+            deleteOnExit()
+        }
+    }
+
+    private fun createTestCfgFile(ecuFileName: String): File {
+        val content = """
+[Configuration]
+ECUCharacteristics = $ecuFileName
+SamplesPerSecond   = 50
+
+[LogVariables]
+rpm_w    ;{RPM}        ;{Engine speed}
+load_w   ;{Load}       ;{Engine load}
+temp     ;{CoolTemp}   ;{Coolant temperature}
+""".trimIndent()
+        return File.createTempFile("slcan_e2e", ".cfg").apply {
+            writeText(content)
+            deleteOnExit()
+        }
+    }
+
+    @Test
+    fun `full UDS session over SLCAN - open, session, define DIDs, poll, stop`() = runBlocking {
+        // ── Setup: create fake serial port simulating SLCAN adapter ──────
+        val fakePort = data.logger.protocol.FakeSerialPortWrapper("SLCAN_TEST0")
+        val provider = data.logger.protocol.FakeSerialPortProvider(mapOf("SLCAN_TEST0" to fakePort))
+        val slcanTransport = SlcanTransport(provider)
+        val logger = UdsNativeLogger(slcanTransport)
+
+        val ecuFile = createTestEcuFile()
+        val cfgFile = createTestCfgFile(ecuFile.name)
+
+        // ── Phase 1: Connect (ECU file parsing, no serial I/O) ──────────
+        logger.connect(LoggerConfig(
+            loggerMode = LoggerMode.NATIVE_UDS,
+            ecuFile = ecuFile.absolutePath,
+            cfgFile = cfgFile.absolutePath,
+            comPort = "SLCAN_TEST0",
+            baudRate = 500_000
+        ))
+
+        assertEquals(LoggerStatus.CONNECTED, logger.status.value)
+        assertEquals(3, logger.variables.value.size)
+
+        // ── Phase 2: Queue SLCAN-encoded CAN responses ──────────────────
+        //
+        // Frame ordering (same as FakeCanTransport E2E but through serial):
+        // 1. Session start response (SF)
+        // 2. Flow Control for DID define multi-frame TX
+        // 3. DID define positive response (SF)
+        // 4. Poll responses (MF each: 8 bytes UDS data)
+
+        // Session start: [0x50, 0x03, 0x00, 0x19, 0x01, 0xF4]
+        queueSlcanSingleFrame(fakePort, 0x7E8, byteArrayOf(
+            0x50, 0x03, 0x00, 0x19, 0x01, 0xF4.toByte()
+        ))
+
+        // Flow Control for DID define (19-byte request → multi-frame TX)
+        queueSlcanFlowControl(fakePort, 0x7E8)
+
+        // DID define positive: [0x6C, 0x02, 0xF2, 0x00]
+        queueSlcanSingleFrame(fakePort, 0x7E8, byteArrayOf(
+            0x6C, 0x02, 0xF2.toByte(), 0x00
+        ))
+
+        // Poll response 1: RPM=3000, Load=800, Temp=112
+        // Expected physical: RPM=750, Load=80, Temp=72
+        queueSlcanMultiFrame(fakePort, 0x7E8, byteArrayOf(
+            0x62, 0xF2.toByte(), 0x00,
+            0x0B, 0xB8.toByte(),     // rpm_w = 3000
+            0x03, 0x20,               // load_w = 800
+            0x70                      // temp = 112
+        ))
+
+        // Poll response 2: RPM=6000, Load=950, Temp=105
+        // Expected physical: RPM=1500, Load=95, Temp=65
+        queueSlcanMultiFrame(fakePort, 0x7E8, byteArrayOf(
+            0x62, 0xF2.toByte(), 0x00,
+            0x17, 0x70,               // rpm_w = 6000
+            0x03, 0xB6.toByte(),      // load_w = 950
+            0x69                      // temp = 105
+        ))
+
+        // ── Phase 3: Start logging ──────────────────────────────────────
+        logger.startLogging()
+        delay(500)
+
+        // ── Phase 4: Verify SLCAN open sequence was transmitted ─────────
+        val transmitted = String(fakePort.transmitted.toByteArray(), Charsets.US_ASCII)
+
+        // Should see: C\r (reset), S6\r (500kbps), O\r (open channel)
+        assertTrue(transmitted.contains("C\r"), "Should send close command")
+        assertTrue(transmitted.contains("S6\r"), "Should set 500kbps bitrate")
+        assertTrue(transmitted.contains("O\r"), "Should open CAN channel")
+
+        // Verify the open sequence order: C comes before S6, S6 before O
+        val closeIdx = transmitted.indexOf("C\r")
+        val bitrateIdx = transmitted.indexOf("S6\r")
+        val openIdx = transmitted.indexOf("O\r")
+        assertTrue(closeIdx < bitrateIdx, "Close should come before bitrate set")
+        assertTrue(bitrateIdx < openIdx, "Bitrate set should come before open")
+
+        // ── Phase 5: Verify SLCAN frame format ──────────────────────────
+        // After open sequence, next transmitted data should be CAN frames
+        // Session start request: t7E08 02 10 03 00 00 00 00 00 \r
+        assertTrue(transmitted.contains("t7E0"),
+            "Should transmit standard CAN frames with ID 0x7E0")
+
+        // ── Phase 6: Verify samples ─────────────────────────────────────
+        val session = logger.session.value
+        assertNotNull(session, "Session should be active")
+        assertTrue(session!!.samples.size >= 1,
+            "Should have collected at least 1 sample via SLCAN, got ${session.samples.size}")
+
+        val s1 = session.samples[0]
+        assertEquals(750.0, s1.values[1], 0.5, "RPM: 0.25 * 3000 = 750")
+        assertEquals(80.0, s1.values[2], 0.5, "Load: 0.1 * 800 = 80")
+        assertEquals(72.0, s1.values[3], 0.5, "Temp: 1.0 * 112 - 40 = 72")
+
+        if (session.samples.size >= 2) {
+            val s2 = session.samples[1]
+            assertEquals(1500.0, s2.values[1], 0.5, "RPM: 0.25 * 6000 = 1500")
+            assertEquals(95.0, s2.values[2], 0.5, "Load: 0.1 * 950 = 95")
+            assertEquals(65.0, s2.values[3], 0.5, "Temp: 1.0 * 105 - 40 = 65")
+        }
+
+        // ── Phase 7: Stop and disconnect ────────────────────────────────
+        // Queue stop responses (best effort)
+        queueSlcanSingleFrame(fakePort, 0x7E8, byteArrayOf(
+            0x6C, 0x03, 0xF2.toByte(), 0x00
+        ))
+        queueSlcanSingleFrame(fakePort, 0x7E8, byteArrayOf(
+            0x50, 0x01, 0x00, 0x19, 0x01, 0xF4.toByte()
+        ))
+
+        logger.stopLogging()
+        assertEquals(LoggerStatus.CONNECTED, logger.status.value)
+
+        logger.disconnect()
+        assertEquals(LoggerStatus.DISCONNECTED, logger.status.value)
+
+        // Verify close command was sent during cleanup
+        val finalTransmitted = String(fakePort.transmitted.toByteArray(), Charsets.US_ASCII)
+        // Count 'C\r' occurrences: should be at least 2 (open reset + close cleanup)
+        val closeCount = "C\r".toRegex().findAll(finalTransmitted).count()
+        assertTrue(closeCount >= 2,
+            "Should send C\\r at open (reset) and close (cleanup). Found $closeCount")
+    }
+
+    @Test
+    fun `SLCAN open sequence with different bitrate`() = runBlocking {
+        val fakePort = data.logger.protocol.FakeSerialPortWrapper("CAN_250K")
+        val provider = data.logger.protocol.FakeSerialPortProvider(mapOf("CAN_250K" to fakePort))
+        val slcanTransport = SlcanTransport(provider)
+        val logger = UdsNativeLogger(slcanTransport)
+
+        val ecuFile = createTestEcuFile()
+
+        logger.connect(LoggerConfig(
+            loggerMode = LoggerMode.NATIVE_UDS,
+            ecuFile = ecuFile.absolutePath,
+            comPort = "CAN_250K",
+            baudRate = 250_000
+        ))
+
+        assertEquals(LoggerStatus.CONNECTED, logger.status.value)
+
+        // Queue session start — will fail after this since no DID response,
+        // but we just want to verify the open sequence with 250kbps
+        queueSlcanSingleFrame(fakePort, 0x7E8, byteArrayOf(
+            0x50, 0x03, 0x00, 0x19, 0x01, 0xF4.toByte()
+        ))
+
+        // Let startLogging() attempt (it will error on DID define, which is expected)
+        logger.startLogging()
+        delay(200)
+
+        val transmitted = String(fakePort.transmitted.toByteArray(), Charsets.US_ASCII)
+
+        // Verify 250kbps bitrate command
+        assertTrue(transmitted.contains("S5\r"),
+            "Should set 250kbps (S5). Transmitted: ${transmitted.take(100)}")
+        assertTrue(fakePort.baudRate == 115200,
+            "Serial baud should be 115200 for SLCAN adapter. Got: ${fakePort.baudRate}")
+
+        logger.disconnect()
+    }
+
+    @Test
+    fun `SLCAN serial port configuration`() = runBlocking {
+        val fakePort = data.logger.protocol.FakeSerialPortWrapper("USB0")
+        val provider = data.logger.protocol.FakeSerialPortProvider(mapOf("USB0" to fakePort))
+        val slcanTransport = SlcanTransport(provider)
+        val logger = UdsNativeLogger(slcanTransport)
+
+        val ecuFile = createTestEcuFile()
+
+        logger.connect(LoggerConfig(
+            loggerMode = LoggerMode.NATIVE_UDS,
+            ecuFile = ecuFile.absolutePath,
+            comPort = "USB0",
+            baudRate = 500_000
+        ))
+
+        // Queue minimal responses for startLogging to open the port and start session
+        queueSlcanSingleFrame(fakePort, 0x7E8, byteArrayOf(0x50, 0x03, 0x00, 0x19, 0x01, 0xF4.toByte()))
+        // startLogging will error after session start (no DID define FC queued),
+        // triggering cleanup which closes the port. That's OK — we verify the
+        // serial config was SET correctly (values persist on the wrapper after close).
+        logger.startLogging()
+        delay(200)
+
+        // Verify serial port was configured correctly before open
+        assertEquals(115200, fakePort.baudRate, "SLCAN adapters use 115200 baud on serial")
+        assertEquals(8, fakePort.dataBits, "8 data bits")
+        assertEquals(1, fakePort.stopBits, "1 stop bit")
+        assertEquals(0, fakePort.parity, "No parity")
+
+        // Verify the open sequence was transmitted (proves port was opened)
+        val transmitted = String(fakePort.transmitted.toByteArray(), Charsets.US_ASCII)
+        assertTrue(transmitted.contains("C\r"), "Should have sent close command (port was opened)")
+
+        logger.disconnect()
+    }
+}
+
 class IsoTpTransportTest {
 
     @Test
