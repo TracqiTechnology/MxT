@@ -183,7 +183,8 @@ fun KfmiopScreen() {
             tableDefinitions = tableDefinitions,
             initialValue = kfmiopPair?.first,
             onSelected = { KfmiopPreferences.setSelectedMap(it) },
-            onDismiss = { showMapPicker = false }
+            onDismiss = { showMapPicker = false },
+            initialFilter = CalibrationTab.KFMIOP.label
         )
     }
 

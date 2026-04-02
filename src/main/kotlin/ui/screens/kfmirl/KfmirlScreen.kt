@@ -175,7 +175,8 @@ fun KfmirlScreen() {
             tableDefinitions = tableDefinitions,
             initialValue = kfmiopPair?.first,
             onSelected = { KfmiopPreferences.setSelectedMap(it) },
-            onDismiss = { showKfmiopPicker = false }
+            onDismiss = { showKfmiopPicker = false },
+            initialFilter = CalibrationTab.KFMIOP.label
         )
     }
 
@@ -185,7 +186,8 @@ fun KfmirlScreen() {
             tableDefinitions = tableDefinitions,
             initialValue = kfmirlPair?.first,
             onSelected = { KfmirlPreferences.setSelectedMap(it) },
-            onDismiss = { showKfmirlPicker = false }
+            onDismiss = { showKfmirlPicker = false },
+            initialFilter = CalibrationTab.KFMIRL.label
         )
     }
 

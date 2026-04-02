@@ -1,7 +1,9 @@
 package ui.components
 
+import data.model.EcuPlatform
 import data.parser.xdf.AxisDefinition
 import data.parser.xdf.TableDefinition
+import ui.navigation.CalibrationTab
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -115,5 +117,52 @@ class MapPickerDialogFilterTest {
         val byName = filterDefinitions("PFI", testDefinitions)
         assertEquals(1, byName.size, "Should find by name")
         assertEquals(byDescription[0].tableName, byName[0].tableName)
+    }
+
+    /**
+     * Regression: MED17 uses "KFLMIOP" as display label but XDF descriptions
+     * use "KFMIOP" (without L). Callers must pass the base calibration name
+     * as initialFilter, not the platform-specific display label.
+     *
+     * Verify that the base names DO match (validating the fix approach).
+     */
+    @Test
+    fun `base name KFMIOP finds map even when display label is KFLMIOP`() {
+        // "KFLMIOP" does NOT match — this is the bug scenario
+        val withPlatformLabel = filterDefinitions("KFLMIOP", testDefinitions)
+        assertTrue(withPlatformLabel.isEmpty(), "KFLMIOP should not substring-match KFMIOP")
+
+        // The fix: callers pass the base CalibrationTab.label ("KFMIOP") instead
+        val withBaseLabel = filterDefinitions("KFMIOP", testDefinitions)
+        assertEquals(1, withBaseLabel.size, "Base name KFMIOP must find Opt eng tq")
+        assertEquals("Opt eng tq", withBaseLabel[0].tableName)
+    }
+
+    @Test
+    fun `base name KFMIRL finds map even when display label is KFLMIRL`() {
+        val withPlatformLabel = filterDefinitions("KFLMIRL", testDefinitions)
+        assertTrue(withPlatformLabel.isEmpty(), "KFLMIRL should not substring-match KFMIRL")
+
+        val withBaseLabel = filterDefinitions("KFMIRL", testDefinitions)
+        assertEquals(1, withBaseLabel.size, "Base name KFMIRL must find Tgt filling")
+        assertEquals("Tgt filling", withBaseLabel[0].tableName)
+    }
+
+    /**
+     * Verify that CalibrationTab.label gives the base (ME7) name that XDFs use,
+     * NOT the platform-specific display label.
+     */
+    @Test
+    fun `CalibrationTab base labels match XDF calibration codes`() {
+        // These are the base labels that should be used as initialFilter
+        assertEquals("KFMIOP", CalibrationTab.KFMIOP.label)
+        assertEquals("KFMIRL", CalibrationTab.KFMIRL.label)
+        assertEquals("KFZWOP", CalibrationTab.KFZWOP.label)
+        assertEquals("KFVPDKSD/E", CalibrationTab.KFVPDKSD.label)
+        assertEquals("WDKUGDN", CalibrationTab.WDKUGDN.label)
+
+        // Platform overrides are different (this is what was being passed as filter before the fix)
+        assertEquals("KFLMIOP", CalibrationTab.KFMIOP.labelFor(EcuPlatform.MED17))
+        assertEquals("KFLMIRL", CalibrationTab.KFMIRL.labelFor(EcuPlatform.MED17))
     }
 }
