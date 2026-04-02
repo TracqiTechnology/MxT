@@ -4,13 +4,16 @@ import data.logger.LoggerConfig
 import data.logger.LoggerMode
 import data.logger.LoggerStatus
 import data.logger.protocol.ProtocolConstants
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.runBlocking
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
+import java.io.File
 
 class UdsNativeLoggerTest {
 
     @Test
-    fun `connect with valid ecu file`() = kotlinx.coroutines.runBlocking {
+    fun `connect with valid ecu file`() = runBlocking {
         val fakeCan = FakeCanTransport()
         val logger = UdsNativeLogger(fakeCan)
 
@@ -27,7 +30,7 @@ class UdsNativeLoggerTest {
     }
 
     @Test
-    fun `connect with missing ecu file errors`() = kotlinx.coroutines.runBlocking {
+    fun `connect with missing ecu file errors`() = runBlocking {
         val fakeCan = FakeCanTransport()
         val logger = UdsNativeLogger(fakeCan)
 
@@ -43,7 +46,7 @@ class UdsNativeLoggerTest {
     }
 
     @Test
-    fun `disconnect resets state`() = kotlinx.coroutines.runBlocking {
+    fun `disconnect resets state`() = runBlocking {
         val fakeCan = FakeCanTransport()
         val logger = UdsNativeLogger(fakeCan)
 
@@ -60,6 +63,352 @@ class UdsNativeLoggerTest {
         logger.disconnect()
         assertEquals(LoggerStatus.DISCONNECTED, logger.status.value)
         assertTrue(logger.variables.value.isEmpty())
+    }
+}
+
+/**
+ * End-to-end integration test for the full UDS logging pipeline.
+ * Simulates a MED17 ECU using FakeCanTransport with pre-queued responses
+ * to verify: session start → DID definition → data polling → physical
+ * value conversion → sample emission → session stop.
+ */
+class UdsLoggingE2ETest {
+
+    /**
+     * Helper: queue a single-frame ISO-TP response on the fake transport.
+     * SF format: [PCI=length, data...] padded to 8 bytes.
+     */
+    private fun queueSingleFrame(fake: FakeCanTransport, rxId: Int, data: ByteArray) {
+        val frame = ByteArray(8)
+        frame[0] = data.size.toByte() // PCI: single frame, length = data.size
+        data.copyInto(frame, 1)
+        fake.queueResponse(CanFrame(rxId, frame))
+    }
+
+    /**
+     * Helper: queue a multi-frame ISO-TP response (FF + CFs).
+     * The ISO-TP layer will send Flow Control after receiving FF.
+     * FC goes to sentFrames, so it doesn't consume queued responses.
+     */
+    private fun queueMultiFrame(fake: FakeCanTransport, rxId: Int, data: ByteArray) {
+        val totalLen = data.size
+        // First Frame: [0x1L_hi, L_lo, first 6 bytes of data]
+        val ff = ByteArray(8)
+        ff[0] = (0x10 or ((totalLen shr 8) and 0x0F)).toByte()
+        ff[1] = (totalLen and 0xFF).toByte()
+        val ffDataLen = minOf(6, data.size)
+        data.copyInto(ff, 2, 0, ffDataLen)
+        fake.queueResponse(CanFrame(rxId, ff))
+
+        // Consecutive Frames
+        var offset = ffDataLen
+        var seq = 1
+        while (offset < data.size) {
+            val cf = ByteArray(8)
+            cf[0] = (0x20 or (seq and 0x0F)).toByte()
+            val cfDataLen = minOf(7, data.size - offset)
+            data.copyInto(cf, 1, offset, offset + cfDataLen)
+            fake.queueResponse(CanFrame(rxId, cf))
+            offset += cfDataLen
+            seq++
+        }
+    }
+
+    /**
+     * Create a minimal .ecu file with known variables for deterministic testing.
+     *
+     * Variables:
+     *   rpm_w:  addr=0x1000, size=2, factor=0.25, offset=0  → phys = 0.25 * raw
+     *   load_w: addr=0x1002, size=2, factor=0.1,  offset=0  → phys = 0.1 * raw
+     *   temp:   addr=0x1004, size=1, factor=1.0,  offset=40 → phys = 1.0 * raw - 40
+     */
+    private fun createTestEcuFile(): File {
+        val content = """
+;
+; Minimal test ECU file for E2E integration testing
+;
+
+[Version]
+Version           = 1.10
+
+[Communication]
+Connect           = SLOW-0x01
+Communicate       = HM0
+LogSpeed          = 500000
+
+[Identification]
+HWNumber          = {TEST_HW}
+SWNumber          = {TEST_SW}
+PartNumber        = {TEST_PART}
+SWVersion         = {0001}
+EngineId          = {2.5L R5 TFSI}
+
+[Measurements]
+rpm_w,            {RPM},       0x001000, 2, 0xFFFF, {RPM},  0, 0, 0.25, 0,  {Engine speed}
+load_w,           {Load},      0x001002, 2, 0xFFFF, {%},    0, 0, 0.1,  0,  {Engine load}
+temp,             {CoolTemp},  0x001004, 1, 0xFF,   {C},    0, 0, 1.0,  40, {Coolant temperature}
+""".trimIndent()
+        return File.createTempFile("e2e_test", ".ecu").apply {
+            writeText(content)
+            deleteOnExit()
+        }
+    }
+
+    /**
+     * Create a .cfg file that selects all 3 test variables.
+     */
+    private fun createTestCfgFile(ecuFileName: String): File {
+        val content = """
+[Configuration]
+ECUCharacteristics = $ecuFileName
+SamplesPerSecond   = 50
+
+[LogVariables]
+rpm_w    ;{RPM}        ;{Engine speed}
+load_w   ;{Load}       ;{Engine load}
+temp     ;{CoolTemp}   ;{Coolant temperature}
+""".trimIndent()
+        return File.createTempFile("e2e_test", ".cfg").apply {
+            writeText(content)
+            deleteOnExit()
+        }
+    }
+
+    /**
+     * Helper: queue a Flow Control frame (ECU telling tester to Continue To Send).
+     * Used when the tester sends multi-frame data (e.g., DID define with >7 bytes).
+     */
+    private fun queueFlowControl(fake: FakeCanTransport, rxId: Int) {
+        val fc = ByteArray(8)
+        fc[0] = 0x30 // PCI: Flow Control, CTS (continue to send)
+        fc[1] = 0x00 // Block size: 0 = no limit
+        fc[2] = 0x00 // STmin: 0 = no delay
+        fake.queueResponse(CanFrame(rxId, fc))
+    }
+
+    @Test
+    fun `full UDS session - connect, define DIDs, poll data, stop`() = runBlocking {
+        val fakeCan = FakeCanTransport()
+        val logger = UdsNativeLogger(fakeCan)
+
+        // Create test fixtures
+        val ecuFile = createTestEcuFile()
+        val cfgFile = createTestCfgFile(ecuFile.name)
+
+        // ── Phase 1: Connect (ECU file parsing only, no CAN) ────────────
+        logger.connect(LoggerConfig(
+            loggerMode = LoggerMode.NATIVE_UDS,
+            ecuFile = ecuFile.absolutePath,
+            cfgFile = cfgFile.absolutePath,
+            comPort = "TEST0",
+            baudRate = 500_000
+        ))
+
+        assertEquals(LoggerStatus.CONNECTED, logger.status.value)
+        assertEquals(3, logger.variables.value.size)
+        assertEquals("rpm_w", logger.variables.value[0].name)
+        assertEquals("RPM", logger.variables.value[0].alias)
+        assertEquals("load_w", logger.variables.value[1].name)
+        assertEquals("temp", logger.variables.value[2].name)
+
+        // ── Phase 2: Queue CAN responses for startLogging ───────────────
+        //
+        // ISO-TP frame ordering:
+        // 1. Session start request [0x10, 0x03] = 2 bytes → single frame TX, needs SF response
+        // 2. DID define request [0x2C, 0x02, 0xF2, 0x00, ...vars...] = 19 bytes → multi-frame TX
+        //    ISO-TP sends First Frame, then waits for Flow Control from ECU,
+        //    then sends Consecutive Frames, then waits for UDS response
+        // 3. Poll requests [0x22, 0xF2, 0x00] = 3 bytes → single frame TX, needs MF response
+
+        // 2a. DiagnosticSessionControl response: [0x50, 0x03, P2=0x0019, P2*=0x01F4]
+        queueSingleFrame(fakeCan, 0x7E8, byteArrayOf(
+            0x50, 0x03, 0x00, 0x19, 0x01, 0xF4.toByte()
+        ))
+
+        // 2b. Flow Control for DID define multi-frame TX (ECU → tester)
+        queueFlowControl(fakeCan, 0x7E8)
+
+        // 2c. DynamicallyDefineDataIdentifier positive response for DID 0xF200
+        queueSingleFrame(fakeCan, 0x7E8, byteArrayOf(
+            0x6C, 0x02, 0xF2.toByte(), 0x00
+        ))
+
+        // 2d. ReadDataByIdentifier poll responses (multi-frame RX)
+        //     3 vars: rpm(2 bytes) + load(2 bytes) + temp(1 byte) = 5 data bytes
+        //     Full response: [0x62, 0xF2, 0x00, rpm_hi, rpm_lo, load_hi, load_lo, temp] = 8 bytes
+        //     8 bytes > 7 (single frame max) → multi-frame ISO-TP
+        //     For multi-frame RX, ISO-TP sends FC automatically (goes to sentFrames, not rxQueue)
+
+        // Sample 1: RPM=3000 (0x0BB8), Load=800 (0x0320), Temp=112 (0x70)
+        //   Expected phys: RPM=0.25*3000=750, Load=0.1*800=80, Temp=1.0*112-40=72
+        queueMultiFrame(fakeCan, 0x7E8, byteArrayOf(
+            0x62, 0xF2.toByte(), 0x00,           // ReadDataByID positive response, DID 0xF200
+            0x0B, 0xB8.toByte(),                  // rpm_w = 3000
+            0x03, 0x20,                            // load_w = 800
+            0x70                                   // temp = 112
+        ))
+
+        // Sample 2: RPM=6000 (0x1770), Load=950 (0x03B6), Temp=105 (0x69)
+        //   Expected phys: RPM=0.25*6000=1500, Load=0.1*950=95, Temp=1.0*105-40=65
+        queueMultiFrame(fakeCan, 0x7E8, byteArrayOf(
+            0x62, 0xF2.toByte(), 0x00,
+            0x17, 0x70,                            // rpm_w = 6000
+            0x03, 0xB6.toByte(),                   // load_w = 950
+            0x69                                   // temp = 105
+        ))
+
+        // Sample 3: RPM=1000 (0x03E8), Load=200 (0x00C8), Temp=130 (0x82)
+        //   Expected phys: RPM=0.25*1000=250, Load=0.1*200=20, Temp=1.0*130-40=90
+        queueMultiFrame(fakeCan, 0x7E8, byteArrayOf(
+            0x62, 0xF2.toByte(), 0x00,
+            0x03, 0xE8.toByte(),                   // rpm_w = 1000
+            0x00, 0xC8.toByte(),                   // load_w = 200
+            0x82.toByte()                          // temp = 130
+        ))
+
+        // ── Phase 3: Start logging ──────────────────────────────────────
+        logger.startLogging()
+
+        // Allow polling loop time to process all 3 queued responses.
+        // After the 3rd sample, the poll loop will try a 4th read, get null from
+        // the empty queue, and transition to ERROR. This is expected behavior
+        // with FakeCanTransport — a real ECU always responds.
+        delay(500)
+
+        // ── Phase 4: Verify samples ─────────────────────────────────────
+        val session = logger.session.value
+        assertNotNull(session, "Session should be active")
+
+        // Poll loop consumed 3 responses then errored on the 4th — expect 3 samples
+        assertTrue(session!!.samples.size >= 1,
+            "Should have collected at least 1 sample, got ${session.samples.size}")
+
+        // Verify first sample physical values
+        val s1 = session.samples[0]
+        assertEquals(750.0, s1.values[1], 0.5, "RPM: 0.25 * 3000 = 750")
+        assertEquals(80.0, s1.values[2], 0.5, "Load: 0.1 * 800 = 80")
+        assertEquals(72.0, s1.values[3], 0.5, "Temp: 1.0 * 112 - 40 = 72")
+
+        // Verify second sample
+        if (session.samples.size >= 2) {
+            val s2 = session.samples[1]
+            assertEquals(1500.0, s2.values[1], 0.5, "RPM: 0.25 * 6000 = 1500")
+            assertEquals(95.0, s2.values[2], 0.5, "Load: 0.1 * 950 = 95")
+            assertEquals(65.0, s2.values[3], 0.5, "Temp: 1.0 * 105 - 40 = 65")
+        }
+
+        // Verify third sample
+        if (session.samples.size >= 3) {
+            val s3 = session.samples[2]
+            assertEquals(250.0, s3.values[1], 0.5, "RPM: 0.25 * 1000 = 250")
+            assertEquals(20.0, s3.values[2], 0.5, "Load: 0.1 * 200 = 20")
+            assertEquals(90.0, s3.values[3], 0.5, "Temp: 1.0 * 130 - 40 = 90")
+        }
+
+        // ── Phase 5: Stop logging ───────────────────────────────────────
+        // Poll loop already errored (empty queue), so stopLogging() will:
+        // - Cancel pollJob (already complete)
+        // - Try clear DID + stop session (best effort, exception-safe)
+        // - Set status to CONNECTED
+
+        // Queue stop responses so cleanup succeeds cleanly
+        queueSingleFrame(fakeCan, 0x7E8, byteArrayOf(
+            0x6C, 0x03, 0xF2.toByte(), 0x00
+        ))
+        queueSingleFrame(fakeCan, 0x7E8, byteArrayOf(
+            0x50, 0x01, 0x00, 0x19, 0x01, 0xF4.toByte()
+        ))
+
+        logger.stopLogging()
+        assertEquals(LoggerStatus.CONNECTED, logger.status.value)
+        assertTrue(session.sampleCount >= 1, "Session should report collected samples")
+
+        // ── Phase 6: Verify CAN protocol correctness ────────────────────
+        assertTrue(fakeCan.sentFrames.isNotEmpty(), "Should have sent CAN frames")
+
+        // First CAN frame: ISO-TP SF containing DiagnosticSessionControl
+        val firstFrame = fakeCan.sentFrames[0]
+        assertEquals(0x7E0, firstFrame.id, "TX should use 0x7E0")
+        assertEquals(0x02.toByte(), firstFrame.data[0], "PCI: SF, len=2")
+        assertEquals(0x10.toByte(), firstFrame.data[1], "SID: DiagnosticSessionControl")
+        assertEquals(0x03.toByte(), firstFrame.data[2], "Sub: extended session")
+
+        // Second frame: DID definition multi-frame FF (19 bytes → FF + CFs)
+        val secondFrame = fakeCan.sentFrames[1]
+        assertEquals(0x7E0, secondFrame.id)
+        val secondPci = (secondFrame.data[0].toInt() and 0xF0) shr 4
+        assertEquals(1, secondPci, "DID define should be multi-frame (FF, PCI=1)")
+        assertEquals(0x2C.toByte(), secondFrame.data[2],
+            "FF data starts at byte 2: service 0x2C (DynamicallyDefineDataIdentifier)")
+
+        // ── Phase 7: Disconnect and cleanup ─────────────────────────────
+        logger.disconnect()
+        assertEquals(LoggerStatus.DISCONNECTED, logger.status.value)
+        assertTrue(logger.variables.value.isEmpty())
+        assertFalse(fakeCan.isOpen, "CAN transport should be closed")
+    }
+
+    @Test
+    fun `startLogging fails gracefully when session rejected`() = runBlocking {
+        val fakeCan = FakeCanTransport()
+        val logger = UdsNativeLogger(fakeCan)
+
+        val ecuFile = createTestEcuFile()
+        logger.connect(LoggerConfig(
+            loggerMode = LoggerMode.NATIVE_UDS,
+            ecuFile = ecuFile.absolutePath,
+            comPort = "TEST0",
+            baudRate = 500_000
+        ))
+        assertEquals(LoggerStatus.CONNECTED, logger.status.value)
+
+        // Queue a negative response for session start:
+        // [0x7F, 0x10, 0x22] = conditionsNotCorrect
+        queueSingleFrame(fakeCan, 0x7E8, byteArrayOf(
+            0x7F, 0x10, 0x22
+        ))
+
+        logger.startLogging()
+        // Allow time for error handling
+        delay(200)
+
+        assertEquals(LoggerStatus.ERROR, logger.status.value,
+            "Should be ERROR after negative response. Message: ${logger.statusMessage.value}")
+        assertTrue(logger.statusMessage.value.contains("Start failed"),
+            "Status should explain failure: ${logger.statusMessage.value}")
+    }
+
+    @Test
+    fun `variables resolve from CFG file subset`() = runBlocking {
+        val fakeCan = FakeCanTransport()
+        val logger = UdsNativeLogger(fakeCan)
+
+        val ecuFile = createTestEcuFile()
+        // CFG that only selects 2 of 3 variables
+        val partialCfg = File.createTempFile("partial", ".cfg").apply {
+            writeText("""
+[Configuration]
+ECUCharacteristics = ${ecuFile.name}
+SamplesPerSecond   = 10
+
+[LogVariables]
+rpm_w    ;{RPM}
+temp     ;{CoolTemp}
+""".trimIndent())
+            deleteOnExit()
+        }
+
+        logger.connect(LoggerConfig(
+            loggerMode = LoggerMode.NATIVE_UDS,
+            ecuFile = ecuFile.absolutePath,
+            cfgFile = partialCfg.absolutePath,
+            comPort = "TEST0"
+        ))
+
+        assertEquals(LoggerStatus.CONNECTED, logger.status.value)
+        assertEquals(2, logger.variables.value.size, "CFG selects 2 of 3 vars")
+        assertEquals("rpm_w", logger.variables.value[0].name)
+        assertEquals("temp", logger.variables.value[1].name)
     }
 }
 
