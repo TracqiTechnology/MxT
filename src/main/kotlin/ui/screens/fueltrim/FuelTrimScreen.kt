@@ -3,6 +3,7 @@ package ui.screens.fueltrim
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Warning
@@ -22,10 +23,7 @@ import data.preferences.bin.BinFilePreferences
 import data.preferences.rkw.RkwPreferences
 import data.writer.BinWriter
 import domain.math.map.Map3d
-import domain.model.fueltrim.FuelTrimAnalyzer
-import domain.model.fueltrim.FuelTrimDiagnosticResult
-import domain.model.fueltrim.FuelTrimResult
-import domain.model.fueltrim.RkwTableMetadata
+import domain.model.fueltrim.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -34,8 +32,11 @@ import ui.components.MapTable
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
+import java.text.DecimalFormat
 
 private enum class WriteStatus { Idle, Success, Error }
+
+private val diagFormatter = DecimalFormat("#.#")
 
 private fun findMap(
     mapList: List<Pair<TableDefinition, Map3d>>,
@@ -129,6 +130,18 @@ fun FuelTrimScreen() {
     val canWrite = binLoaded && rkwPair != null && outputRkw != null
     var showWriteConfirmation by remember { mutableStateOf(false) }
     var writeStatus by remember { mutableStateOf(WriteStatus.Idle) }
+
+    // ── Per-cell diagnostics state ──
+    var selectedDiagCell by remember { mutableStateOf<FuelTrimCellDiagnostic?>(null) }
+
+    // ── Bulk apply state ──
+    var showBulkApply by remember { mutableStateOf(false) }
+    val availableRkwTables: List<RkwTableWithData> = remember(mapList) {
+        FuelTrimBulkApply.enumerateRkwTables(mapList)
+    }
+    var selectedTables by remember { mutableStateOf<Set<String>>(emptySet()) }
+    var bulkApplyProgress by remember { mutableStateOf<String?>(null) }
+    var bulkApplyRunning by remember { mutableStateOf(false) }
 
     LaunchedEffect(writeStatus) {
         if (writeStatus != WriteStatus.Idle) {
@@ -417,8 +430,67 @@ fun FuelTrimScreen() {
                             MapTable(
                                 map = outputRkw,
                                 editable = false,
-                                cellColorProvider = colorProvider
+                                cellColorProvider = colorProvider,
+                                onCellSelected = { rowIdx, colIdx ->
+                                    diagnosticResult?.let { diag ->
+                                        val rpmVal = if (rowIdx < outputRkw.yAxis.size) outputRkw.yAxis[rowIdx] else return@let
+                                        val loadVal = if (colIdx < outputRkw.xAxis.size) outputRkw.xAxis[colIdx] else return@let
+                                        val rIdx = FuelTrimAnalyzer.nearestBinIndex(rpmVal, diag.rpmBins)
+                                        val lIdx = FuelTrimAnalyzer.nearestBinIndex(loadVal, diag.loadBins)
+                                        selectedDiagCell = diag.diagnostics[rIdx][lIdx]
+                                    }
+                                }
                             )
+                        }
+
+                        // Per-cell diagnostics panel
+                        selectedDiagCell?.let { cell ->
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Surface(
+                                color = MaterialTheme.colorScheme.surfaceVariant,
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Column(modifier = Modifier.padding(12.dp)) {
+                                    Text(
+                                        "Cell: ${diagFormatter.format(cell.rpmBin)} RPM \u00d7 ${diagFormatter.format(cell.loadBin)}% load",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                    Spacer(modifier = Modifier.height(4.dp))
+                                    Text(
+                                        "Samples: ${cell.sampleCount}",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Text(
+                                        "Mean trim: %+.1f%%".format(cell.meanTrimPercent),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    Text(
+                                        "Std deviation: \u00b1${diagFormatter.format(cell.stdDevPercent)}%",
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                    if (cell.rejected) {
+                                        Text(
+                                            "\u26a0 ${cell.rejectReason ?: "Rejected"}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.error
+                                        )
+                                    } else if (cell.correctionApplied != 0.0) {
+                                        Text(
+                                            "Correction: %+.1f%%".format(cell.correctionApplied),
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = Color(0xFF00C853.toInt())
+                                        )
+                                    } else {
+                                        Text(
+                                            "Within threshold \u2014 no correction",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+                                }
+                            }
                         }
                     } else if (inputRkw == null) {
                         Text(
@@ -488,6 +560,183 @@ fun FuelTrimScreen() {
                     color = MaterialTheme.colorScheme.error
                 )
                 WriteStatus.Idle -> {}
+            }
+        }
+
+        // ── Bulk Apply section ──
+        if (availableRkwTables.size > 1 && diagnosticResult != null) {
+            Surface(
+                shape = MaterialTheme.shapes.medium,
+                tonalElevation = 1.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(
+                            "Bulk Apply to Multiple rk_w Tables",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold
+                        )
+                        TextButton(onClick = { showBulkApply = !showBulkApply }) {
+                            Text(if (showBulkApply) "Hide" else "Show (${availableRkwTables.size} tables)")
+                        }
+                    }
+
+                    AnimatedVisibility(visible = showBulkApply) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            Text(
+                                "Apply the same corrections to additional rk_w tables in this BIN. " +
+                                    "On DS1 tunes, each fuel type / map switch / HO variant has its own table.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text("Quick Select:", style = MaterialTheme.typography.labelMedium)
+
+                            @Composable
+                            fun QuickSelectButton(label: String, tableNames: Set<String>) {
+                                FilterChip(
+                                    selected = tableNames.isNotEmpty() && tableNames.all { it in selectedTables },
+                                    onClick = {
+                                        selectedTables = if (tableNames.all { it in selectedTables }) {
+                                            selectedTables - tableNames
+                                        } else {
+                                            selectedTables + tableNames
+                                        }
+                                    },
+                                    label = { Text(label, style = MaterialTheme.typography.labelSmall) }
+                                )
+                            }
+
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                QuickSelectButton("Select All", FuelTrimBulkApply.selectAll(availableRkwTables))
+                                QuickSelectButton("All Gasoline",
+                                    FuelTrimBulkApply.selectByFuelType(availableRkwTables, RkwTableMetadata.FuelType.GASOLINE))
+                                QuickSelectButton("All Ethanol",
+                                    FuelTrimBulkApply.selectByFuelType(availableRkwTables, RkwTableMetadata.FuelType.ETHANOL))
+                            }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                QuickSelectButton("All MAP Switch",
+                                    FuelTrimBulkApply.selectByMapSwitch(availableRkwTables, isMapSwitch = true))
+                                QuickSelectButton("All Native",
+                                    FuelTrimBulkApply.selectByMapSwitch(availableRkwTables, isMapSwitch = false))
+                            }
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                for (ho in 1..3) {
+                                    val hoTables = FuelTrimBulkApply.selectByHoVariant(availableRkwTables, ho)
+                                    if (hoTables.isNotEmpty()) {
+                                        QuickSelectButton("All HO$ho", hoTables)
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(4.dp))
+                            val grouped = FuelTrimBulkApply.groupByFuelType(availableRkwTables)
+                            for ((fuelType, tables) in grouped) {
+                                val fuelLabel = when (fuelType) {
+                                    RkwTableMetadata.FuelType.GASOLINE -> "Gasoline"
+                                    RkwTableMetadata.FuelType.ETHANOL -> "Ethanol"
+                                    RkwTableMetadata.FuelType.UNKNOWN -> "Unknown"
+                                }
+                                Text(fuelLabel, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold)
+                                for (table in tables.sortedBy { it.metadata.mapSwitchIndex }) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Checkbox(
+                                            checked = table.metadata.tableName in selectedTables,
+                                            onCheckedChange = { checked ->
+                                                selectedTables = if (checked) {
+                                                    selectedTables + table.metadata.tableName
+                                                } else {
+                                                    selectedTables - table.metadata.tableName
+                                                }
+                                            }
+                                        )
+                                        Text(
+                                            table.metadata.displayLabel,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Button(
+                                    onClick = {
+                                        val diag = diagnosticResult ?: return@Button
+                                        val selected = availableRkwTables.filter { it.metadata.tableName in selectedTables }
+                                        if (selected.isEmpty()) return@Button
+                                        bulkApplyRunning = true
+                                        bulkApplyProgress = "Applying to ${selected.size} table(s)..."
+                                        scope.launch {
+                                            withContext(Dispatchers.IO) {
+                                                var successCount = 0
+                                                var errorCount = 0
+                                                for (table in selected) {
+                                                    try {
+                                                        val corrected = FuelTrimBulkApply.applyCorrections(
+                                                            table.map, diag.corrections, diag.rpmBins, diag.loadBins
+                                                        )
+                                                        BinWriter.write(
+                                                            BinFilePreferences.file.value,
+                                                            table.tableDefinition,
+                                                            corrected
+                                                        )
+                                                        successCount++
+                                                    } catch (e: Exception) {
+                                                        e.printStackTrace()
+                                                        errorCount++
+                                                    }
+                                                }
+                                                withContext(Dispatchers.Main) {
+                                                    bulkApplyProgress = if (errorCount == 0) {
+                                                        "✓ Applied corrections to $successCount table(s)"
+                                                    } else {
+                                                        "⚠ $successCount succeeded, $errorCount failed"
+                                                    }
+                                                    bulkApplyRunning = false
+                                                }
+                                            }
+                                        }
+                                    },
+                                    enabled = selectedTables.isNotEmpty() && binLoaded && !bulkApplyRunning
+                                ) {
+                                    Text("Apply to Selected (${selectedTables.size})")
+                                }
+                                if (bulkApplyRunning) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(20.dp),
+                                        strokeWidth = 2.dp
+                                    )
+                                }
+                            }
+                            bulkApplyProgress?.let {
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (it.startsWith("✓")) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
             }
         }
     }

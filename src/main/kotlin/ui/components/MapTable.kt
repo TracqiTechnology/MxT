@@ -45,7 +45,8 @@ fun MapTable(
     map: Map3d,
     editable: Boolean = true,
     onMapChanged: ((Map3d) -> Unit)? = null,
-    cellColorProvider: ((rowIdx: Int, colIdx: Int) -> Color?)? = null
+    cellColorProvider: ((rowIdx: Int, colIdx: Int) -> Color?)? = null,
+    onCellSelected: ((rowIdx: Int, colIdx: Int) -> Unit)? = null
 ) {
     val zAxis = map.zAxis
     if (zAxis.isEmpty() || zAxis[0].isEmpty()) return
@@ -239,6 +240,7 @@ fun MapTable(
                                                 commitEdit()
                                                 selectedRow = r
                                                 selectedCol = c
+                                                onCellSelected?.invoke(r, c)
                                             }
                                         },
                                     contentAlignment = Alignment.Center
