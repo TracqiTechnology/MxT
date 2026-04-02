@@ -43,6 +43,7 @@ fun ToolsContent(navState: NavigationState) {
                 ToolsTab.A2L_GENERATOR -> A2lToEcuScreen()
                 ToolsTab.LOGGER -> LoggerScreen()
                 ToolsTab.RAM_SNIFFER -> RamSnifferScreen()
+                else -> {}
             }
         }
     }

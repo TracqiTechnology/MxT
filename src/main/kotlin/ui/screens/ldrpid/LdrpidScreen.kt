@@ -26,6 +26,9 @@ import data.model.EcuPlatform
 import data.writer.BinWriter
 import domain.math.map.Map3d
 import domain.model.ldrpid.LdrpidCalculator
+import domain.model.ldrpid.LdrpidOptimizerBridge
+import domain.model.optimizer.OptimizerCalculator
+import domain.model.simulator.PidSimulator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -293,7 +296,11 @@ fun LdrpidScreen() {
             onNonLinearChanged = { recomputeFromNonLinear(it) },
             nonLinearSampleCounts = nonLinearSampleCounts,
             kfldrlSampleCounts = kfldrlSampleCounts,
-            kfldimxSampleCounts = kfldimxSampleCounts
+            kfldimxSampleCounts = kfldimxSampleCounts,
+            onExportToOptimizer = {
+                if (kfldrlMap != null) LdrpidOptimizerBridge.exportKfldrl(kfldrlMap!!)
+                if (kfldimxMap != null) LdrpidOptimizerBridge.exportKfldimx(kfldimxMap!!)
+            }
         )
 
         // ── Write to Binary Section ───────────────────────────────────
@@ -415,19 +422,22 @@ private fun LdrpidComparisonArea(
     onNonLinearChanged: (Map3d) -> Unit,
     nonLinearSampleCounts: Array<IntArray>? = null,
     kfldrlSampleCounts: Array<IntArray>? = null,
-    kfldimxSampleCounts: Array<IntArray>? = null
+    kfldimxSampleCounts: Array<IntArray>? = null,
+    onExportToOptimizer: () -> Unit = {}
 ) {
     Column(modifier = modifier) {
         PrimaryTabRow(selectedTabIndex = selectedTab) {
             Tab(selected = selectedTab == 0, onClick = { onTabSelected(0) }, text = { Text("Boost Tables") })
             Tab(selected = selectedTab == 1, onClick = { onTabSelected(1) }, text = { Text("KFLDRL") })
             Tab(selected = selectedTab == 2, onClick = { onTabSelected(2) }, text = { Text("KFLDIMX") })
+            Tab(selected = selectedTab == 3, onClick = { onTabSelected(3) }, text = { Text("PID Analysis") })
         }
 
         when (selectedTab) {
             0 -> BoostTablesTab(nonLinearMap, linearMap, onNonLinearChanged, Modifier.fillMaxWidth().weight(1f), nonLinearSampleCounts)
-            1 -> KfldrlTab(kfldrlMap, Modifier.fillMaxWidth().weight(1f), kfldrlSampleCounts)
+            1 -> KfldrlTab(kfldrlMap, Modifier.fillMaxWidth().weight(1f), kfldrlSampleCounts, onExportToOptimizer)
             2 -> KfldimxTab(kfldimxMap, kfldimxXAxis, Modifier.fillMaxWidth().weight(1f), kfldimxSampleCounts)
+            3 -> PidAnalysisTab(kfldrlMap, kfldimxMap, Modifier.fillMaxWidth().weight(1f))
         }
     }
 }
@@ -495,14 +505,27 @@ private fun BoostTablesTab(
 }
 
 @Composable
-private fun KfldrlTab(kfldrlMap: Map3d?, modifier: Modifier = Modifier, sampleCounts: Array<IntArray>? = null) {
+private fun KfldrlTab(kfldrlMap: Map3d?, modifier: Modifier = Modifier, sampleCounts: Array<IntArray>? = null, onExportToOptimizer: () -> Unit = {}) {
     Column(modifier = modifier) {
-        Text(
-            text = "KFLDRL \u2014 Linearized Wastegate Duty Cycle",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(vertical = 4.dp)
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "KFLDRL \u2014 Linearized Wastegate Duty Cycle",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+            if (kfldrlMap != null && kfldrlMap.zAxis.isNotEmpty()) {
+                OutlinedButton(
+                    onClick = onExportToOptimizer,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                ) {
+                    Text("Export to Optimizer", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
         if (kfldrlMap != null && kfldrlMap.zAxis.isNotEmpty()) {
             Box(modifier = Modifier.fillMaxSize()) {
                 MapTable(
@@ -560,6 +583,199 @@ private fun KfldimxTab(
         } else {
             Text("No map data", style = MaterialTheme.typography.bodyMedium)
         }
+    }
+}
+
+// ── PID Analysis Tab ──────────────────────────────────────────────────
+
+private enum class StabilityRating(val label: String, val color: Color) {
+    STABLE("Stable", Color(0xFF00C853)),
+    MARGINAL("Marginal", Color(0xFFFFD600)),
+    UNSTABLE("Oscillation Risk", Color(0xFFFF1744))
+}
+
+/**
+ * Runs [PidSimulator] against the computed KFLDRL/KFLDIMX and displays
+ * per-RPM stability metrics with color-coded warnings.
+ */
+@Composable
+private fun PidAnalysisTab(
+    kfldrlMap: Map3d?,
+    kfldimxMap: Map3d?,
+    modifier: Modifier = Modifier
+) {
+    if (kfldrlMap == null || kfldrlMap.zAxis.isEmpty()) {
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("PID Analysis unavailable", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Load WOT log data and compute KFLDRL to enable PID analysis",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        return
+    }
+
+    val rpmBreakpoints = kfldrlMap.yAxis
+    val analysisResults: List<Pair<Double, PidSimulator.PidSimulationResult>> = remember(kfldrlMap, kfldimxMap) {
+        rpmBreakpoints.map { rpm ->
+            val pull = buildSyntheticPull(rpm, targetBoostMbar = 2200.0, count = 60)
+            val result = PidSimulator.simulate(
+                pullEntries = pull,
+                kfldrq0 = null,
+                kfldrq1 = null,
+                kfldrq2 = null,
+                kfldrl = kfldrlMap,
+                kfldimx = kfldimxMap
+            )
+            rpm to result
+        }
+    }
+
+    Column(modifier = modifier.padding(top = 8.dp)) {
+        Text(
+            text = "PID Stability Analysis",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            text = "Synthetic WOT pulls at each RPM breakpoint \u2014 tests PID convergence with computed KFLDRL",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+
+        Surface(
+            shape = MaterialTheme.shapes.small,
+            tonalElevation = 1.dp,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("RPM", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(60.dp))
+                    Text("Status", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(120.dp))
+                    Text("Convergence", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(100.dp))
+                    Text("Oscillations", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(90.dp))
+                    Text("Overshoot", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(90.dp))
+                    Text("Avg |Error|", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(90.dp))
+                }
+
+                HorizontalDivider()
+
+                for (entry in analysisResults) {
+                    val rpm = entry.first
+                    val d = entry.second.diagnosis
+                    val rating = when {
+                        d.oscillationDetected -> StabilityRating.UNSTABLE
+                        d.slowConvergence || d.overshootDetected || d.windupDetected -> StabilityRating.MARGINAL
+                        else -> StabilityRating.STABLE
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "${rpm.toInt()}",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.width(60.dp)
+                        )
+                        Row(modifier = Modifier.width(120.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Surface(
+                                shape = MaterialTheme.shapes.extraSmall,
+                                color = rating.color.copy(alpha = 0.2f),
+                                modifier = Modifier.padding(end = 4.dp)
+                            ) {
+                                Text(
+                                    rating.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = rating.color,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            "${String.format("%.0f", d.convergenceTimeMs)} ms",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.width(100.dp)
+                        )
+                        Text(
+                            "${d.oscillationCount}",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.width(90.dp)
+                        )
+                        Text(
+                            if (d.overshootDetected) "${String.format("%.0f", d.overshootMagnitude)} mbar" else "\u2014",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.width(90.dp)
+                        )
+                        Text(
+                            "${String.format("%.1f", d.avgAbsLde)} mbar",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.width(90.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Recommendations
+        val allRecommendations: List<String> = analysisResults.flatMap { pair -> pair.second.diagnosis.recommendations }.distinct()
+        if (allRecommendations.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        "Recommendations",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+                    for (rec in allRecommendations) {
+                        Text(
+                            "\u2022 $rec",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.padding(vertical = 2.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Build a synthetic WOT pull at a fixed RPM for PID stability probing. */
+private fun buildSyntheticPull(
+    rpm: Double,
+    targetBoostMbar: Double = 2200.0,
+    barometricPressure: Double = 1013.0,
+    count: Int = 60
+): List<OptimizerCalculator.WotLogEntry> {
+    return (0 until count).map { i ->
+        val rampFraction = (i.toDouble() / (count / 2)).coerceAtMost(1.0)
+        val actualMap = barometricPressure + (targetBoostMbar - barometricPressure) * rampFraction
+        OptimizerCalculator.WotLogEntry(
+            rpm = rpm,
+            requestedLoad = 191.0,
+            actualLoad = 191.0,
+            requestedMap = targetBoostMbar,
+            actualMap = actualMap,
+            barometricPressure = barometricPressure,
+            wgdc = 60.0,
+            throttleAngle = 100.0
+        )
     }
 }
 

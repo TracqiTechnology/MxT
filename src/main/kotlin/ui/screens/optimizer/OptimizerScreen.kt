@@ -40,6 +40,7 @@ import data.writer.BinWriter
 import domain.math.map.Map3d
 import domain.model.optimizer.*
 import domain.model.simulator.Me7Simulator
+import domain.model.ldrpid.LdrpidOptimizerBridge
 import data.writer.XdfPatchWriter
 import data.writer.ReportExporter
 import kotlinx.coroutines.Dispatchers
@@ -624,6 +625,9 @@ private fun BoostControlTab(
     val kfldrlDelta = result.suggestedMaps.kfldrl
     val kfldimxDelta = result.suggestedMaps.kfldimx
 
+    // LDRPID import state
+    var importedKfldrl by remember { mutableStateOf<Map3d?>(null) }
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -669,19 +673,50 @@ private fun BoostControlTab(
                         )
                     }
                     Spacer(Modifier.height(8.dp))
-                    Button(onClick = {
-                        val kfldrlDef = KfldrlPreferences.getSelectedMap()
-                        if (kfldrlDef != null) {
-                            val binFile = BinFilePreferences.getStoredFile()
-                            if (binFile.exists()) {
-                                BinWriter.write(binFile, kfldrlDef.first, result.suggestedKfldrl)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            val kfldrlDef = KfldrlPreferences.getSelectedMap()
+                            if (kfldrlDef != null) {
+                                val binFile = BinFilePreferences.getStoredFile()
+                                if (binFile.exists()) {
+                                    BinWriter.write(binFile, kfldrlDef.first, result.suggestedKfldrl)
+                                }
                             }
+                        }) {
+                            Text("Write KFLDRL")
                         }
-                    }) {
-                        Text("Write KFLDRL")
+                        OutlinedButton(onClick = {
+                            importedKfldrl = LdrpidOptimizerBridge.importKfldrl()
+                        }) {
+                            Text("Import from LDRPID")
+                        }
                     }
                 } else {
                     Text("No suggestion (KFLDRL not configured)", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
+        // Imported LDRPID comparison
+        if (importedKfldrl != null) {
+            Spacer(Modifier.height(8.dp))
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                tonalElevation = 1.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        "LDRPID-Computed KFLDRL (comparison baseline)",
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                    Box(modifier = Modifier.heightIn(max = 300.dp)) {
+                        MapTable(map = importedKfldrl!!, editable = false)
+                    }
                 }
             }
         }
