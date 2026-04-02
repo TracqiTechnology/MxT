@@ -403,6 +403,566 @@ class A2lParserTest {
     }
 }
 
+/**
+ * Generate default .ecu + .cfg files from all available A2L fixtures.
+ * Produces files in the `example/` directories alongside existing BIN/XDF files.
+ *
+ * Each A2L generates:
+ *   - {name}.ecu         — Full measurement file for ME7Logger / native logging
+ *   - {name}_basic.cfg   — 17 essential tuning variables
+ *   - {name}_ldrpid.cfg  — 13 boost/LDRPID variables
+ */
+class DefaultEcuFileGeneratorTest {
+
+    data class A2lSource(
+        val a2lFile: File,
+        val outputDir: String,
+        val outputName: String,
+        val partNumber: String,
+        val swNumber: String,
+        val engineId: String
+    )
+
+    companion object {
+        private val SOURCES = listOf(
+            A2lSource(
+                a2lFile = File("technical/vag/a2l/me7/06A906012AE_0901.A2L"),
+                outputDir = "example/me7",
+                outputName = "ME7_06A906012AE",
+                partNumber = "06A906012AE",
+                swNumber = "0901",
+                engineId = "1.8L R4 20VT (Jetta/Golf)"
+            ),
+            A2lSource(
+                a2lFile = File("technical/vag/a2l/me7/06A906032TE_0040.A2L"),
+                outputDir = "example/me7",
+                outputName = "ME7_06A906032TE",
+                partNumber = "06A906032TE",
+                swNumber = "0040",
+                engineId = "1.8L R4 20VT (Touran)"
+            ),
+            A2lSource(
+                a2lFile = File("technical/vag/a2l/me7/06A906012C_0002.A2L"),
+                outputDir = "example/me7",
+                outputName = "ME7_06A906012C",
+                partNumber = "06A906012C",
+                swNumber = "0002",
+                engineId = "1.8L R4 20VT (Bora)"
+            ),
+            A2lSource(
+                a2lFile = File("technical/vag/a2l/med9/8J0907404D_0020.A2L"),
+                outputDir = "example/med9",
+                outputName = "MED9_8J0907404D",
+                partNumber = "8J0907404D",
+                swNumber = "0020",
+                engineId = "2.5L R5 TFSI (TT RS)"
+            ),
+            A2lSource(
+                a2lFile = File("technical/vag/a2l/med17/D17162A01C000_MY17I0.a2l"),
+                outputDir = "example/med17",
+                outputName = "MED17_D17162A01C000",
+                partNumber = "D17162A01C000",
+                swNumber = "MY17I0",
+                engineId = "2.5L R5 TFSI EA855 EVO (RS3/TTRS)"
+            ),
+        )
+
+        @JvmStatic
+        fun anyA2lAvailable(): Boolean = SOURCES.any { it.a2lFile.exists() }
+    }
+
+    @Test
+    @EnabledIf("anyA2lAvailable")
+    fun `generate default ecu files from all available A2L sources`() {
+        for (source in SOURCES) {
+            if (!source.a2lFile.exists()) {
+                println("SKIP: ${source.a2lFile} not found")
+                continue
+            }
+
+            println("Generating from ${source.a2lFile.name}...")
+            val result = A2lParser.parse(source.a2lFile)
+            val entries = A2lParser.buildEcuEntries(result.measurements, result.compuMethods)
+                .filter { it.address > 0 }  // Skip unmapped variables with address 0x00000000
+
+            if (entries.isEmpty()) {
+                println("  → SKIP: ${source.a2lFile.name} produced 0 entries (incompatible A2L format?)")
+                continue
+            }
+
+            // Create output directory if needed
+            val outDir = File(source.outputDir)
+            outDir.mkdirs()
+
+            // Write .ecu file
+            val ecuFile = File(outDir, "${source.outputName}.ecu")
+            EcuWriter.writeEcuFile(
+                entries = entries,
+                outputFile = ecuFile,
+                partNumber = source.partNumber,
+                swNumber = source.swNumber,
+                engineId = source.engineId
+            )
+            assertTrue(ecuFile.exists(), "ECU file should exist: ${ecuFile.path}")
+            assertTrue(ecuFile.length() > 100, "ECU file should not be empty")
+
+            // Write basic .cfg
+            val basicCfg = File(outDir, "${source.outputName}_basic.cfg")
+            EcuWriter.writeCfgFile(
+                outputFile = basicCfg,
+                ecuFilename = ecuFile.name,
+                variables = EcuWriter.BASIC_VARIABLES,
+                samplesPerSecond = 20,
+                description = "${source.engineId} — basic tuning"
+            )
+
+            // Write LDRPID .cfg
+            val ldrpidCfg = File(outDir, "${source.outputName}_ldrpid.cfg")
+            EcuWriter.writeCfgFile(
+                outputFile = ldrpidCfg,
+                ecuFilename = ecuFile.name,
+                variables = EcuWriter.LDRPID_VARIABLES,
+                samplesPerSecond = 20,
+                description = "${source.engineId} — LDRPID boost tuning"
+            )
+
+            // Validate: parse back .ecu and verify round-trip
+            val parsed = data.parser.ecu.EcuFileParser.parse(ecuFile)
+            assertTrue(parsed.entries.isNotEmpty(),
+                "${ecuFile.name}: parsed back should have entries")
+            // Note: EcuFileParser deduplicates by name (Map), so count may be slightly less
+            // than written if A2L had duplicate measurement names (struct members)
+            assertTrue(parsed.entries.size >= entries.size * 95 / 100,
+                "${ecuFile.name}: entry count dropped too much (wrote ${entries.size}, read ${parsed.entries.size})")
+
+            // Verify addresses survived round-trip (for entries that exist after dedup)
+            val spotCheck = entries.take(100)  // Spot-check first 100
+            for (entry in spotCheck) {
+                val parsedEntry = parsed.entries[entry.name] ?: continue
+                assertEquals(entry.address, parsedEntry.address,
+                    "${ecuFile.name}: address mismatch for '${entry.name}'")
+            }
+
+            // Validate: parse back .cfg
+            val parsedCfg = data.parser.ecu.CfgFileParser.parse(basicCfg)
+            assertEquals(ecuFile.name, parsedCfg.ecuFilename,
+                "${basicCfg.name}: ECU filename reference should match")
+
+            // Count how many basic variables exist in this .ecu
+            val matchCount = parsedCfg.variables.count { it.name in parsed.entries }
+            println("  → ${ecuFile.name}: ${entries.size} entries, $matchCount/${parsedCfg.variables.size} basic vars matched")
+            assertTrue(matchCount >= 5,
+                "${ecuFile.name}: at least 5 basic variables should match .ecu entries, got $matchCount")
+        }
+    }
+
+    @Test
+    @EnabledIf("anyA2lAvailable")
+    fun `all generated ecu files have finite conversion factors`() {
+        for (source in SOURCES) {
+            if (!source.a2lFile.exists()) continue
+
+            val result = A2lParser.parse(source.a2lFile)
+            val entries = A2lParser.buildEcuEntries(result.measurements, result.compuMethods)
+                .filter { it.address > 0 }
+
+            for (e in entries) {
+                assertTrue(e.factor.isFinite(),
+                    "${source.outputName}: entry '${e.name}' has non-finite factor ${e.factor}")
+                assertTrue(e.offset.isFinite(),
+                    "${source.outputName}: entry '${e.name}' has non-finite offset ${e.offset}")
+                assertTrue(e.size in 1..2,
+                    "${source.outputName}: entry '${e.name}' has unexpected size ${e.size}")
+                assertTrue(e.address > 0,
+                    "${source.outputName}: entry '${e.name}' has zero/negative address")
+            }
+        }
+    }
+}
+
+/**
+ * End-to-end test: MED17 A2L → .ecu/.cfg → EcuFileParser → UdsNativeLogger → UDS protocol frames.
+ *
+ * Exercises the complete pipeline from a real MED17 A2L file through to protocol-level
+ * address encoding, proving the UDS logger can log TriCore RAM addresses.
+ */
+class Med17A2lToUdsLoggingE2ETest {
+
+    companion object {
+        private val MED17_RS3_A2L = File("technical/vag/a2l/med17/D17162A01C000_MY17I0.a2l")
+
+        @JvmStatic
+        fun med17Rs3Available(): Boolean = MED17_RS3_A2L.exists()
+    }
+
+    // Key MED17 tuning variables with known addresses from the A2L
+    private data class ExpectedVar(val name: String, val type: String, val address: Long)
+    private val KEY_VARIABLES = listOf(
+        ExpectedVar("nmot_w",    "UWORD", 0xD000167CL),
+        ExpectedVar("rl_w",      "UWORD", 0xD0000ECAL),
+        ExpectedVar("plsol_w",   "UWORD", 0xD0000790L),
+        ExpectedVar("ldtvm",     "UBYTE", 0xD0003043L),
+        ExpectedVar("frm_w",     "UWORD", 0xD00032D8L),
+        ExpectedVar("fra_w",     "UWORD", 0xD0001DC6L),
+        ExpectedVar("wdkba",     "UBYTE", 0xD0002E68L),
+        ExpectedVar("tmot",      "UBYTE", 0xD0002EAFL),
+        ExpectedVar("lamsbg_w",  "UWORD", 0xD0001C0EL),
+        ExpectedVar("zwist",     "SBYTE", 0xD0003227L),
+        ExpectedVar("rk_w",      "UWORD", 0xD0001942L),
+    )
+
+    // --- Phase 1: A2L → ECU entries ---
+
+    @Test
+    @EnabledIf("med17Rs3Available")
+    fun `A2L produces ECU entries with correct TriCore addresses for key variables`() {
+        val result = A2lParser.parse(MED17_RS3_A2L)
+        val entries = A2lParser.buildEcuEntries(result.measurements, result.compuMethods)
+        val entryMap = entries.associateBy { it.name }
+
+        for (expected in KEY_VARIABLES) {
+            val entry = entryMap[expected.name]
+            assertNotNull(entry, "Key variable '${expected.name}' missing from ECU entries")
+            assertEquals(expected.address, entry!!.address,
+                "${expected.name}: address mismatch (expected 0x${expected.address.toString(16)}, " +
+                    "got 0x${entry.address.toString(16)})")
+            assertTrue(entry.address >= 0xB0000000L,
+                "${expected.name}: address 0x${entry.address.toString(16)} not in TriCore RAM range")
+        }
+    }
+
+    @Test
+    @EnabledIf("med17Rs3Available")
+    fun `A2L entries have valid aliases for key variables`() {
+        val result = A2lParser.parse(MED17_RS3_A2L)
+        val entries = A2lParser.buildEcuEntries(result.measurements, result.compuMethods)
+        val entryMap = entries.associateBy { it.name }
+
+        // Check well-known aliases
+        assertEquals("EngineSpeed", entryMap["nmot_w"]?.alias)
+        assertEquals("EngineLoad", entryMap["rl_w"]?.alias)
+        assertEquals("WastegateDutyCycle", entryMap["ldtvm"]?.alias)
+        assertEquals("CoolantTemperature", entryMap["tmot"]?.alias)
+    }
+
+    // --- Phase 2: ECU entries → .ecu file → parse back ---
+
+    @Test
+    @EnabledIf("med17Rs3Available")
+    fun `ecu file round-trip preserves MED17 addresses and conversions`() {
+        val result = A2lParser.parse(MED17_RS3_A2L)
+        val entries = A2lParser.buildEcuEntries(result.measurements, result.compuMethods)
+
+        // Write .ecu file
+        val ecuFile = File.createTempFile("med17_test_", ".ecu")
+        ecuFile.deleteOnExit()
+        EcuWriter.writeEcuFile(
+            entries = entries,
+            outputFile = ecuFile,
+            partNumber = "D17162A01C000",
+            swNumber = "MY17I0",
+            engineId = "2.5L R5 TFSI EA855 EVO"
+        )
+
+        // Read back via EcuFileParser
+        val parsed = data.parser.ecu.EcuFileParser.parse(ecuFile)
+        assertTrue(parsed.entries.isNotEmpty(), "Parsed .ecu should have entries")
+
+        // Verify key variables survived the round-trip
+        for (expected in KEY_VARIABLES) {
+            val parsedEntry = parsed.entries[expected.name]
+            assertNotNull(parsedEntry, "Key variable '${expected.name}' missing after .ecu round-trip")
+            assertEquals(expected.address, parsedEntry!!.address,
+                "${expected.name}: address mismatch after round-trip")
+        }
+
+        // Verify conversion factors are finite and preserved
+        val nmot = parsed.entries["nmot_w"]!!
+        assertTrue(nmot.factor.isFinite(), "nmot_w factor should be finite")
+        assertTrue(nmot.factor > 0, "nmot_w factor should be positive")
+    }
+
+    // --- Phase 3: ECU entries → .cfg file → parse back ---
+
+    @Test
+    @EnabledIf("med17Rs3Available")
+    fun `cfg file round-trip selects correct variables`() {
+        val result = A2lParser.parse(MED17_RS3_A2L)
+        val entries = A2lParser.buildEcuEntries(result.measurements, result.compuMethods)
+
+        // Write .ecu file (needed for .cfg reference)
+        val ecuFile = File.createTempFile("med17_test_", ".ecu")
+        ecuFile.deleteOnExit()
+        EcuWriter.writeEcuFile(entries = entries, outputFile = ecuFile,
+            partNumber = "D17162A01C000", swNumber = "MY17I0",
+            engineId = "2.5L R5 TFSI EA855 EVO")
+
+        // Write .cfg with basic variables
+        val cfgFile = File.createTempFile("med17_test_basic_", ".cfg")
+        cfgFile.deleteOnExit()
+        EcuWriter.writeCfgFile(
+            outputFile = cfgFile,
+            ecuFilename = ecuFile.name,
+            variables = EcuWriter.BASIC_VARIABLES,
+            samplesPerSecond = 20,
+            description = "MED17 RS3 basic logging"
+        )
+
+        // Read back
+        val parsedCfg = data.parser.ecu.CfgFileParser.parse(cfgFile)
+        assertEquals(20, parsedCfg.samplesPerSecond)
+        assertTrue(parsedCfg.variables.any { it.name == "nmot_w" }, "cfg should contain nmot_w")
+        assertTrue(parsedCfg.variables.any { it.name == "rl_w" }, "cfg should contain rl_w")
+        assertTrue(parsedCfg.variables.any { it.name == "ldtvm" }, "cfg should contain ldtvm")
+
+        // Cross-reference: all .cfg variable names should exist in .ecu
+        val parsedEcu = data.parser.ecu.EcuFileParser.parse(ecuFile)
+        val ecuNames = parsedEcu.entries.keys
+        for (cfgVar in parsedCfg.variables) {
+            // Some preset variables may not exist in this A2L (e.g., pvdks_w, mshfm_w)
+            // Just count how many match
+        }
+        val matchCount = parsedCfg.variables.count { it.name in ecuNames }
+        assertTrue(matchCount >= 10,
+            "At least 10 of ${parsedCfg.variables.size} .cfg variables should match .ecu entries, got $matchCount")
+    }
+
+    // --- Phase 4: .ecu + .cfg → UdsNativeLogger connect ---
+
+    @Test
+    @EnabledIf("med17Rs3Available")
+    fun `UdsNativeLogger resolves log entries from generated ecu and cfg files`() = kotlinx.coroutines.runBlocking {
+        val result = A2lParser.parse(MED17_RS3_A2L)
+        val entries = A2lParser.buildEcuEntries(result.measurements, result.compuMethods)
+
+        // Generate .ecu + .cfg
+        val ecuFile = File.createTempFile("med17_uds_test_", ".ecu")
+        ecuFile.deleteOnExit()
+        EcuWriter.writeEcuFile(entries = entries, outputFile = ecuFile,
+            partNumber = "D17162A01C000", swNumber = "MY17I0",
+            engineId = "2.5L R5 TFSI EA855 EVO")
+
+        val cfgFile = File.createTempFile("med17_uds_test_basic_", ".cfg")
+        cfgFile.deleteOnExit()
+        EcuWriter.writeCfgFile(
+            outputFile = cfgFile,
+            ecuFilename = ecuFile.name,
+            variables = EcuWriter.BASIC_VARIABLES,
+            samplesPerSecond = 20,
+            description = "MED17 RS3 UDS logging test"
+        )
+
+        // Connect UdsNativeLogger with generated files
+        val fakeCan = data.logger.uds.FakeCanTransport()
+        val logger = data.logger.uds.UdsNativeLogger(fakeCan)
+
+        val config = data.logger.LoggerConfig(
+            ecuFile = ecuFile.absolutePath,
+            cfgFile = cfgFile.absolutePath
+        )
+        logger.connect(config)
+
+        assertEquals(data.logger.LoggerStatus.CONNECTED, logger.status.value,
+            "Logger should be CONNECTED after loading .ecu/.cfg: ${logger.statusMessage.value}")
+
+        // Verify variables resolved
+        val vars = logger.variables.value
+        assertTrue(vars.isNotEmpty(), "Logger should have resolved variables")
+        assertTrue(vars.any { it.name == "nmot_w" }, "Should have nmot_w")
+        assertTrue(vars.any { it.name == "rl_w" }, "Should have rl_w")
+        assertTrue(vars.any { it.name == "ldtvm" }, "Should have ldtvm")
+
+        // Count how many of the basic preset vars were found
+        val basicNames = EcuWriter.BASIC_VARIABLES.map { it.first }.toSet()
+        val resolvedNames = vars.map { it.name }.toSet()
+        val matchCount = basicNames.intersect(resolvedNames).size
+        assertTrue(matchCount >= 10,
+            "Expected at least 10 basic variables resolved, got $matchCount of ${basicNames.size}")
+    }
+
+    // --- Phase 5: UDS protocol frame address encoding ---
+
+    @Test
+    @EnabledIf("med17Rs3Available")
+    fun `UDS define request encodes 4-byte TriCore addresses correctly`() = kotlinx.coroutines.runBlocking {
+        val result = A2lParser.parse(MED17_RS3_A2L)
+        val entries = A2lParser.buildEcuEntries(result.measurements, result.compuMethods)
+        val entryMap = entries.associateBy { it.name }
+
+        // Build a small .ecu with just 3 key variables for clear frame inspection
+        val smallEntries = listOf("nmot_w", "rl_w", "ldtvm").mapNotNull { entryMap[it] }
+        assertEquals(3, smallEntries.size, "Should have all 3 key variables")
+
+        val ecuFile = File.createTempFile("med17_frame_test_", ".ecu")
+        ecuFile.deleteOnExit()
+        EcuWriter.writeEcuFile(entries = smallEntries, outputFile = ecuFile,
+            partNumber = "D17162A01C000", swNumber = "MY17I0",
+            engineId = "2.5L R5 TFSI EA855 EVO")
+
+        // .cfg with just these 3 variables
+        val cfgFile = File.createTempFile("med17_frame_test_", ".cfg")
+        cfgFile.deleteOnExit()
+        EcuWriter.writeCfgFile(
+            outputFile = cfgFile,
+            ecuFilename = ecuFile.name,
+            variables = smallEntries.map { Triple(it.name, it.alias, it.comment) },
+            samplesPerSecond = 20
+        )
+
+        // Set up FakeCanTransport
+        val fakeCan = data.logger.uds.FakeCanTransport()
+        val logger = data.logger.uds.UdsNativeLogger(fakeCan)
+
+        logger.connect(data.logger.LoggerConfig(
+            ecuFile = ecuFile.absolutePath,
+            cfgFile = cfgFile.absolutePath
+        ))
+        assertEquals(data.logger.LoggerStatus.CONNECTED, logger.status.value)
+
+        // Queue UDS responses for startLogging:
+        // 1. DiagnosticSessionControl (extended) response
+        queueSingleFrame(fakeCan, 0x7E8, byteArrayOf(0x50, 0x03, 0x00, 0x19, 0x01, 0xF4.toByte()))
+
+        // 2. DynamicDefineDataIdentifier response (positive)
+        // 3 vars × 5 bytes = 15 bytes payload → request is 4 + 15 = 19 bytes → multi-frame
+        // Need Flow Control from ECU for outgoing multi-frame
+        queueFlowControl(fakeCan, 0x7E8)
+        // Positive response to define DID
+        queueSingleFrame(fakeCan, 0x7E8, byteArrayOf(0x6C, 0x02, 0xF2.toByte(), 0x00))
+
+        // 3. ReadDataByIdentifier response — just enough to not crash
+        // 3 vars: nmot_w(2 bytes) + rl_w(2 bytes) + ldtvm(1 byte) = 5 bytes data
+        queueSingleFrame(fakeCan, 0x7E8, byteArrayOf(
+            0x62, 0xF2.toByte(), 0x00,  // ReadDID positive response header
+            0x10, 0x00,                   // nmot_w raw = 0x1000 = 4096
+            0x08, 0x00,                   // rl_w raw = 0x0800 = 2048
+            0x50                          // ldtvm raw = 0x50 = 80
+        ))
+
+        // Start logging (will send frames then poll)
+        try {
+            logger.startLogging()
+            // Give poll loop a moment, then stop
+            kotlinx.coroutines.delay(200)
+        } catch (_: Exception) {
+            // Expected — FakeCanTransport runs out of queued responses
+        }
+        try { logger.stopLogging() } catch (_: Exception) {}
+
+        // Inspect sent frames — find the DynamicDefineDID request
+        // It should contain our 3 variable addresses encoded as 4-byte big-endian
+        val defineFrames = fakeCan.sentFrames.filter { frame ->
+            frame.data.isNotEmpty() && (
+                // Single frame: first byte is length, then service ID 0x2C
+                (frame.data[0].toInt() and 0xF0 == 0x00 && frame.data.size > 1 && frame.data[1] == 0x2C.toByte()) ||
+                // First frame of multi-frame: starts with 0x1X
+                (frame.data[0].toInt() and 0xF0 == 0x10)
+            )
+        }
+
+        // We should have at least one define frame (it'll be multi-frame for 3 vars)
+        assertTrue(defineFrames.isNotEmpty() || fakeCan.sentFrames.size >= 3,
+            "Should have sent DynamicDefineDID request frames. Total sent: ${fakeCan.sentFrames.size}")
+
+        // Verify by reconstructing the full ISO-TP message from sent frames
+        // For multi-frame: FF (first frame) has [0x1X, length, service_id, ...]
+        // then CF (consecutive frames) have [0x2X, data...]
+        val allSentData = reconstructIsoTpMessage(fakeCan.sentFrames)
+
+        // Find the DynamicDefineDID message (service 0x2C)
+        val defineMsg = allSentData.firstOrNull { it.isNotEmpty() && it[0] == 0x2C.toByte() }
+        assertNotNull(defineMsg, "Should have sent a 0x2C DynamicDefineDID request")
+
+        // Verify address encoding: [0x2C, 0x02, DID_hi, DID_lo, size1, addr1[3:0]..., size2, addr2[3:0]..., ...]
+        // For our 3 vars:
+        // Expected addresses (sorted by .ecu order, which is sorted by address):
+        //   plsol_w won't be here — we have nmot_w, rl_w, ldtvm
+        //   Sorted: rl_w(0xD0000ECA), nmot_w(0xD000167C), ldtvm(0xD0003043)
+        assertTrue(defineMsg!!.size >= 4 + 15,
+            "Define message should be at least 19 bytes (4 header + 3×5 payload), got ${defineMsg.size}")
+
+        // Parse the payload after the 4-byte header
+        val payload = defineMsg.drop(4)
+        // Each variable: [memorySize, addr_31:24, addr_23:16, addr_15:8, addr_7:0]
+        val var1Size = payload[0].toInt() and 0xFF
+        val var1Addr = ((payload[1].toLong() and 0xFF) shl 24) or
+                ((payload[2].toLong() and 0xFF) shl 16) or
+                ((payload[3].toLong() and 0xFF) shl 8) or
+                (payload[4].toLong() and 0xFF)
+
+        // The .ecu entries are sorted by address, so first should be rl_w (0xD0000ECA, size 2)
+        // or the order the .cfg lists them in
+        assertTrue(var1Addr >= 0xD0000000L,
+            "First variable address should be in TriCore range, got 0x${var1Addr.toString(16)}")
+        assertTrue(var1Size in 1..2,
+            "Variable size should be 1 or 2, got $var1Size")
+    }
+
+    // --- Helper functions ---
+
+    private fun queueSingleFrame(fake: data.logger.uds.FakeCanTransport, rxId: Int, payload: ByteArray) {
+        val frame = ByteArray(8)
+        frame[0] = payload.size.toByte()  // SF PCI: length
+        payload.copyInto(frame, 1, 0, minOf(payload.size, 7))
+        fake.queueResponse(data.logger.uds.CanFrame(rxId, frame))
+    }
+
+    private fun queueFlowControl(fake: data.logger.uds.FakeCanTransport, rxId: Int) {
+        fake.queueResponse(data.logger.uds.CanFrame(rxId, byteArrayOf(0x30, 0x00, 0x00, 0, 0, 0, 0, 0)))
+    }
+
+    /**
+     * Reconstruct ISO-TP messages from raw CAN frames.
+     * Groups frames into complete messages by detecting SF/FF/CF patterns.
+     */
+    private fun reconstructIsoTpMessage(frames: List<data.logger.uds.CanFrame>): List<ByteArray> {
+        val messages = mutableListOf<ByteArray>()
+        var currentMsg: MutableList<Byte>? = null
+        var remaining = 0
+
+        for (frame in frames) {
+            val d = frame.data
+            if (d.isEmpty()) continue
+            val pci = d[0].toInt() and 0xF0
+
+            when (pci) {
+                0x00 -> {
+                    // Single Frame: length in low nibble
+                    val len = d[0].toInt() and 0x0F
+                    if (len > 0 && len <= 7) {
+                        messages.add(d.copyOfRange(1, 1 + len))
+                    }
+                }
+                0x10 -> {
+                    // First Frame: length in bits [11:8] from byte 0, bits [7:0] from byte 1
+                    val len = ((d[0].toInt() and 0x0F) shl 8) or (d[1].toInt() and 0xFF)
+                    currentMsg = mutableListOf()
+                    for (i in 2 until minOf(8, d.size)) {
+                        currentMsg.add(d[i])
+                    }
+                    remaining = len - (minOf(8, d.size) - 2)
+                }
+                0x20 -> {
+                    // Consecutive Frame
+                    if (currentMsg != null && remaining > 0) {
+                        val bytesToCopy = minOf(7, remaining)
+                        for (i in 1..minOf(bytesToCopy, d.size - 1)) {
+                            currentMsg.add(d[i])
+                        }
+                        remaining -= bytesToCopy
+                        if (remaining <= 0) {
+                            messages.add(currentMsg.toByteArray())
+                            currentMsg = null
+                        }
+                    }
+                }
+                0x30 -> { /* Flow Control — skip */ }
+            }
+        }
+        return messages
+    }
+}
+
 class EcuWriterTest {
 
     @Test
