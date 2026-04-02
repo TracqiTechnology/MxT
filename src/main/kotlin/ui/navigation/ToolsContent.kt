@@ -4,7 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.material3.SecondaryScrollableTabRow
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
-import androidx.compose.runtime.Composable
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -16,13 +16,25 @@ import ui.screens.sniffer.RamSnifferScreen
 
 @Composable
 fun ToolsContent(navState: NavigationState) {
+    val ecuPlatform = navState.ecuPlatform
     val selectedTab = navState.toolsTab
+
+    val visibleTabs = remember(ecuPlatform) {
+        ToolsTab.entries.filter { ecuPlatform in it.platforms }
+    }
+
+    // Auto-select first visible tab if current selection is hidden
+    LaunchedEffect(visibleTabs, selectedTab) {
+        if (selectedTab !in visibleTabs && visibleTabs.isNotEmpty()) {
+            navState.selectToolsTab(visibleTabs.first())
+        }
+    }
 
     Column(modifier = Modifier.fillMaxSize()) {
         SecondaryScrollableTabRow(
-            selectedTabIndex = ToolsTab.entries.indexOf(selectedTab).coerceAtLeast(0)
+            selectedTabIndex = visibleTabs.indexOf(selectedTab).coerceAtLeast(0)
         ) {
-            ToolsTab.entries.forEach { tab ->
+            visibleTabs.forEach { tab ->
                 Tab(
                     selected = selectedTab == tab,
                     onClick = { navState.selectToolsTab(tab) },
