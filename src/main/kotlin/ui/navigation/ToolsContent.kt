@@ -42,7 +42,7 @@ fun ToolsContent(navState: NavigationState) {
         Box(modifier = Modifier.fillMaxSize().weight(1f)) {
             when (selectedTab) {
                 ToolsTab.A2L_GENERATOR -> A2lToEcuScreen()
-                ToolsTab.LOGGER -> LoggerScreen()
+                ToolsTab.LOGGER -> LoggerScreen(ecuPlatform = navState.ecuPlatform)
                 ToolsTab.RAM_SNIFFER -> RamSnifferScreen()
                 ToolsTab.AXIS_RESCALER -> AxisRescalerScreen()
             }

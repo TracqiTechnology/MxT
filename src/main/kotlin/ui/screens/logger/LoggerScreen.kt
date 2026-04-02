@@ -35,6 +35,7 @@ import data.logger.kwp2000.Kwp2000NativeLogger
 import data.logger.protocol.JSerialCommProvider
 import data.logger.protocol.SerialPortEnumerator
 import data.logger.uds.*
+import data.model.EcuPlatform
 import ui.components.ChartSeries
 import ui.components.LineChart
 import ui.components.niceTickValues
@@ -50,11 +51,18 @@ import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 
 @Composable
-fun LoggerScreen(loggerManager: LoggerManager? = null) {
+fun LoggerScreen(ecuPlatform: EcuPlatform = EcuPlatform.ME7, loggerManager: LoggerManager? = null) {
     val scope = rememberCoroutineScope()
 
-    // Logger mode selection
-    var loggerMode by remember { mutableStateOf(LoggerMode.ME7LOGGER_EXE) }
+    // Filter logger modes to those available on the current platform
+    val availableModes = remember(ecuPlatform) {
+        LoggerMode.entries.filter { ecuPlatform in it.platforms }
+    }
+
+    // Logger mode selection — auto-select first valid mode when platform changes
+    var loggerMode by remember(ecuPlatform) {
+        mutableStateOf(availableModes.first())
+    }
 
     // CAN adapter type — declared before logger so it can be a remember key
     var canAdapterType by remember { mutableStateOf(CanAdapterType.SLCAN) }
@@ -294,6 +302,7 @@ fun LoggerScreen(loggerManager: LoggerManager? = null) {
         Box(modifier = Modifier.fillMaxSize().weight(1f)) {
             when (selectedTab) {
                 0 -> ConnectionTab(
+                    ecuPlatform = ecuPlatform,
                     loggerMode = loggerMode,
                     me7loggerPath = me7loggerPath,
                     comPort = comPort,
@@ -424,6 +433,7 @@ private fun SectionTitle(text: String) {
 
 @Composable
 private fun ConnectionTab(
+    ecuPlatform: EcuPlatform,
     loggerMode: LoggerMode,
     me7loggerPath: String,
     comPort: String,
@@ -485,30 +495,22 @@ private fun ConnectionTab(
         // Section 0: Logger Mode
         SectionTitle("Logger Mode")
 
+        val visibleModes = remember(ecuPlatform) {
+            LoggerMode.entries.filter { ecuPlatform in it.platforms }
+        }
+
         SingleChoiceSegmentedButtonRow(modifier = Modifier.padding(bottom = 8.dp)) {
-            SegmentedButton(
-                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 3),
-                onClick = { onLoggerModeChange(LoggerMode.ME7LOGGER_EXE) },
-                selected = loggerMode == LoggerMode.ME7LOGGER_EXE
-            ) { Text("ME7Logger.exe", style = MaterialTheme.typography.labelSmall) }
-            SegmentedButton(
-                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 3),
-                onClick = { onLoggerModeChange(LoggerMode.NATIVE_KWP2000) },
-                selected = loggerMode == LoggerMode.NATIVE_KWP2000
-            ) { Text("Native KWP", style = MaterialTheme.typography.labelSmall) }
-            SegmentedButton(
-                shape = SegmentedButtonDefaults.itemShape(index = 2, count = 3),
-                onClick = { onLoggerModeChange(LoggerMode.NATIVE_UDS) },
-                selected = loggerMode == LoggerMode.NATIVE_UDS
-            ) { Text("Native UDS", style = MaterialTheme.typography.labelSmall) }
+            visibleModes.forEachIndexed { index, mode ->
+                SegmentedButton(
+                    shape = SegmentedButtonDefaults.itemShape(index = index, count = visibleModes.size),
+                    onClick = { onLoggerModeChange(mode) },
+                    selected = loggerMode == mode
+                ) { Text(mode.label, style = MaterialTheme.typography.labelSmall, maxLines = 1) }
+            }
         }
 
         Text(
-            when (loggerMode) {
-                LoggerMode.ME7LOGGER_EXE -> "Windows ME7Logger.exe wrapper (ME7 only)"
-                LoggerMode.NATIVE_KWP2000 -> "K-line serial (Motronic, ME7, MED9)"
-                LoggerMode.NATIVE_UDS -> "CAN bus (MED17)"
-            },
+            loggerMode.description,
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(bottom = 8.dp)

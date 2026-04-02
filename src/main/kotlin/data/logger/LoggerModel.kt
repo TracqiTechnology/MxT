@@ -1,15 +1,32 @@
 package data.logger
 
+import data.model.EcuPlatform
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Logger mode: which backend is used for ECU communication.
  */
-enum class LoggerMode {
-    ME7LOGGER_EXE,   // Existing: spawn ME7Logger.exe (Windows)
-    NATIVE_KWP2000,  // K-line via jSerialComm (Motronic, ME7, MED9)
-    NATIVE_UDS       // CAN via SLCAN/PCAN + jSerialComm (MED17)
+enum class LoggerMode(
+    val label: String,
+    val description: String,
+    val platforms: Set<EcuPlatform>
+) {
+    ME7LOGGER_EXE(
+        label = "ME7Logger.exe",
+        description = "Windows ME7Logger.exe wrapper",
+        platforms = setOf(EcuPlatform.ME7, EcuPlatform.MOTRONIC, EcuPlatform.MED9)
+    ),
+    NATIVE_KWP2000(
+        label = "Native KWP",
+        description = "K-line via serial port",
+        platforms = setOf(EcuPlatform.ME7, EcuPlatform.MOTRONIC, EcuPlatform.MED9)
+    ),
+    NATIVE_UDS(
+        label = "Native UDS",
+        description = "CAN via SLCAN or PCAN adapter",
+        platforms = setOf(EcuPlatform.MED17)
+    )
 }
 
 /**
