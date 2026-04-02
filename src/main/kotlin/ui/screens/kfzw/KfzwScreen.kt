@@ -20,6 +20,7 @@ import data.preferences.kfmiop.KfmiopPreferences
 import data.preferences.kfzw.KfzwPreferences
 import data.preferences.kfzw.KfzwSwitchMapPreferences
 import data.writer.BinWriter
+import domain.math.AxisRescaler
 import domain.math.RescaleAxis
 import domain.math.map.Map3d
 import domain.model.kfzw.Kfzw
@@ -734,7 +735,11 @@ private fun ScalarRescaleConfigCard(
     onSelectKfzw: () -> Unit,
     currentMaxLoad: Double,
     targetMaxLoad: String,
-    onTargetMaxLoadChange: (String) -> Unit
+    onTargetMaxLoadChange: (String) -> Unit,
+    editedYAxis: Array<Array<Double>> = arrayOf(emptyArray()),
+    onYAxisChanged: (Array<Array<Double>>) -> Unit = {},
+    extrapolatedCount: Int = 0,
+    totalCells: Int = 0
 ) {
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -796,6 +801,60 @@ private fun ScalarRescaleConfigCard(
                     modifier = Modifier.width(130.dp).height(56.dp)
                 )
             }
+
+            // Y-axis (RPM) editing
+            if (editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty()) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(bottom = 4.dp)
+                ) {
+                    Text(
+                        text = "KFZW RPM Axis (Editable)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "(defines the output RPM breakpoints)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                MapAxis(
+                    data = editedYAxis,
+                    editable = true,
+                    onDataChanged = onYAxisChanged
+                )
+            }
+
+            // Extrapolation warning
+            if (extrapolatedCount > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Extrapolation warning",
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "⚠ $extrapolatedCount of $totalCells cells required extrapolation (outside original axis range)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -807,7 +866,11 @@ private fun ConfigurationCard(
     onSelectKfzw: () -> Unit,
     onSelectKfmiop: () -> Unit,
     editedXAxis: Array<Array<Double>>,
-    onXAxisChanged: (Array<Array<Double>>) -> Unit
+    onXAxisChanged: (Array<Array<Double>>) -> Unit,
+    editedYAxis: Array<Array<Double>> = arrayOf(emptyArray()),
+    onYAxisChanged: (Array<Array<Double>>) -> Unit = {},
+    extrapolatedCount: Int = 0,
+    totalCells: Int = 0
 ) {
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -862,6 +925,60 @@ private fun ConfigurationCard(
                     editable = true,
                     onDataChanged = onXAxisChanged
                 )
+            }
+
+            // Y-axis (RPM) editing
+            if (editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(bottom = 4.dp)
+                ) {
+                    Text(
+                        text = "KFZW RPM Axis (Editable)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "(defines the output RPM breakpoints)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                MapAxis(
+                    data = editedYAxis,
+                    editable = true,
+                    onDataChanged = onYAxisChanged
+                )
+            }
+
+            // Extrapolation warning
+            if (extrapolatedCount > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Extrapolation warning",
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "⚠ $extrapolatedCount of $totalCells cells required extrapolation (outside original axis range)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
             }
         }
     }

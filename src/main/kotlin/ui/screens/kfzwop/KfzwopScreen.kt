@@ -17,6 +17,7 @@ import data.preferences.MapPreference
 import data.preferences.bin.BinFilePreferences
 import data.preferences.kfzwop.KfzwopPreferences
 import data.writer.BinWriter
+import domain.math.AxisRescaler
 import domain.math.map.Map3d
 import domain.model.kfzw.Kfzw
 import data.model.EcuPlatform
@@ -62,20 +63,47 @@ fun KfzwopScreen() {
         )
     }
 
+    // Editable Y-axis (KFZWOP RPM axis)
+    var editedYAxis by remember(inputKfzwop) {
+        mutableStateOf(
+            if (inputKfzwop != null && inputKfzwop.yAxis.isNotEmpty()) arrayOf(inputKfzwop.yAxis.copyOf())
+            else arrayOf(emptyArray<Double>())
+        )
+    }
+
     // Editable input map
     var editedInputMap by remember(inputKfzwop) {
         mutableStateOf(inputKfzwop?.let { Map3d(it) })
     }
 
     // Calculate the rescaled KFZWOP output
-    val outputKfzwop = remember(editedInputMap, editedXAxis) {
-        val input = editedInputMap
-        if (input != null && editedXAxis.isNotEmpty() && editedXAxis[0].isNotEmpty()) {
-            val newXAxis = editedXAxis[0]
-            val newZAxis = Kfzw.generateKfzw(input.xAxis, input.zAxis, newXAxis)
-            Map3d(newXAxis, input.yAxis, newZAxis)
-        } else null
+    val rescaleResult = remember(editedInputMap, editedXAxis, editedYAxis) {
+        val input = editedInputMap ?: return@remember null
+        if (editedXAxis.isEmpty() || editedXAxis[0].isEmpty()) return@remember null
+
+        val newXAxis = editedXAxis[0]
+        val hasYAxisEdit = editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty()
+        val newYAxis = if (hasYAxisEdit) editedYAxis[0] else null
+
+        // X-axis: recompute Z via Kfzw.generateKfzw (row-wise linear interpolation)
+        val xRescaledZ = Kfzw.generateKfzw(input.xAxis, input.zAxis, newXAxis)
+        val xRescaledMap = Map3d(newXAxis, input.yAxis, xRescaledZ)
+
+        // Y-axis: if edited, use AxisRescaler for bilinear interpolation on the Y dimension
+        if (newYAxis != null) {
+            AxisRescaler.rescaleMap(xRescaledMap, newYAxis = newYAxis)
+        } else {
+            AxisRescaler.RescaleResult(
+                rescaledMap = xRescaledMap,
+                extrapolatedCells = Array(input.yAxis.size) { BooleanArray(newXAxis.size) },
+                extrapolatedCount = 0,
+                exactMatchCount = newXAxis.size * input.yAxis.size,
+                totalCells = newXAxis.size * input.yAxis.size
+            )
+        }
     }
+
+    val outputKfzwop = rescaleResult?.rescaledMap
 
     // Write prerequisites
     val binFile by BinFilePreferences.file.collectAsState()
@@ -159,7 +187,11 @@ fun KfzwopScreen() {
             kfzwopMapName = kfzwopPair?.first?.tableName,
             onSelectKfzwop = { showKfzwopPicker = true },
             editedXAxis = editedXAxis,
-            onXAxisChanged = { newData -> editedXAxis = newData }
+            onXAxisChanged = { newData -> editedXAxis = newData },
+            editedYAxis = editedYAxis,
+            onYAxisChanged = { newData -> editedYAxis = newData },
+            extrapolatedCount = rescaleResult?.extrapolatedCount ?: 0,
+            totalCells = rescaleResult?.totalCells ?: 0
         )
 
         ComparisonArea(
@@ -189,7 +221,11 @@ private fun ConfigurationCard(
     kfzwopMapName: String?,
     onSelectKfzwop: () -> Unit,
     editedXAxis: Array<Array<Double>>,
-    onXAxisChanged: (Array<Array<Double>>) -> Unit
+    onXAxisChanged: (Array<Array<Double>>) -> Unit,
+    editedYAxis: Array<Array<Double>>,
+    onYAxisChanged: (Array<Array<Double>>) -> Unit,
+    extrapolatedCount: Int,
+    totalCells: Int
 ) {
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -202,7 +238,7 @@ private fun ConfigurationCard(
                 style = MaterialTheme.typography.titleMedium
             )
             Text(
-                text = "Rescale optimal ignition timing for new load axis",
+                text = "Rescale optimal ignition timing for new load and RPM axes",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 12.dp)
@@ -238,6 +274,58 @@ private fun ConfigurationCard(
                     editable = true,
                     onDataChanged = onXAxisChanged
                 )
+            }
+
+            if (editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty()) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(bottom = 4.dp)
+                ) {
+                    Text(
+                        text = "KFZWOP RPM Axis (Editable)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "(defines the output RPM breakpoints)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                MapAxis(
+                    data = editedYAxis,
+                    editable = true,
+                    onDataChanged = onYAxisChanged
+                )
+            }
+
+            if (extrapolatedCount > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Extrapolation warning",
+                            tint = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "⚠ $extrapolatedCount of $totalCells cells required extrapolation (outside original axis range)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                }
             }
         }
     }

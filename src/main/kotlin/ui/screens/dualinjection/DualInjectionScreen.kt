@@ -28,9 +28,12 @@ import domain.model.injector.InjectorScalingSolver
 import domain.model.injector.InjectorSpec
 import domain.model.injector.KrkteScalingResult
 import domain.model.injector.TvubResult
+import domain.model.pfi.InjectorStatus
 import domain.model.pfi.PfiShareCalculator
 import domain.model.pfi.PfiShareResult
 import domain.model.pfi.PfiShare2dResult
+import domain.model.pfi.ReversePfiResult
+import domain.model.pfi.RpmSweepRow
 import domain.model.presets.InjectorPresets
 import domain.model.presets.InjectorType
 import kotlinx.coroutines.Dispatchers
@@ -658,6 +661,15 @@ private fun SplitCalculatorTab() {
     var logStatus by remember { mutableStateOf<String?>(null) }
     var showProgress by remember { mutableStateOf(false) }
 
+    // RPM sweep state
+    var sweepLoad by remember { mutableStateOf("100.0") }
+    var sweepRows by remember { mutableStateOf<List<RpmSweepRow>>(emptyList()) }
+
+    // Reverse calculator state
+    var showReverseCalc by remember { mutableStateOf(false) }
+    var reverseTargetDi by remember { mutableStateOf("5.0") }
+    var reverseResult by remember { mutableStateOf<ReversePfiResult?>(null) }
+
     // Initialize default curve on first composition
     LaunchedEffect(Unit) {
         if (pfiResult == null) {
@@ -988,6 +1000,214 @@ private fun SplitCalculatorTab() {
                             } else {
                                 Text(line, style = MaterialTheme.typography.bodyMedium, fontFamily = FontFamily.Monospace)
                             }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── RPM Sweep Timing Table ──────────────────────────────────────
+        Surface(
+            shape = MaterialTheme.shapes.medium,
+            tonalElevation = 1.dp,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("RPM Sweep Timing Table", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    "Shows DI/PFI on-times across the RPM range at a fixed load. " +
+                        "Enter KRKTE values above, then set the sweep load and press Calculate Sweep.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    OutlinedTextField(
+                        value = sweepLoad,
+                        onValueChange = { sweepLoad = it },
+                        label = { Text("Sweep Load (%)") },
+                        modifier = Modifier.width(160.dp),
+                        singleLine = true
+                    )
+                    Button(onClick = {
+                        errorMessage = null
+                        try {
+                            val pKrkte = portKrkte.toDouble()
+                            val dKrkte = diKrkte.toDouble()
+                            val load = sweepLoad.toDouble()
+                            require(pKrkte > 0) { "KRKTE_PFI must be positive" }
+                            require(dKrkte > 0) { "KRKTE_GDI must be positive" }
+                            require(load > 0) { "Sweep load must be positive" }
+
+                            val curve = pfiResult ?: PfiShareCalculator.calculateRpmDependentShare()
+                            sweepRows = PfiShareCalculator.calculateRpmSweep(
+                                loadPercent = load,
+                                pfiShareCurve = curve,
+                                portKrkte = pKrkte,
+                                directKrkte = dKrkte
+                            )
+                        } catch (e: Exception) {
+                            errorMessage = e.message ?: "Sweep calculation error"
+                        }
+                    }) {
+                        Text("Calculate Sweep")
+                    }
+                }
+
+                if (sweepRows.isNotEmpty()) {
+                    Spacer(modifier = Modifier.height(12.dp))
+                    // Header row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        val headerStyle = MaterialTheme.typography.labelSmall.copy(
+                            fontWeight = FontWeight.Bold,
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Text("RPM", modifier = Modifier.weight(1f), style = headerStyle)
+                        Text("PFI%", modifier = Modifier.weight(1f), style = headerStyle)
+                        Text("Port ms", modifier = Modifier.weight(1f), style = headerStyle)
+                        Text("DI ms", modifier = Modifier.weight(1f), style = headerStyle)
+                        Text("Total ms", modifier = Modifier.weight(1f), style = headerStyle)
+                        Text("Status", modifier = Modifier.weight(1.2f), style = headerStyle)
+                    }
+                    HorizontalDivider()
+                    // Data rows
+                    for (row in sweepRows) {
+                        val rowColor = when (row.status) {
+                            InjectorStatus.OK -> Color(0xFF4CAF50.toInt())
+                            InjectorStatus.DI_NEAR_LIMIT -> Color(0xFFFFD600.toInt())
+                            InjectorStatus.DI_OVER_LIMIT -> Color(0xFFF44336.toInt())
+                            InjectorStatus.PFI_NEAR_LIMIT -> Color(0xFFFF9800.toInt())
+                        }
+                        val cellStyle = MaterialTheme.typography.bodySmall.copy(
+                            fontFamily = FontFamily.Monospace
+                        )
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text("%.0f".format(row.rpm), modifier = Modifier.weight(1f), style = cellStyle)
+                            Text("%.1f".format(row.pfiSharePercent), modifier = Modifier.weight(1f), style = cellStyle)
+                            Text("%.3f".format(row.portOnTimeMs), modifier = Modifier.weight(1f), style = cellStyle)
+                            Text("%.3f".format(row.directOnTimeMs), modifier = Modifier.weight(1f), style = cellStyle, color = if (row.status == InjectorStatus.DI_OVER_LIMIT || row.status == InjectorStatus.DI_NEAR_LIMIT) rowColor else Color.Unspecified)
+                            Text("%.3f".format(row.totalFuelMs), modifier = Modifier.weight(1f), style = cellStyle)
+                            Text(
+                                when (row.status) {
+                                    InjectorStatus.OK -> "OK"
+                                    InjectorStatus.DI_NEAR_LIMIT -> "DI Near"
+                                    InjectorStatus.DI_OVER_LIMIT -> "DI Over"
+                                    InjectorStatus.PFI_NEAR_LIMIT -> "PFI Near"
+                                },
+                                modifier = Modifier.weight(1.2f),
+                                style = cellStyle.copy(fontWeight = FontWeight.Bold),
+                                color = rowColor
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Reverse PFI Share Calculator ────────────────────────────────
+        Surface(
+            shape = MaterialTheme.shapes.medium,
+            tonalElevation = 1.dp,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("Reverse PFI Share Calculator", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
+                    FilterChip(
+                        selected = showReverseCalc,
+                        onClick = { showReverseCalc = !showReverseCalc },
+                        label = { Text(if (showReverseCalc) "Hide" else "Show") }
+                    )
+                }
+
+                AnimatedVisibility(visible = showReverseCalc) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            "Given a target max DI on-time, computes the PFI share needed at each RPM × load " +
+                                "point to stay within that limit. Enter KRKTE values above first.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                value = reverseTargetDi,
+                                onValueChange = { reverseTargetDi = it },
+                                label = { Text("Target DI On-Time (ms)") },
+                                modifier = Modifier.width(200.dp),
+                                singleLine = true
+                            )
+                            Button(onClick = {
+                                errorMessage = null
+                                try {
+                                    val pKrkte = portKrkte.toDouble()
+                                    val dKrkte = diKrkte.toDouble()
+                                    val targetDi = reverseTargetDi.toDouble()
+                                    require(pKrkte > 0) { "KRKTE_PFI must be positive" }
+                                    require(dKrkte > 0) { "KRKTE_GDI must be positive" }
+                                    require(targetDi > 0) { "Target DI on-time must be positive" }
+
+                                    reverseResult = PfiShareCalculator.reverseCalculate(
+                                        targetDiOnTimeMs = targetDi,
+                                        rpmBins = PfiShareCalculator.DEFAULT_2D_RPM_BINS,
+                                        loadBins = PfiShareCalculator.DEFAULT_2D_LOAD_BINS,
+                                        portKrkte = pKrkte,
+                                        directKrkte = dKrkte
+                                    )
+                                } catch (e: Exception) {
+                                    errorMessage = e.message ?: "Reverse calculation error"
+                                }
+                            }) {
+                                Text("Calculate")
+                            }
+                        }
+
+                        reverseResult?.let { result ->
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                "Suggested PFI Share (%) — RPM × Load",
+                                style = MaterialTheme.typography.titleSmall
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                "Green = OK, Yellow = DI near limit, Red = DI over limit, Orange = PFI near limit.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            val map3d = Map3d(
+                                result.loadAxis.map { it }.toTypedArray(),
+                                result.rpmAxis.map { it }.toTypedArray(),
+                                result.suggestedPfiShare.map { row -> row.map { it }.toTypedArray() }.toTypedArray()
+                            )
+                            MapTable(
+                                map = map3d,
+                                editable = false,
+                                cellColorProvider = { r, c ->
+                                    when (result.constraintFlags[r][c]) {
+                                        InjectorStatus.OK -> Color(0x2000C853.toInt())
+                                        InjectorStatus.DI_NEAR_LIMIT -> Color(0x40FFD600.toInt())
+                                        InjectorStatus.DI_OVER_LIMIT -> Color(0x40F44336.toInt())
+                                        InjectorStatus.PFI_NEAR_LIMIT -> Color(0x40FF9800.toInt())
+                                    }
+                                }
+                            )
                         }
                     }
                 }
