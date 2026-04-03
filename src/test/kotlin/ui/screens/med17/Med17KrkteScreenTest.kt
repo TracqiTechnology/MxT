@@ -54,7 +54,7 @@ class Med17KrkteScreenTest : Med17ScreenTestBase() {
             ui.screens.krkte.KrkteScreen()
         }
 
-        onNodeWithText("Write KRKTE").assertIsEnabled()
+        onNodeWithText("Write KRKATE").assertIsEnabled()
     }
 
     @Test
@@ -65,9 +65,9 @@ class Med17KrkteScreenTest : Med17ScreenTestBase() {
 
         val krktePair = KrktePfiPreferences.getSelectedMap()!!
 
-        // Click Write KRKTE button
-        onNodeWithText("Write KRKTE").performClick()
-        onNodeWithText("Are you sure you want to write KRKTE to the binary?").assertExists()
+        // Click Write KRKATE button
+        onNodeWithText("Write KRKATE").performClick()
+        onNodeWithText("Are you sure you want to write KRKATE to the binary?").assertExists()
         onNodeWithText("Yes").performClick()
         waitForIdle()
 
@@ -90,7 +90,7 @@ class Med17KrkteScreenTest : Med17ScreenTestBase() {
         onNodeWithText("Not configured").assertExists()
 
         // Write button should be disabled
-        onNodeWithText("Write KRKTE").assertIsNotEnabled()
+        onNodeWithText("Write KRKATE").assertIsNotEnabled()
     }
 
     @Test
@@ -99,8 +99,8 @@ class Med17KrkteScreenTest : Med17ScreenTestBase() {
             ui.screens.krkte.KrkteScreen()
         }
 
-        // Result card should show the calculated KRKTE
-        onNodeWithText("Calculated KRKTE").assertExists()
+        // Result card should show the calculated KRKATE on MED17
+        onNodeWithText("Calculated KRKATE").assertExists()
         onNodeWithText("ms/%").assertExists()
 
         // Engine parameters should show profile values

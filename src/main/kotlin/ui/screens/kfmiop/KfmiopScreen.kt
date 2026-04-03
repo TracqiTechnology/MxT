@@ -38,6 +38,29 @@ import ui.theme.Primary
 
 private enum class WriteStatus { Idle, Success, Error }
 
+private enum class BoostUnit(val label: String) {
+    PSI("PSI"),
+    MBAR("mbar abs");
+
+    fun convert(psiValue: Double): Double = when (this) {
+        PSI -> psiValue
+        MBAR -> psiValue / 0.0145038 + 1013.0
+    }
+
+    fun convertMap(map: Map3d): Map3d {
+        if (this == PSI) return map
+        val newZ = Array(map.zAxis.size) { r ->
+            Array(map.zAxis[r].size) { c -> convert(map.zAxis[r][c]) }
+        }
+        return Map3d(map.xAxis, map.yAxis, newZ)
+    }
+
+    fun convertPoints(points: List<Pair<Double, Double>>): List<Pair<Double, Double>> {
+        if (this == PSI) return points
+        return points.map { (rpm, psi) -> Pair(rpm, convert(psi)) }
+    }
+}
+
 private fun findMap(
     mapList: List<Pair<TableDefinition, Map3d>>,
     pref: MapPreference
@@ -129,6 +152,14 @@ fun KfmiopScreen() {
     LaunchedEffect(editedYAxis) {
         if (!isScalar && editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty()) {
             SharedAxisPreferences.setKfmiopEditedYAxis(editedYAxis[0])
+        }
+    }
+
+    // Emit output X-axis (load) for KFZW/KFZWOP sync
+    LaunchedEffect(finalOutputKfmiop) {
+        val xAxis = finalOutputKfmiop?.xAxis
+        if (!isScalar && xAxis != null && xAxis.isNotEmpty()) {
+            SharedAxisPreferences.setKfmiopEditedXAxis(xAxis)
         }
     }
 
@@ -685,6 +716,8 @@ private fun ComparisonArea(
     currentPeakBoost: List<Pair<Double, Double>>,
     targetPeakBoost: List<Pair<Double, Double>>
 ) {
+    var boostUnit by remember { mutableStateOf(BoostUnit.PSI) }
+
     Column(modifier = modifier) {
         PrimaryTabRow(selectedTabIndex = selectedTab) {
             Tab(
@@ -718,18 +751,21 @@ private fun ComparisonArea(
                 )
             }
             1 -> {
+                BoostUnitToggle(boostUnit) { boostUnit = it }
                 SideBySideTables(
-                    inputLabel = "Boost (Current)",
-                    inputMap = kfmiopResult?.inputBoost,
-                    outputLabel = "Boost (Rescaled)",
-                    outputMap = kfmiopResult?.outputBoost,
+                    inputLabel = "Boost (Current) — ${boostUnit.label}",
+                    inputMap = kfmiopResult?.inputBoost?.let { boostUnit.convertMap(it) },
+                    outputLabel = "Boost (Rescaled) — ${boostUnit.label}",
+                    outputMap = kfmiopResult?.outputBoost?.let { boostUnit.convertMap(it) },
                     modifier = Modifier.fillMaxWidth().weight(1f)
                 )
             }
             2 -> {
+                BoostUnitToggle(boostUnit) { boostUnit = it }
                 BoostComparisonChart(
-                    currentPeakBoost = currentPeakBoost,
-                    targetPeakBoost = targetPeakBoost,
+                    currentPeakBoost = boostUnit.convertPoints(currentPeakBoost),
+                    targetPeakBoost = boostUnit.convertPoints(targetPeakBoost),
+                    yAxisLabel = boostUnit.label,
                     modifier = Modifier.fillMaxWidth().weight(1f).padding(8.dp)
                 )
             }
@@ -818,9 +854,32 @@ private fun SideBySideTables(
 }
 
 @Composable
+private fun BoostUnitToggle(selected: BoostUnit, onSelected: (BoostUnit) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("Unit:", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(end = 8.dp))
+        SingleChoiceSegmentedButtonRow {
+            BoostUnit.entries.forEachIndexed { index, unit ->
+                SegmentedButton(
+                    selected = selected == unit,
+                    onClick = { onSelected(unit) },
+                    shape = SegmentedButtonDefaults.itemShape(index = index, count = BoostUnit.entries.size)
+                ) {
+                    Text(unit.label, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun BoostComparisonChart(
     currentPeakBoost: List<Pair<Double, Double>>,
     targetPeakBoost: List<Pair<Double, Double>>,
+    yAxisLabel: String = "PSI",
     modifier: Modifier = Modifier
 ) {
     Box(modifier = modifier) {
@@ -839,7 +898,7 @@ private fun BoostComparisonChart(
             ),
             title = "Peak Boost Comparison",
             xAxisLabel = "RPM",
-            yAxisLabel = "PSI"
+            yAxisLabel = yAxisLabel
         )
     }
 }

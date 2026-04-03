@@ -15,6 +15,7 @@ import data.parser.bin.BinParser
 import data.parser.xdf.TableDefinition
 import data.parser.xdf.XdfParser
 import data.preferences.MapPreference
+import data.preferences.SharedAxisPreferences
 import data.preferences.bin.BinFilePreferences
 import data.preferences.kfmiop.KfmiopPreferences
 import data.preferences.kfzw.KfzwPreferences
@@ -565,16 +566,28 @@ private fun KfzwSingleMapScreen(
         )
     }
 
+    // Editable Y-axis (RPM breakpoints)
+    var editedYAxis by remember(inputKfzw) {
+        mutableStateOf(
+            if (inputKfzw != null && inputKfzw.yAxis.isNotEmpty()) arrayOf(inputKfzw.yAxis.copyOf())
+            else arrayOf(emptyArray<Double>())
+        )
+    }
+
+    // Collect KFMIOP axis edits for sync banners
+    val kfmiopSyncYAxis by SharedAxisPreferences.kfmiopEditedYAxis.collectAsState(initial = null)
+    val kfmiopSyncXAxis by SharedAxisPreferences.kfmiopEditedXAxis.collectAsState(initial = null)
+
     // Editable input map
     var editedInputMap by remember(inputKfzw) {
         mutableStateOf(inputKfzw?.let { Map3d(it) })
     }
 
     // Calculate the rescaled KFZW output — different path for scalar vs 2D KFMIOP
-    val outputKfzw = remember(editedInputMap, editedXAxis, kfmiopIsScalar, targetMaxLoad) {
+    val rescaleResult = remember(editedInputMap, editedXAxis, editedYAxis, kfmiopIsScalar, targetMaxLoad) {
         val input = editedInputMap ?: return@remember null
 
-        if (kfmiopIsScalar) {
+        val xRescaledMap = if (kfmiopIsScalar) {
             val newMax = targetMaxLoad.toDoubleOrNull() ?: kfmiopScalarValue
             computeRescaledOutput(input, newMax)
         } else {
@@ -585,8 +598,27 @@ private fun KfzwSingleMapScreen(
                 val newZAxis = Kfzw.generateKfzw(input.xAxis, input.zAxis, rescaledXAxis)
                 Map3d(rescaledXAxis, input.yAxis, newZAxis)
             } else null
+        } ?: return@remember null
+
+        // Y-axis rescaling
+        val hasYAxisEdit = editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty() &&
+            inputKfzw != null && !editedYAxis[0].contentEquals(inputKfzw.yAxis)
+        if (hasYAxisEdit) {
+            try {
+                AxisRescaler.rescaleMap(xRescaledMap, newYAxis = editedYAxis[0])
+            } catch (_: IllegalArgumentException) { null }
+        } else {
+            AxisRescaler.RescaleResult(
+                rescaledMap = xRescaledMap,
+                extrapolatedCells = Array(xRescaledMap.yAxis.size) { BooleanArray(xRescaledMap.xAxis.size) },
+                extrapolatedCount = 0,
+                exactMatchCount = xRescaledMap.xAxis.size * xRescaledMap.yAxis.size,
+                totalCells = xRescaledMap.xAxis.size * xRescaledMap.yAxis.size
+            )
         }
     }
+
+    val outputKfzw = rescaleResult?.rescaledMap
 
     // Write prerequisites
     val binFile by BinFilePreferences.file.collectAsState()
@@ -697,7 +729,15 @@ private fun KfzwSingleMapScreen(
                 onSelectKfzw = { onShowKfzwPicker(true) },
                 onSelectKfmiop = { onShowKfmiopPicker(true) },
                 editedXAxis = editedXAxis,
-                onXAxisChanged = { newData -> editedXAxis = newData }
+                onXAxisChanged = { newData -> editedXAxis = newData },
+                editedYAxis = editedYAxis,
+                onYAxisChanged = { newData -> editedYAxis = newData },
+                extrapolatedCount = rescaleResult?.extrapolatedCount ?: 0,
+                totalCells = rescaleResult?.totalCells ?: 0,
+                syncYAxis = kfmiopSyncYAxis,
+                onApplySyncYAxis = { syncAxis -> editedYAxis = arrayOf(syncAxis) },
+                syncXAxis = kfmiopSyncXAxis,
+                onApplySyncXAxis = { syncAxis -> editedXAxis = arrayOf(syncAxis) }
             )
         }
 
@@ -870,7 +910,11 @@ private fun ConfigurationCard(
     editedYAxis: Array<Array<Double>> = arrayOf(emptyArray()),
     onYAxisChanged: (Array<Array<Double>>) -> Unit = {},
     extrapolatedCount: Int = 0,
-    totalCells: Int = 0
+    totalCells: Int = 0,
+    syncYAxis: Array<Double>? = null,
+    onApplySyncYAxis: (Array<Double>) -> Unit = {},
+    syncXAxis: Array<Double>? = null,
+    onApplySyncXAxis: (Array<Double>) -> Unit = {}
 ) {
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -977,6 +1021,59 @@ private fun ConfigurationCard(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onTertiaryContainer
                         )
+                    }
+                }
+            }
+            // Sync banner from KFMIOP — RPM axis
+            if (syncYAxis != null && syncYAxis.isNotEmpty() &&
+                editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty() &&
+                !syncYAxis.contentEquals(editedYAxis[0])) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Text(
+                            text = "KFMIOP RPM axis was edited.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { onApplySyncYAxis(syncYAxis) }) {
+                            Text("Apply to KFZW")
+                        }
+                    }
+                }
+            }
+
+            // Sync banner from KFMIOP — Load axis
+            if (syncXAxis != null && syncXAxis.isNotEmpty() &&
+                editedXAxis.isNotEmpty() && editedXAxis[0].isNotEmpty() &&
+                !syncXAxis.contentEquals(editedXAxis[0])) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Text(
+                            text = "KFMIOP load axis was recalculated.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { onApplySyncXAxis(syncXAxis) }) {
+                            Text("Apply to KFZW")
+                        }
                     }
                 }
             }

@@ -14,6 +14,7 @@ import data.parser.bin.BinParser
 import data.parser.xdf.TableDefinition
 import data.parser.xdf.XdfParser
 import data.preferences.MapPreference
+import data.preferences.SharedAxisPreferences
 import data.preferences.bin.BinFilePreferences
 import data.preferences.kfzwop.KfzwopPreferences
 import data.writer.BinWriter
@@ -70,6 +71,10 @@ fun KfzwopScreen() {
             else arrayOf(emptyArray<Double>())
         )
     }
+
+    // Collect KFMIOP axis edits for sync banners
+    val kfmiopSyncYAxis by SharedAxisPreferences.kfmiopEditedYAxis.collectAsState(initial = null)
+    val kfmiopSyncXAxis by SharedAxisPreferences.kfmiopEditedXAxis.collectAsState(initial = null)
 
     // Editable input map
     var editedInputMap by remember(inputKfzwop) {
@@ -191,7 +196,11 @@ fun KfzwopScreen() {
             editedYAxis = editedYAxis,
             onYAxisChanged = { newData -> editedYAxis = newData },
             extrapolatedCount = rescaleResult?.extrapolatedCount ?: 0,
-            totalCells = rescaleResult?.totalCells ?: 0
+            totalCells = rescaleResult?.totalCells ?: 0,
+            syncYAxis = kfmiopSyncYAxis,
+            onApplySyncYAxis = { syncAxis -> editedYAxis = arrayOf(syncAxis) },
+            syncXAxis = kfmiopSyncXAxis,
+            onApplySyncXAxis = { syncAxis -> editedXAxis = arrayOf(syncAxis) }
         )
 
         ComparisonArea(
@@ -225,7 +234,11 @@ private fun ConfigurationCard(
     editedYAxis: Array<Array<Double>>,
     onYAxisChanged: (Array<Array<Double>>) -> Unit,
     extrapolatedCount: Int,
-    totalCells: Int
+    totalCells: Int,
+    syncYAxis: Array<Double>? = null,
+    onApplySyncYAxis: (Array<Double>) -> Unit = {},
+    syncXAxis: Array<Double>? = null,
+    onApplySyncXAxis: (Array<Double>) -> Unit = {}
 ) {
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -324,6 +337,59 @@ private fun ConfigurationCard(
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onTertiaryContainer
                         )
+                    }
+                }
+            }
+            // Sync banner from KFMIOP — RPM axis
+            if (syncYAxis != null && syncYAxis.isNotEmpty() &&
+                editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty() &&
+                !syncYAxis.contentEquals(editedYAxis[0])) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Text(
+                            text = "KFMIOP RPM axis was edited.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { onApplySyncYAxis(syncYAxis) }) {
+                            Text("Apply to KFZWOP")
+                        }
+                    }
+                }
+            }
+
+            // Sync banner from KFMIOP — Load axis
+            if (syncXAxis != null && syncXAxis.isNotEmpty() &&
+                editedXAxis.isNotEmpty() && editedXAxis[0].isNotEmpty() &&
+                !syncXAxis.contentEquals(editedXAxis[0])) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Text(
+                            text = "KFMIOP load axis was recalculated.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { onApplySyncXAxis(syncXAxis) }) {
+                            Text("Apply to KFZWOP")
+                        }
                     }
                 }
             }
