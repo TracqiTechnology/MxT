@@ -1383,6 +1383,10 @@ object OptimizerCalculator {
         v4Warnings.addAll(buildConvergenceGuidance(wotEntries, suggestedMaps))
         v4Warnings.addAll(buildGearCoverageWarnings(wotEntries))
 
+        // Physics-based boost diagnostics
+        v4Warnings.addAll(buildHighRpmOverboostWarnings(wotEntries))
+        v4Warnings.addAll(buildCamChangoverWarnings(wotEntries))
+
         val allWarningsV4 = allWarnings + v4Warnings
 
         return OptimizerResult(
@@ -1592,6 +1596,10 @@ object OptimizerCalculator {
         v4Warnings.addAll(buildConvergenceGuidance(wotEntries, suggestedMaps))
         v4Warnings.addAll(buildGearCoverageWarnings(wotEntries))
 
+        // Physics-based boost diagnostics
+        v4Warnings.addAll(buildHighRpmOverboostWarnings(wotEntries))
+        v4Warnings.addAll(buildCamChangoverWarnings(wotEntries))
+
         val allWarnings = interventionWarnings + v4Warnings
 
         // ── MED17 Simplified Prediction (boost-only) ────────────────
@@ -1731,6 +1739,130 @@ object OptimizerCalculator {
                 "Mean: ${String.format("%.3f", mean)}, range: ${String.format("%.3f", fupsrlsValues.min())}–${String.format("%.3f", fupsrlsValues.max())}, " +
                 "CV: ${String.format("%.1f", cv * 100)}%. Allow more adaptation drives before tuning.")
         }
+        return warnings
+    }
+
+    // ── Physics-based boost diagnostics ────────────────────────────────
+
+    /**
+     * Detect high-RPM overboost: when actual boost consistently exceeds requested at
+     * high RPM, the turbos are outrunning the wastegate. The PID is commanding the
+     * wastegate open but the turbo's exhaust energy at high RPM produces more boost
+     * than the wastegate can bleed off.
+     *
+     * This is a universal turbo physics issue (not vehicle-specific) caused by the
+     * exponential relationship between exhaust enthalpy and RPM.
+     *
+     * FR reference (me7-raw.txt): KFDLULS — Delta pressure for overboost protection.
+     */
+    fun buildHighRpmOverboostWarnings(wotEntries: List<WotLogEntry>): List<String> {
+        if (wotEntries.size < 20) return emptyList()
+
+        val maxRpm = wotEntries.maxOf { it.rpm }
+        val highRpmThreshold = maxRpm * 0.8
+
+        val highRpmEntries = wotEntries.filter { it.rpm >= highRpmThreshold }
+        if (highRpmEntries.size < 10) return emptyList()
+
+        // Overboost = actual > requested (negative error in our convention: requested - actual)
+        val overboostEntries = highRpmEntries.filter { it.actualMap > it.requestedMap + 30 }
+        val overboostPct = overboostEntries.size.toDouble() / highRpmEntries.size * 100
+
+        if (overboostPct < 30) return emptyList()
+
+        val avgOverboost = overboostEntries.map { it.actualMap - it.requestedMap }.average()
+        val avgWgdc = overboostEntries.map { it.wgdc }.average()
+
+        val warnings = mutableListOf<String>()
+
+        // Check if error is getting worse with RPM (trending)
+        val rpmBins = highRpmEntries.groupBy { (it.rpm / 200).toInt() * 200 }
+            .filter { it.value.size >= 3 }
+            .toSortedMap()
+
+        val binErrors = rpmBins.map { (rpm, entries) ->
+            rpm.toDouble() to entries.map { it.actualMap - it.requestedMap }.average()
+        }
+
+        val isTrending = binErrors.size >= 3 &&
+            binErrors.last().second > binErrors.first().second + 50
+
+        if (isTrending) {
+            warnings.add(
+                "WARNING: High-RPM Overboost: ${String.format("%.0f", overboostPct)}% of samples above " +
+                    "${String.format("%.0f", highRpmThreshold)} RPM show overboosting by avg " +
+                    "${String.format("%.0f", avgOverboost)} mbar (avg WGDC: ${String.format("%.0f", avgWgdc)}%). " +
+                    "Error increases with RPM — turbos may be outrunning the wastegate. " +
+                    "Consider tapering LDRXN above ${String.format("%.0f", highRpmThreshold)} RPM or " +
+                    "reviewing KFLDRL high-RPM columns to reduce base duty cycle."
+            )
+        } else {
+            warnings.add(
+                "INFO: High-RPM Overboost: ${String.format("%.0f", overboostPct)}% of samples above " +
+                    "${String.format("%.0f", highRpmThreshold)} RPM show overboosting by avg " +
+                    "${String.format("%.0f", avgOverboost)} mbar. " +
+                    "Review KFLDRL high-RPM columns and KFDLULS overboost protection threshold."
+            )
+        }
+
+        return warnings
+    }
+
+    /**
+     * Detect VVT cam changeover notch: a narrow RPM band where boost error abruptly
+     * changes sign, caused by KFPBRK/KFNW cam position changes altering the
+     * combustion chamber pressure correction factor.
+     *
+     * FR reference (me7-raw.txt): "KFPBRK — Correction factor for combustion chamber
+     * pressure", "KFNW — cam changeover RPM". The cam changeover modifies the
+     * pressure→load conversion, causing a transient mismatch in the PID's boost
+     * request that appears as a notch in the boost curve.
+     *
+     * This is universal to any ME7 ECU with variable valve timing.
+     */
+    fun buildCamChangoverWarnings(wotEntries: List<WotLogEntry>): List<String> {
+        if (wotEntries.size < 30) return emptyList()
+
+        // Group by 200 RPM bins and compute mean signed boost error per bin
+        val rpmBins = wotEntries
+            .filter { it.rpm in 2000.0..5500.0 }
+            .groupBy { (it.rpm / 200).toInt() * 200 }
+            .filter { it.value.size >= 5 }
+            .toSortedMap()
+
+        if (rpmBins.size < 5) return emptyList()
+
+        val binErrors = rpmBins.map { (rpm, entries) ->
+            rpm to entries.map { it.requestedMap - it.actualMap }.average()
+        }
+
+        // Look for sign changes with large magnitude swing in a narrow RPM range
+        val warnings = mutableListOf<String>()
+
+        for (i in 1 until binErrors.size - 1) {
+            val prev = binErrors[i - 1]
+            val curr = binErrors[i]
+            val next = binErrors[i + 1]
+
+            // Notch: error dips negative (overboost) then recovers, or spikes positive then recovers
+            val signChange = (prev.second > 0 && curr.second < -30 && next.second > -20) ||
+                (prev.second < 0 && curr.second > 30 && next.second < 20)
+            val magnitudeSwing = abs(curr.second - prev.second) > 60
+
+            if (signChange && magnitudeSwing) {
+                val notchRpm = curr.first
+                warnings.add(
+                    "INFO: VVT Cam Changeover Notch: Boost error sign flip at ~${notchRpm} RPM " +
+                        "(${String.format("%+.0f", prev.second)} → ${String.format("%+.0f", curr.second)} → " +
+                        "${String.format("%+.0f", next.second)} mbar). " +
+                        "This is likely caused by the KFPBRK/KFNW cam position change altering the " +
+                        "pressure→load conversion. Consider moving the cam changeover RPM (KFNW/KFNWWL) " +
+                        "above this region, or using KFLDHBN to limit boost request instead of LDRXN."
+                )
+                break
+            }
+        }
+
         return warnings
     }
 }
