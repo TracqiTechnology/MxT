@@ -2,6 +2,7 @@ package domain.model.optimizer
 
 import data.contract.Me7LogFileContract
 import domain.math.Index
+import domain.math.MonotoneCubicInterpolator
 import domain.math.map.Map3d
 import domain.model.simulator.Me7Simulator
 import domain.model.simulator.MechanicalLimitDetector
@@ -176,6 +177,7 @@ object OptimizerCalculator {
         }
 
         for (rpmIdx in rpmAxis.indices) {
+            // Compute raw averages for bins with data
             for (pIdx in pressureAxis.indices) {
                 if (sampleCounts[rpmIdx][pIdx] > 0) {
                     suggested[rpmIdx][pIdx] = wgdcSum[rpmIdx][pIdx] / sampleCounts[rpmIdx][pIdx]
@@ -183,7 +185,21 @@ object OptimizerCalculator {
                     suggested[rpmIdx][pIdx] = kfldrlMap.zAxis[rpmIdx][pIdx]
                 }
             }
-            // Enforce monotonicity
+
+            // Apply monotone cubic smoothing across measured bins
+            val measuredIndices = pressureAxis.indices.filter { sampleCounts[rpmIdx][it] > 0 }
+            if (measuredIndices.size >= 3) {
+                val knownX = measuredIndices.map { pressureAxis[it] }.toDoubleArray()
+                val knownY = measuredIndices.map { suggested[rpmIdx][it] }.toDoubleArray()
+                for (pIdx in pressureAxis.indices) {
+                    if (sampleCounts[rpmIdx][pIdx] > 0) {
+                        // Re-evaluate measured bins through smooth curve
+                        suggested[rpmIdx][pIdx] = MonotoneCubicInterpolator.interpolate(knownX, knownY, pressureAxis[pIdx])
+                    }
+                }
+            }
+
+            // Enforce monotonicity for unmeasured bins
             for (pIdx in 1 until pressureAxis.size) {
                 if (suggested[rpmIdx][pIdx] < suggested[rpmIdx][pIdx - 1] && sampleCounts[rpmIdx][pIdx] == 0) {
                     suggested[rpmIdx][pIdx] = suggested[rpmIdx][pIdx - 1]

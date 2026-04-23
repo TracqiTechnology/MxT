@@ -106,15 +106,21 @@ object FuelTrimAnalyzer {
         val trimCounts = Array(rpmBins.size) { IntArray(loadBins.size) }
 
         for (i in 0 until sampleCount) {
-            val rpmIdx = nearestBinIndex(rpm[i], rpmBins)
-            val loadIdx = nearestBinIndex(load[i], loadBins)
+            val rpmWeights = interpolatedBinWeights(rpm[i], rpmBins)
+            val loadWeights = interpolatedBinWeights(load[i], loadBins)
 
             // MED17 trims are multiplicative around 1.0 → convert to %
             val stftPct = stft?.let { (it[i] - 1.0) * 100.0 } ?: 0.0
             val ltftPct = ltft?.let { (it[i] - 1.0) * 100.0 } ?: 0.0
+            val trimPct = stftPct + ltftPct
 
-            trimSums[rpmIdx][loadIdx] += stftPct + ltftPct
-            trimCounts[rpmIdx][loadIdx]++
+            for ((rpmIdx, rpmW) in rpmWeights) {
+                for ((loadIdx, loadW) in loadWeights) {
+                    val w = rpmW * loadW
+                    trimSums[rpmIdx][loadIdx] += trimPct * w
+                    trimCounts[rpmIdx][loadIdx]++
+                }
+            }
         }
 
         // Compute averages and generate corrections
@@ -224,16 +230,21 @@ object FuelTrimAnalyzer {
             // Lambda request filter: must be near stoichiometric
             if (lamsbgW != null && abs(lamsbgW[i] - 1.0) >= 0.05) { filtered++; continue }
 
-            val rpmIdx = nearestBinIndex(rpm[i], rpmBins)
-            val loadIdx = nearestBinIndex(load[i], loadBins)
+            val rpmWeights = interpolatedBinWeights(rpm[i], rpmBins)
+            val loadWeights = interpolatedBinWeights(load[i], loadBins)
 
             val stftPct = stft?.let { (it[i] - 1.0) * 100.0 } ?: 0.0
             val ltftPct = ltft?.let { (it[i] - 1.0) * 100.0 } ?: 0.0
             val trimPct = stftPct + ltftPct
 
-            sums[rpmIdx][loadIdx] += trimPct
-            sumSq[rpmIdx][loadIdx] += trimPct * trimPct
-            counts[rpmIdx][loadIdx]++
+            for ((rpmIdx, rpmW) in rpmWeights) {
+                for ((loadIdx, loadW) in loadWeights) {
+                    val w = rpmW * loadW
+                    sums[rpmIdx][loadIdx] += trimPct * w
+                    sumSq[rpmIdx][loadIdx] += trimPct * trimPct * w
+                    counts[rpmIdx][loadIdx]++
+                }
+            }
         }
 
         // Build per-cell diagnostics
@@ -371,6 +382,43 @@ object FuelTrimAnalyzer {
             }
         }
         return bestIdx
+    }
+
+    /**
+     * Compute interpolated bin weights for a value.
+     *
+     * Instead of snapping to the single nearest bin, distributes the sample
+     * between the two adjacent bins using linear basis weighting.  This produces
+     * smoother correction surfaces, especially on coarse grids.
+     *
+     * Returns a list of (index, weight) pairs. Weights sum to 1.0.
+     * At the edges or when the value exactly matches a bin, a single pair is returned.
+     */
+    internal fun interpolatedBinWeights(value: Double, bins: DoubleArray): List<Pair<Int, Double>> {
+        if (bins.size <= 1) return listOf(0 to 1.0)
+
+        // Clamp to axis boundaries
+        if (value <= bins.first()) return listOf(0 to 1.0)
+        if (value >= bins.last()) return listOf(bins.size - 1 to 1.0)
+
+        // Find the interval [lo, hi] containing value
+        var lo = 0
+        for (i in 1 until bins.size) {
+            if (bins[i] >= value) { lo = i - 1; break }
+        }
+        val hi = lo + 1
+
+        val span = bins[hi] - bins[lo]
+        if (span <= 0.0) return listOf(lo to 1.0)
+
+        val t = (value - bins[lo]) / span
+        return if (t < 1e-9) {
+            listOf(lo to 1.0)
+        } else if (t > 1.0 - 1e-9) {
+            listOf(hi to 1.0)
+        } else {
+            listOf(lo to (1.0 - t), hi to t)
+        }
     }
 
     private fun emptyResult(

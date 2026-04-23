@@ -483,11 +483,16 @@ object PfiShareCalculator {
             val pfi = pfiColumn[i]
             if (rpm <= 0.0 || load <= 0.0) continue
 
-            val rpmIdx = nearestBinIndex(rpm, rpmBins)
-            val loadIdx = nearestBinIndex(load, loadBins)
+            val rpmWeights = interpolatedBinWeights(rpm, rpmBins)
+            val loadWeights = interpolatedBinWeights(load, loadBins)
 
-            sums[rpmIdx][loadIdx] += pfi
-            counts[rpmIdx][loadIdx]++
+            for ((rpmIdx, rpmW) in rpmWeights) {
+                for ((loadIdx, loadW) in loadWeights) {
+                    val w = rpmW * loadW
+                    sums[rpmIdx][loadIdx] += pfi * w
+                    counts[rpmIdx][loadIdx]++
+                }
+            }
         }
 
         val pfiPercent2d = Array(rpmBins.size) { r ->
@@ -528,6 +533,39 @@ object PfiShareCalculator {
             }
         }
         return best
+    }
+
+    /**
+     * Compute interpolated bin weights for a value.
+     *
+     * Instead of snapping to the single nearest bin, distributes the sample
+     * between the two adjacent bins using linear basis weighting.
+     *
+     * Returns a list of (index, weight) pairs. Weights sum to 1.0.
+     */
+    internal fun interpolatedBinWeights(value: Double, bins: DoubleArray): List<Pair<Int, Double>> {
+        if (bins.size <= 1) return listOf(0 to 1.0)
+
+        if (value <= bins.first()) return listOf(0 to 1.0)
+        if (value >= bins.last()) return listOf(bins.size - 1 to 1.0)
+
+        var lo = 0
+        for (i in 1 until bins.size) {
+            if (bins[i] >= value) { lo = i - 1; break }
+        }
+        val hi = lo + 1
+
+        val span = bins[hi] - bins[lo]
+        if (span <= 0.0) return listOf(lo to 1.0)
+
+        val t = (value - bins[lo]) / span
+        return if (t < 1e-9) {
+            listOf(lo to 1.0)
+        } else if (t > 1.0 - 1e-9) {
+            listOf(hi to 1.0)
+        } else {
+            listOf(lo to (1.0 - t), hi to t)
+        }
     }
 
     /**

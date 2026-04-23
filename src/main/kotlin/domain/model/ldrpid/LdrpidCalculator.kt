@@ -2,7 +2,7 @@ package domain.model.ldrpid
 
 import data.contract.Me7LogFileContract
 import domain.math.Index
-import domain.math.LinearInterpolation
+import domain.math.MonotoneCubicInterpolator
 import domain.math.map.Map3d
 import java.util.Collections
 import kotlin.math.ceil
@@ -124,7 +124,7 @@ object LdrpidCalculator {
         }
 
         // Interpolate empty cells and enforce monotonicity.
-        // Empty cells are filled using physical model: boost scales with duty cycle.
+        // Interior gaps use monotone cubic; edges use physical extrapolation.
         for (rowIdx in nonLinearTable.indices) {
             val row = nonLinearTable[rowIdx]
             val filledIndices = row.indices.filter { count[rowIdx][it] > 0 }
@@ -133,36 +133,51 @@ object LdrpidCalculator {
                 // No data in this RPM row — fill with small ascending placeholders
                 for (i in row.indices) row[i] = 0.1 + i * 0.01
             } else {
-                // Interpolate/extrapolate empty cells
-                for (i in row.indices) {
-                    if (row[i] == 0.0) {
-                        val left = filledIndices.lastOrNull { it < i }
-                        val right = filledIndices.firstOrNull { it > i }
-                        row[i] = when {
-                            left != null && right != null -> {
-                                // Between two data points: linear interpolation
-                                val t = (i - left).toDouble() / (right - left)
-                                row[left] + t * (row[right] - row[left])
-                            }
-                            left != null -> {
-                                // Beyond rightmost data: gentle upward extrapolation
-                                val prevFilled = filledIndices.lastOrNull { it < left }
-                                if (prevFilled != null) {
-                                    val slope = (row[left] - row[prevFilled]) / (left - prevFilled)
-                                    (row[left] + slope * (i - left)).coerceAtLeast(row[left])
-                                } else {
-                                    row[left] * (1.0 + 0.02 * (i - left))
-                                }
-                            }
-                            right != null -> {
-                                // Before leftmost data: scale down proportionally to duty.
-                                // Physically, lower duty → lower boost (wastegate more open).
-                                val dutyHere = dutyAxis[i].coerceAtLeast(1.0)
-                                val dutyThere = dutyAxis[right].coerceAtLeast(1.0)
-                                (row[right] * dutyHere / dutyThere).coerceAtLeast(0.1)
-                            }
-                            else -> 0.1
+                val firstFilled = filledIndices.first()
+                val lastFilled = filledIndices.last()
+
+                // Interior gaps (between first and last known points): monotone cubic if enough data
+                if (filledIndices.size >= 3) {
+                    val knownX = filledIndices.map { it.toDouble() }.toDoubleArray()
+                    val knownY = filledIndices.map { row[it] }.toDoubleArray()
+                    for (i in (firstFilled + 1) until lastFilled) {
+                        if (row[i] == 0.0) {
+                            row[i] = MonotoneCubicInterpolator.interpolate(knownX, knownY, i.toDouble())
                         }
+                    }
+                } else {
+                    // Interior with < 3 points: linear
+                    for (i in (firstFilled + 1) until lastFilled) {
+                        if (row[i] == 0.0) {
+                            val left = filledIndices.lastOrNull { it < i }
+                            val right = filledIndices.firstOrNull { it > i }
+                            if (left != null && right != null) {
+                                val t = (i - left).toDouble() / (right - left)
+                                row[i] = row[left] + t * (row[right] - row[left])
+                            }
+                        }
+                    }
+                }
+
+                // Extrapolation beyond rightmost data: slope-based
+                for (i in (lastFilled + 1) until row.size) {
+                    if (row[i] == 0.0) {
+                        val prevFilled = filledIndices.lastOrNull { it < lastFilled }
+                        row[i] = if (prevFilled != null) {
+                            val slope = (row[lastFilled] - row[prevFilled]) / (lastFilled - prevFilled)
+                            (row[lastFilled] + slope * (i - lastFilled)).coerceAtLeast(row[lastFilled])
+                        } else {
+                            row[lastFilled] * (1.0 + 0.02 * (i - lastFilled))
+                        }
+                    }
+                }
+
+                // Extrapolation before leftmost data: duty-proportional
+                for (i in 0 until firstFilled) {
+                    if (row[i] == 0.0) {
+                        val dutyHere = dutyAxis[i].coerceAtLeast(1.0)
+                        val dutyThere = dutyAxis[firstFilled].coerceAtLeast(1.0)
+                        row[i] = (row[firstFilled] * dutyHere / dutyThere).coerceAtLeast(0.1)
                     }
                 }
             }
@@ -239,31 +254,50 @@ object LdrpidCalculator {
             if (filledIndices.isEmpty()) {
                 for (i in row.indices) row[i] = 0.1 + i * 0.01
             } else {
-                for (i in row.indices) {
-                    if (row[i] == 0.0) {
-                        val left = filledIndices.lastOrNull { it < i }
-                        val right = filledIndices.firstOrNull { it > i }
-                        row[i] = when {
-                            left != null && right != null -> {
-                                val t = (i - left).toDouble() / (right - left)
-                                row[left] + t * (row[right] - row[left])
-                            }
-                            left != null -> {
-                                val prevFilled = filledIndices.lastOrNull { it < left }
-                                if (prevFilled != null) {
-                                    val slope = (row[left] - row[prevFilled]) / (left - prevFilled)
-                                    (row[left] + slope * (i - left)).coerceAtLeast(row[left])
-                                } else {
-                                    row[left] * (1.0 + 0.02 * (i - left))
-                                }
-                            }
-                            right != null -> {
-                                val dutyHere = dutyAxis[i].coerceAtLeast(1.0)
-                                val dutyThere = dutyAxis[right].coerceAtLeast(1.0)
-                                (row[right] * dutyHere / dutyThere).coerceAtLeast(0.1)
-                            }
-                            else -> 0.1
+                val firstFilled = filledIndices.first()
+                val lastFilled = filledIndices.last()
+
+                // Interior gaps: monotone cubic if enough data
+                if (filledIndices.size >= 3) {
+                    val knownX = filledIndices.map { it.toDouble() }.toDoubleArray()
+                    val knownY = filledIndices.map { row[it] }.toDoubleArray()
+                    for (i in (firstFilled + 1) until lastFilled) {
+                        if (row[i] == 0.0) {
+                            row[i] = MonotoneCubicInterpolator.interpolate(knownX, knownY, i.toDouble())
                         }
+                    }
+                } else {
+                    for (i in (firstFilled + 1) until lastFilled) {
+                        if (row[i] == 0.0) {
+                            val left = filledIndices.lastOrNull { it < i }
+                            val right = filledIndices.firstOrNull { it > i }
+                            if (left != null && right != null) {
+                                val t = (i - left).toDouble() / (right - left)
+                                row[i] = row[left] + t * (row[right] - row[left])
+                            }
+                        }
+                    }
+                }
+
+                // Extrapolation beyond rightmost data
+                for (i in (lastFilled + 1) until row.size) {
+                    if (row[i] == 0.0) {
+                        val prevFilled = filledIndices.lastOrNull { it < lastFilled }
+                        row[i] = if (prevFilled != null) {
+                            val slope = (row[lastFilled] - row[prevFilled]) / (lastFilled - prevFilled)
+                            (row[lastFilled] + slope * (i - lastFilled)).coerceAtLeast(row[lastFilled])
+                        } else {
+                            row[lastFilled] * (1.0 + 0.02 * (i - lastFilled))
+                        }
+                    }
+                }
+
+                // Extrapolation before leftmost data
+                for (i in 0 until firstFilled) {
+                    if (row[i] == 0.0) {
+                        val dutyHere = dutyAxis[i].coerceAtLeast(1.0)
+                        val dutyThere = dutyAxis[firstFilled].coerceAtLeast(1.0)
+                        row[i] = (row[firstFilled] * dutyHere / dutyThere).coerceAtLeast(0.1)
                     }
                 }
             }
@@ -305,11 +339,10 @@ object LdrpidCalculator {
         val kfldrl = Array(nonLinearTable.size) { i ->
             // Pair boost→duty and sort by boost so interpolation x-axis is ascending
             val pairs = nonLinearTable[i].zip(dutyAxis).sortedBy { it.first }
-            val sortedBoost = pairs.map { it.first }.toTypedArray()
-            val sortedDuty = pairs.map { it.second }.toTypedArray()
+            val sortedBoost = pairs.map { it.first }.toDoubleArray()
+            val sortedDuty = pairs.map { it.second }.toDoubleArray()
             Array(nonLinearTable[i].size) { j ->
-                val xi = arrayOf(linearTable[i][j])
-                val result = LinearInterpolation.interpolate(sortedBoost, sortedDuty, xi)[0]
+                val result = MonotoneCubicInterpolator.interpolate(sortedBoost, sortedDuty, linearTable[i][j])
                 if (result.isNaN()) 0.0 else result
             }
         }
@@ -342,11 +375,10 @@ object LdrpidCalculator {
         val kfldimx = Array(nonLinearTable.size) { i ->
             // Pair linearBoostMax→duty and sort by boost for correct interpolation
             val pairs = linearBoostMax.zip(dutyAxis).sortedBy { it.first }
-            val sortedBoost = pairs.map { it.first }.toTypedArray()
-            val sortedDuty = pairs.map { it.second }.toTypedArray()
+            val sortedBoost = pairs.map { it.first }.toDoubleArray()
+            val sortedDuty = pairs.map { it.second }.toDoubleArray()
             Array(kfldimxXAxis.size) { j ->
-                val xi = arrayOf(kfldimxXAxis[j])
-                LinearInterpolation.interpolate(sortedBoost, sortedDuty, xi)[0]
+                MonotoneCubicInterpolator.interpolate(sortedBoost, sortedDuty, kfldimxXAxis[j])
             }
         }
 
