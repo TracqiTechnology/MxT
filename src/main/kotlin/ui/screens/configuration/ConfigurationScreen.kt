@@ -786,6 +786,8 @@ private fun LogHeaderRow(header: Me7LogFileContract.Header, onChanged: () -> Uni
         Me7LogFileContract.Header.REQUESTED_LOAD_HEADER -> "Requested engine load column header (ldrxn_w). The ECU's load target — the primary setpoint for the Optimizer calibration loop."
         Me7LogFileContract.Header.ACTUAL_LOAD_HEADER -> "Actual measured engine load column header (rl_w). Compared against LDRXN target to assess calibration accuracy."
         Me7LogFileContract.Header.THROTTLE_MODEL_AIRFLOW_HEADER -> "Throttle model (alpha-n / speed-density) estimated airflow column header (msdk_w). Compared against mshfm_w to assess alpha-n calibration accuracy."
+        Me7LogFileContract.Header.INTAKE_TEMPERATURE_HEADER -> "Intake air temperature column header (tans). Used for IAT-aware boost simulation and KFTARX limit detection."
+        Me7LogFileContract.Header.REQUESTED_PRESSURE_MAX_HEADER -> "Max allowed boost pressure column header (pvdxs_w). Represents the KFLDHBN/BGRLMXS ceiling. Used to differentiate torque vs pressure limiting."
     }
 
     Row(

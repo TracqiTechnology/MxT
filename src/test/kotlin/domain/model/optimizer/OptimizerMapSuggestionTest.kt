@@ -270,7 +270,7 @@ class OptimizerMapSuggestionTest {
         )
 
         val kfldrlDelta = OptimizerCalculator.suggestKfldrlDelta(entries, kfldrlMap)
-        val kfldimxDelta = OptimizerCalculator.suggestKfldimxDelta(kfldrlDelta, kfldimxMap)
+        val kfldimxDelta = OptimizerCalculator.suggestKfldimxDelta(entries, kfldrlDelta, kfldimxMap)
 
         // Cell [1][1]: KFLDRL suggested=50, KFLDIMX should be 50*1.08=54
         assertEquals(50.0 * 1.08, kfldimxDelta.suggested.zAxis[1][1], 0.5,
@@ -288,7 +288,7 @@ class OptimizerMapSuggestionTest {
 
         // No WOT data → KFLDRL suggested all zeros → KFLDIMX should keep originals
         val kfldrlDelta = OptimizerCalculator.suggestKfldrlDelta(emptyList(), kfldrlMap)
-        val kfldimxDelta = OptimizerCalculator.suggestKfldimxDelta(kfldrlDelta, kfldimxMap)
+        val kfldimxDelta = OptimizerCalculator.suggestKfldimxDelta(emptyList(), kfldrlDelta, kfldimxMap)
 
         for (r in kfldimxMap.zAxis.indices) {
             for (c in kfldimxMap.zAxis[r].indices) {
@@ -308,7 +308,7 @@ class OptimizerMapSuggestionTest {
         )
 
         val kfldrlDelta = OptimizerCalculator.suggestKfldrlDelta(entries, kfldrlMap)
-        val kfldimxDelta = OptimizerCalculator.suggestKfldimxDelta(kfldrlDelta, kfldimxMap, overheadPercent = 15.0)
+        val kfldimxDelta = OptimizerCalculator.suggestKfldimxDelta(entries, kfldrlDelta, kfldimxMap, overheadPercent = 15.0)
 
         // 50 * 1.15 = 57.5
         assertEquals(50.0 * 1.15, kfldimxDelta.suggested.zAxis[1][1], 0.5,
@@ -321,7 +321,7 @@ class OptimizerMapSuggestionTest {
         val kfldimxMap = make4x4KfldrlMap()
         val entries = listOf(wotEntry(rpm = 2000.0, targetBoostPsi = 4.0, wgdc = 50.0))
         val kfldrlDelta = OptimizerCalculator.suggestKfldrlDelta(entries, kfldrlMap)
-        val kfldimxDelta = OptimizerCalculator.suggestKfldimxDelta(kfldrlDelta, kfldimxMap)
+        val kfldimxDelta = OptimizerCalculator.suggestKfldimxDelta(entries, kfldrlDelta, kfldimxMap)
         assertEquals("KFLDIMX", kfldimxDelta.mapName)
     }
 
@@ -336,7 +336,7 @@ class OptimizerMapSuggestionTest {
         )
 
         val kfldrlDelta = OptimizerCalculator.suggestKfldrlDelta(entries, kfldrlMap)
-        val kfldimxDelta = OptimizerCalculator.suggestKfldimxDelta(kfldrlDelta, kfldimxMap)
+        val kfldimxDelta = OptimizerCalculator.suggestKfldimxDelta(entries, kfldrlDelta, kfldimxMap)
 
         assertEquals(kfldrlDelta.sampleCounts[1][1], kfldimxDelta.sampleCounts[1][1],
             "KFLDIMX sample counts should match KFLDRL delta sample counts")

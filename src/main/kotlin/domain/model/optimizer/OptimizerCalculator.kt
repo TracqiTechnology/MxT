@@ -37,10 +37,23 @@ object OptimizerCalculator {
         val actualMap: Double,          // pvdks_w (mbar absolute)
         val barometricPressure: Double, // pus_w (mbar)
         val wgdc: Double,               // ldtvm (%)
-        val throttleAngle: Double       // wdkba
+        val throttleAngle: Double,      // wdkba
+        val intakeAirTemp: Double = 20.0,         // tans (°C), default standard conditions
+        val maxRequestedPressure: Double? = null,  // pvdxs_w (mbar) — max allowed pressure from KFLDHBN/BGRLMXS
+        val gear: Int? = null                      // gangi — selected gear
     ) {
         /** Actual relative boost pressure in PSI (above atmospheric). */
         val relativeBoostPsi: Double get() = (actualMap - barometricPressure) * MBAR_TO_PSI
+
+        /** Whether boost is within tolerance of target (tracking, not spooling). */
+        fun isTracking(toleranceMbar: Double = 50.0): Boolean =
+            abs(requestedMap - actualMap) <= toleranceMbar
+
+        /** Whether the boost ceiling (KFLDHBN/BGRLMXS) appears to be limiting. */
+        val boostCeilingLimiting: Boolean get() {
+            val maxP = maxRequestedPressure ?: return false
+            return maxP > 0 && abs(requestedMap - maxP) < 20.0
+        }
     }
 
     /** Complete result bundle from the optimizer. */
@@ -112,6 +125,14 @@ object OptimizerCalculator {
         val allMafVoltages = values[Me7LogFileContract.Header.MAF_VOLTAGE_HEADER]
         val hasMafVoltage = allMafVoltages != null && allMafVoltages.size == rpms.size
 
+        // Optional enrichment signals for enhanced diagnostics
+        val allIntakeTemps = values[Me7LogFileContract.Header.INTAKE_TEMPERATURE_HEADER]
+        val hasIntakeTemp = allIntakeTemps != null && allIntakeTemps.size == rpms.size
+        val allMaxPressures = values[Me7LogFileContract.Header.REQUESTED_PRESSURE_MAX_HEADER]
+        val hasMaxPressure = allMaxPressures != null && allMaxPressures.size == rpms.size
+        val allGears = values[Me7LogFileContract.Header.SELECTED_GEAR_HEADER]
+        val hasGear = allGears != null && allGears.size == rpms.size
+
         val entries = mutableListOf<WotLogEntry>()
         val wotMaf = if (hasMaf) mutableListOf<Double>() else null
         val wotInjector = if (hasInjector) mutableListOf<Double>() else null
@@ -129,7 +150,10 @@ object OptimizerCalculator {
                         actualMap = actualMaps[i],
                         barometricPressure = baroPressures[i],
                         wgdc = wgdcs[i],
-                        throttleAngle = throttleAngles[i]
+                        throttleAngle = throttleAngles[i],
+                        intakeAirTemp = if (hasIntakeTemp) allIntakeTemps!![i] else 20.0,
+                        maxRequestedPressure = if (hasMaxPressure) allMaxPressures!![i] else null,
+                        gear = if (hasGear) allGears!![i].toInt() else null
                     )
                 )
                 wotMaf?.add(allMafValues!![i])
@@ -224,47 +248,112 @@ object OptimizerCalculator {
     }
 
     /**
-     * Suggest KFLDIMX as KFLDRL + overhead, returning a MapDelta.
+     * Suggest KFLDIMX from steady-state (on-target) WGDC data.
+     *
+     * H3: FR reference (me7-raw.txt): "KFLDIMX: mit den stationären Tastverhältniswerten beschreiben"
+     * (populate with steady-state duty cycle values). On a WOT pull, I is maxed out due to
+     * integrator windup, so it simply follows IMX.
+     *
+     * Algorithm:
+     * 1. Filter WOT entries where boost is on-target (|actual - requested| < tolerance) — these
+     *    represent steady-state conditions where the PID I-term has converged to the WGDC needed.
+     * 2. For each (RPM, pressure) bin, the max observed WGDC IS the steady-state I-limiter value.
+     * 3. Add configurable overhead margin (default 5%, matching FR LDDIMXN typical range of 3-15%).
+     * 4. Falls back to KFLDRL × overhead method if insufficient steady-state data.
+     *
+     * M2 dependency: Uses spool vs tracking classification — only TRACKING samples inform KFLDIMX.
      */
     fun suggestKfldimxDelta(
+        wotEntries: List<WotLogEntry>,
         suggestedKfldrlDelta: MapDelta,
         kfldimxMap: Map3d,
-        overheadPercent: Double = 8.0
+        overheadPercent: Double = 8.0,
+        trackingToleranceMbar: Double = 50.0
     ): MapDelta {
         val suggestedKfldrl = suggestedKfldrlDelta.suggested
-        val multiplier = 1.0 + overheadPercent / 100.0
-
         val sampleCounts = Array(kfldimxMap.yAxis.size) { IntArray(kfldimxMap.xAxis.size) }
 
+        // Separate on-target (tracking) entries from spool-up entries
+        val trackingEntries = wotEntries.filter { it.isTracking(trackingToleranceMbar) && it.relativeBoostPsi > 0 }
+        val hasEnoughTrackingData = trackingEntries.size >= 10
+
         val suggestedZ: Array<Array<Double>>
-        if (kfldimxMap.yAxis.size == suggestedKfldrl.yAxis.size &&
-            kfldimxMap.xAxis.size == suggestedKfldrl.xAxis.size
-        ) {
+
+        if (hasEnoughTrackingData) {
+            // H3: Steady-state method — use max observed WGDC from on-target samples per bin
+            val steadyStateWgdc = Array(kfldimxMap.yAxis.size) { DoubleArray(kfldimxMap.xAxis.size) }
+            val steadyCounts = Array(kfldimxMap.yAxis.size) { IntArray(kfldimxMap.xAxis.size) }
+
+            for (entry in trackingEntries) {
+                val rpmIdx = Index.getInsertIndex(kfldimxMap.yAxis.toList(), entry.rpm)
+                val pressureIdx = Index.getInsertIndex(kfldimxMap.xAxis.toList(),
+                    if (kfldimxMap.xAxis[0] > 100) entry.actualMap - entry.barometricPressure  // relative pressure axis (mbar)
+                    else entry.relativeBoostPsi  // PSI axis
+                )
+                // Track maximum WGDC per bin (represents converged I-term)
+                if (entry.wgdc > steadyStateWgdc[rpmIdx][pressureIdx]) {
+                    steadyStateWgdc[rpmIdx][pressureIdx] = entry.wgdc
+                }
+                steadyCounts[rpmIdx][pressureIdx]++
+            }
+
+            val margin = 1.0 + overheadPercent / 100.0
             suggestedZ = Array(kfldimxMap.yAxis.size) { rpmIdx ->
                 Array(kfldimxMap.xAxis.size) { pIdx ->
-                    sampleCounts[rpmIdx][pIdx] = suggestedKfldrlDelta.sampleCounts[rpmIdx][pIdx]
-                    val v = suggestedKfldrl.zAxis[rpmIdx][pIdx]
-                    if (v > 0) v * multiplier else kfldimxMap.zAxis[rpmIdx][pIdx]
+                    sampleCounts[rpmIdx][pIdx] = steadyCounts[rpmIdx][pIdx]
+                    if (steadyCounts[rpmIdx][pIdx] > 0) {
+                        (steadyStateWgdc[rpmIdx][pIdx] * margin).coerceIn(0.0, 100.0)
+                    } else {
+                        // No steady-state data for this bin — fall back to KFLDRL method
+                        val kfldrlVal = interpolateKfldrlValue(suggestedKfldrl, kfldimxMap, rpmIdx, pIdx)
+                        if (kfldrlVal > 0) kfldrlVal * margin else kfldimxMap.zAxis[rpmIdx][pIdx]
+                    }
                 }
             }
         } else {
+            // Fallback: Legacy KFLDRL × overhead method (insufficient tracking data)
+            val multiplier = 1.0 + overheadPercent / 100.0
             suggestedZ = Array(kfldimxMap.yAxis.size) { rpmIdx ->
-                val kfldrlRpmIdx = Index.getInsertIndex(suggestedKfldrl.yAxis.toList(), kfldimxMap.yAxis[rpmIdx])
                 Array(kfldimxMap.xAxis.size) { pIdx ->
-                    val pressurePsi = kfldimxMap.xAxis[pIdx] * MBAR_TO_PSI
-                    val kfldrlPIdx = Index.getInsertIndex(suggestedKfldrl.xAxis.toList(), pressurePsi)
-                    if (kfldrlRpmIdx < suggestedKfldrlDelta.sampleCounts.size &&
-                        kfldrlPIdx < suggestedKfldrlDelta.sampleCounts[0].size) {
-                        sampleCounts[rpmIdx][pIdx] = suggestedKfldrlDelta.sampleCounts[kfldrlRpmIdx][kfldrlPIdx]
-                    }
-                    val v = suggestedKfldrl.zAxis[kfldrlRpmIdx][kfldrlPIdx]
-                    if (v > 0) v * multiplier else kfldimxMap.zAxis[rpmIdx][pIdx]
+                    sampleCounts[rpmIdx][pIdx] = interpolateKfldrlSamples(suggestedKfldrlDelta, kfldimxMap, rpmIdx, pIdx)
+                    val kfldrlVal = interpolateKfldrlValue(suggestedKfldrl, kfldimxMap, rpmIdx, pIdx)
+                    if (kfldrlVal > 0) kfldrlVal * multiplier else kfldimxMap.zAxis[rpmIdx][pIdx]
                 }
             }
         }
 
         val suggestedMap = Map3d(kfldimxMap.xAxis, kfldimxMap.yAxis, suggestedZ)
         return MapDelta.build("KFLDIMX", kfldimxMap, suggestedMap, sampleCounts)
+    }
+
+    /** Look up KFLDRL value for a KFLDIMX bin, handling axis mismatch. */
+    private fun interpolateKfldrlValue(suggestedKfldrl: Map3d, kfldimxMap: Map3d, rpmIdx: Int, pIdx: Int): Double {
+        return if (kfldimxMap.yAxis.size == suggestedKfldrl.yAxis.size &&
+            kfldimxMap.xAxis.size == suggestedKfldrl.xAxis.size
+        ) {
+            suggestedKfldrl.zAxis[rpmIdx][pIdx]
+        } else {
+            val kfldrlRpmIdx = Index.getInsertIndex(suggestedKfldrl.yAxis.toList(), kfldimxMap.yAxis[rpmIdx])
+            val kfldrlPIdx = Index.getInsertIndex(suggestedKfldrl.xAxis.toList(),
+                kfldimxMap.xAxis[pIdx] * MBAR_TO_PSI)
+            suggestedKfldrl.zAxis[kfldrlRpmIdx][kfldrlPIdx]
+        }
+    }
+
+    /** Look up KFLDRL sample count for a KFLDIMX bin, handling axis mismatch. */
+    private fun interpolateKfldrlSamples(kfldrlDelta: MapDelta, kfldimxMap: Map3d, rpmIdx: Int, pIdx: Int): Int {
+        return if (kfldimxMap.yAxis.size == kfldrlDelta.suggested.yAxis.size &&
+            kfldimxMap.xAxis.size == kfldrlDelta.suggested.xAxis.size
+        ) {
+            kfldrlDelta.sampleCounts[rpmIdx][pIdx]
+        } else {
+            val kfldrlRpmIdx = Index.getInsertIndex(kfldrlDelta.suggested.yAxis.toList(), kfldimxMap.yAxis[rpmIdx])
+            val kfldrlPIdx = Index.getInsertIndex(kfldrlDelta.suggested.xAxis.toList(),
+                kfldimxMap.xAxis[pIdx] * MBAR_TO_PSI)
+            if (kfldrlRpmIdx < kfldrlDelta.sampleCounts.size &&
+                kfldrlPIdx < kfldrlDelta.sampleCounts[0].size)
+                kfldrlDelta.sampleCounts[kfldrlRpmIdx][kfldrlPIdx] else 0
+        }
     }
 
     /**
@@ -483,11 +572,27 @@ object OptimizerCalculator {
         if (capped.isNotEmpty()) {
             val pct = capped.size.toDouble() / wotEntries.size * 100
             val avgRlsol = capped.map { it.requestedLoad }.average()
-            warnings.add(
-                "Torque Intervention Detected: rlsol is below LDRXN target (${ldrxnTarget.format()}) " +
-                    "in ${String.format("%.1f", pct)}% of WOT samples (avg rlsol = ${avgRlsol.format()}). " +
-                    "Check KFMIOP / KFMIZUFIL to ensure torque requests support this load."
-            )
+
+            // H1: Distinguish KFLDHBN (boost ceiling) from torque structure limiting
+            // FR: rlmax_w = min(rlmxko_w, ldrlts_w, ldrlms_w)
+            // When pvdxs_w ≈ pvds_w, the boost ceiling (KFLDHBN/BGRLMXS) is the limiter
+            val ceilingLimited = capped.filter { it.boostCeilingLimiting }
+            val ceilingPct = if (capped.isNotEmpty()) ceilingLimited.size.toDouble() / capped.size * 100 else 0.0
+
+            if (ceilingPct > 50.0) {
+                warnings.add(
+                    "Boost Ceiling Limiting: pvdxs_w (max requested pressure) ≈ pvds_w (requested pressure) in " +
+                        "${String.format("%.0f", ceilingPct)}% of load-limited samples. " +
+                        "KFLDHBN / BGRLMXS is capping boost request, not the torque structure. " +
+                        "Increase KFLDHBN pressure ratio limit (ME7) or check BGRLMXS paths (MED17)."
+                )
+            } else {
+                warnings.add(
+                    "Torque Intervention Detected: rlsol is below LDRXN target (${ldrxnTarget.format()}) " +
+                        "in ${String.format("%.1f", pct)}% of WOT samples (avg rlsol = ${avgRlsol.format()}). " +
+                        "Check KFMIOP / KFMIZUFIL to ensure torque requests support this load."
+                )
+            }
         }
 
         val boostMissing = wotEntries.filter { e -> e.actualMap < e.requestedMap - 50 }
@@ -971,11 +1076,31 @@ object OptimizerCalculator {
             val avgHeadroom = if (torqueLimitedEntries.isNotEmpty()) {
                 torqueLimitedEntries.map { ldrxnTarget - it.requestedLoad }.average()
             } else 0.0
-            recs.add(
-                "WARNING: Torque structure is capping load in ${String.format("%.0f", torquePct)}% of WOT samples (above 3500 RPM). " +
-                    "rlsol averages ${String.format("%.1f", avgHeadroom)}% below LDRXN (${ldrxnTarget.format()}%). " +
-                    "Increase KFMIOP/KFMIRL ranges to support the target load."
-            )
+
+            // H1: KFLDHBN vs KFMIOP differentiation
+            // FR: rlmax_w = min(rlmxko_w, ldrlts_w, ldrlms_w)
+            // When pvdxs_w (max allowed pressure) ≈ pvds_w (requested pressure), the
+            // boost ceiling (KFLDHBN/BGRLMXS) is limiting, not the torque structure.
+            val ceilingLimitedEntries = torqueLimitedEntries.filter { it.boostCeilingLimiting }
+            val ceilingPct = if (torqueLimitedEntries.isNotEmpty()) {
+                ceilingLimitedEntries.size.toDouble() / torqueLimitedEntries.size * 100
+            } else 0.0
+
+            if (ceilingPct > 50) {
+                recs.add(
+                    "WARNING: Boost ceiling (BGRLMXS/KFLDHBN) is limiting load in ${String.format("%.0f", torquePct)}% " +
+                        "of WOT samples. pvdxs_w (max allowed pressure) matches pvds_w in ${String.format("%.0f", ceilingPct)}% " +
+                        "of torque-limited entries. The load cap is NOT from KFMIOP/KFMIRL — it is the " +
+                        "pressure ratio ceiling (BGRLMXS on MED17, KFLDHBN on ME7). " +
+                        "Increase the pressure limit or check turbo protection settings."
+                )
+            } else {
+                recs.add(
+                    "WARNING: Torque structure is capping load in ${String.format("%.0f", torquePct)}% of WOT samples (above 3500 RPM). " +
+                        "rlsol averages ${String.format("%.1f", avgHeadroom)}% below LDRXN (${ldrxnTarget.format()}%). " +
+                        "Increase KFMIOP/KFMIRL ranges to support the target load."
+                )
+            }
         }
 
         if (lowRpmBelowLdrxn > 0) {
@@ -1072,7 +1197,7 @@ object OptimizerCalculator {
         } else null
 
         val kfldimxDelta = if (kfldrlDelta != null && kfldimxMap != null) {
-            suggestKfldimxDelta(kfldrlDelta, kfldimxMap, kfldimxOverheadPercent)
+            suggestKfldimxDelta(wotEntries, kfldrlDelta, kfldimxMap, kfldimxOverheadPercent)
         } else null
 
         val kfpbrkDelta = if (kfpbrkMap != null) {
@@ -1313,7 +1438,7 @@ object OptimizerCalculator {
         } else null
 
         val kfldimxDelta = if (kfldrlDelta != null && kfldimxMap != null) {
-            suggestKfldimxDelta(kfldrlDelta, kfldimxMap, kfldimxOverheadPercent)
+            suggestKfldimxDelta(wotEntries, kfldrlDelta, kfldimxMap, kfldimxOverheadPercent)
         } else null
 
         // ── Synthetic torque-cap detection (MED17 — no ME7 simulator) ──

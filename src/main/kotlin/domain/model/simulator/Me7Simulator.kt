@@ -369,7 +369,8 @@ object Me7Simulator {
     ): SimulationResult {
         val op = OperatingPoint(
             rpm = entry.rpm,
-            barometricPressure = entry.barometricPressure
+            barometricPressure = entry.barometricPressure,
+            intakeAirTemp = entry.intakeAirTemp  // H2: use real tans when available
         )
 
         // ── Link 1: LDRXN → rlsol ───────────────────────────────

@@ -42,7 +42,13 @@ object PullSegmenter {
         val avgLoadDeficit: Double,
         val quality: PullQuality,
         /** Per-link chain diagnosis scoped to this pull only. */
-        val dominantErrors: Map<String, Double>  // ErrorSource name → percentage
+        val dominantErrors: Map<String, Double>,  // ErrorSource name → percentage
+        /** Gear detected for this pull (null if gear data unavailable). */
+        val gear: Int? = null,
+        /** Whether boost reached target at any point during this pull. */
+        val reachedTarget: Boolean = false,
+        /** RPM at which boost first reached target (null if never reached). */
+        val spoolUpRpm: Double? = null
     )
 
     // ── Segmentation parameters ────────────────────────────────────
@@ -74,7 +80,8 @@ object PullSegmenter {
     fun segmentPulls(
         wotEntries: List<OptimizerCalculator.WotLogEntry>,
         timestamps: List<Double>? = null,
-        ldrxnTarget: Double = 191.0
+        ldrxnTarget: Double = 191.0,
+        trackingToleranceMbar: Double = 50.0
     ): List<WotPull> {
         if (wotEntries.size < MIN_PULL_SAMPLES) return emptyList()
 
@@ -116,6 +123,17 @@ object PullSegmenter {
                 "ON_TARGET" to (onTarget / total * 100)
             )
 
+            // M1: Gear detection — use modal gear for this pull
+            val gears = pullEntries.mapNotNull { it.gear }
+            val modalGear = if (gears.isNotEmpty()) {
+                gears.groupBy { it }.maxByOrNull { it.value.size }?.key
+            } else null
+
+            // M2: Spool-up RPM — first entry where boost is on-target
+            val firstOnTarget = pullEntries.firstOrNull { it.isTracking(trackingToleranceMbar) }
+            val spoolUpRpm = firstOnTarget?.rpm
+            val reachedTarget = firstOnTarget != null
+
             pulls.add(
                 WotPull(
                     pullIndex = pullIdx,
@@ -127,7 +145,10 @@ object PullSegmenter {
                     avgPressureError = avgPressureError,
                     avgLoadDeficit = avgLoadDeficit,
                     quality = quality,
-                    dominantErrors = dominantErrors
+                    dominantErrors = dominantErrors,
+                    gear = modalGear,
+                    reachedTarget = reachedTarget,
+                    spoolUpRpm = spoolUpRpm
                 )
             )
         }
@@ -165,7 +186,11 @@ object PullSegmenter {
     // ── Private helpers ────────────────────────────────────────────
 
     /**
-     * Find pull boundaries by detecting RPM drops or resets.
+     * Find pull boundaries by detecting RPM drops, resets, or gear changes.
+     *
+     * M1: Gear changes within a pull create a new pull boundary. A gear shift
+     * produces a transient region where boost data is unreliable (RPM drops
+     * abruptly then rises again in the next gear).
      */
     private fun findPullBoundaries(entries: List<OptimizerCalculator.WotLogEntry>): List<Pair<Int, Int>> {
         val boundaries = mutableListOf<Pair<Int, Int>>()
@@ -173,8 +198,10 @@ object PullSegmenter {
 
         for (i in 1 until entries.size) {
             val rpmDrop = entries[i - 1].rpm - entries[i].rpm
-            if (rpmDrop > MAX_RPM_DROP) {
-                // End of current pull
+            val gearChanged = entries[i].gear != null && entries[i - 1].gear != null
+                    && entries[i].gear != entries[i - 1].gear
+
+            if (rpmDrop > MAX_RPM_DROP || gearChanged) {
                 if (i - pullStart >= MIN_PULL_SAMPLES) {
                     boundaries.add(pullStart to (i - 1))
                 }
