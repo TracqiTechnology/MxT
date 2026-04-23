@@ -9,6 +9,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import data.parser.bin.BinParser
 import data.parser.me7log.Me7LogParser
@@ -25,6 +26,9 @@ import data.model.EcuPlatform
 import data.writer.BinWriter
 import domain.math.map.Map3d
 import domain.model.ldrpid.LdrpidCalculator
+import domain.model.ldrpid.LdrpidOptimizerBridge
+import domain.model.optimizer.OptimizerCalculator
+import domain.model.simulator.PidSimulator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -48,7 +52,7 @@ private fun findMap(
 }
 
 @Composable
-fun LdrpidScreen() {
+fun LdrpidScreen(preloadedLogDir: java.io.File? = null) {
     val mapList by BinParser.mapList.collectAsState()
     val scope = rememberCoroutineScope()
 
@@ -61,6 +65,10 @@ fun LdrpidScreen() {
     var kfldrlMap by remember { mutableStateOf<Map3d?>(null) }
     var kfldimxMap by remember { mutableStateOf<Map3d?>(null) }
     var kfldimxXAxis by remember { mutableStateOf<Array<Array<Double>>?>(null) }
+    // Sample count state for confidence display
+    var nonLinearSampleCounts by remember { mutableStateOf<Array<IntArray>?>(null) }
+    var kfldrlSampleCounts by remember { mutableStateOf<Array<IntArray>?>(null) }
+    var kfldimxSampleCounts by remember { mutableStateOf<Array<IntArray>?>(null) }
 
     // Initialize maps from preferences (only set KFLDRL/KFLDIMX definitions, not empty zeros)
     LaunchedEffect(kfldrlPair, kfldimxPair) {
@@ -92,6 +100,32 @@ fun LdrpidScreen() {
     var progressMax by remember { mutableStateOf(1) }
     var showProgress by remember { mutableStateOf(false) }
     var logDirName by remember { mutableStateOf("No Directory Selected") }
+    var consistencyWarning by remember { mutableStateOf<String?>(null) }
+
+    // Auto-load log data when preloadedLogDir is provided (screenshot harness)
+    LaunchedEffect(preloadedLogDir, kfldrlPair, kfldimxPair) {
+        if (preloadedLogDir != null && kfldrlPair != null && kfldimxPair != null) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val med17Parser = Med17LogParser()
+                val med17Values = med17Parser.parseLogDirectory(
+                    Med17LogParser.LogType.LDRPID, preloadedLogDir
+                ) { _, _ -> }
+                val values = Med17LogAdapter.toMe7LdrpidFormat(med17Values)
+                val result = LdrpidCalculator.calculateWithCounts(values, kfldrlPair!!.second, kfldimxPair!!.second)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    nonLinearMap = result.nonLinearOutput
+                    linearMap = result.linearOutput
+                    kfldrlMap = result.kfldrl
+                    kfldimxMap = result.kfldimx
+                    kfldimxXAxis = arrayOf(result.kfldimx.xAxis)
+                    nonLinearSampleCounts = result.nonLinearSampleCounts
+                    kfldrlSampleCounts = result.kfldrlSampleCounts
+                    kfldimxSampleCounts = result.kfldimxSampleCounts
+                    logDirName = preloadedLogDir.name
+                }
+            }
+        }
+    }
 
     // Write state
     val binFile by BinFilePreferences.file.collectAsState()
@@ -192,16 +226,31 @@ fun LdrpidScreen() {
                     scope.launch {
                         withContext(Dispatchers.IO) {
                             val values = if (EcuPlatformPreference.platform == EcuPlatform.MED17) {
+                                // Parse each file individually for consistency check
+                                val csvFiles = selectedDir.listFiles()
+                                    ?.filter { it.isFile && it.name.endsWith(".csv", ignoreCase = true) }
+                                    ?: emptyList()
+                                val perFileData = mutableListOf<Map<data.contract.Me7LogFileContract.Header, List<Double>>>()
+                                csvFiles.forEachIndexed { idx, csvFile ->
+                                    val parser = Med17LogParser()
+                                    val fileData = parser.parseLogFile(Med17LogParser.LogType.LDRPID, csvFile)
+                                    perFileData.add(Med17LogAdapter.toMe7LdrpidFormat(fileData))
+                                    progressValue = idx + 1
+                                    progressMax = csvFiles.size
+                                    showProgress = idx < csvFiles.size - 1
+                                }
+                                // Check consistency across files
+                                val warning = LdrpidCalculator.checkLogConsistency(perFileData)
+                                withContext(Dispatchers.Main) { consistencyWarning = warning }
+
+                                // Aggregate: parse as directory for combined output
                                 val med17Parser = Med17LogParser()
                                 val med17Values = med17Parser.parseLogDirectory(
                                     Med17LogParser.LogType.LDRPID, selectedDir
-                                ) { value, max ->
-                                    progressValue = value
-                                    progressMax = max
-                                    showProgress = value < max - 1
-                                }
+                                ) { _, _ -> }
                                 Med17LogAdapter.toMe7LdrpidFormat(med17Values)
                             } else {
+                                consistencyWarning = null
                                 val parser = Me7LogParser()
                                 parser.parseLogDirectory(
                                     Me7LogParser.LogType.LDRPID, selectedDir
@@ -214,13 +263,16 @@ fun LdrpidScreen() {
                             val kfldimxDef = KfldimxPreferences.getSelectedMap()
                             val kfldrlDef = KfldrlPreferences.getSelectedMap()
                             if (kfldimxDef != null && kfldrlDef != null) {
-                                val result = LdrpidCalculator.calculateLdrpid(values, kfldrlDef.second, kfldimxDef.second)
+                                val result = LdrpidCalculator.calculateWithCounts(values, kfldrlDef.second, kfldimxDef.second)
                                 withContext(Dispatchers.Main) {
                                     nonLinearMap = result.nonLinearOutput
                                     linearMap = result.linearOutput
                                     kfldrlMap = result.kfldrl
                                     kfldimxMap = result.kfldimx
                                     kfldimxXAxis = arrayOf(result.kfldimx.xAxis)
+                                    nonLinearSampleCounts = result.nonLinearSampleCounts
+                                    kfldrlSampleCounts = result.kfldrlSampleCounts
+                                    kfldimxSampleCounts = result.kfldimxSampleCounts
                                     showProgress = false
                                 }
                             }
@@ -229,6 +281,32 @@ fun LdrpidScreen() {
                 }
             }
         )
+
+        // ── Log Consistency Warning ───────────────────────────────────
+        AnimatedVisibility(visible = consistencyWarning != null) {
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.errorContainer,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Icon(
+                        Icons.Default.Warning,
+                        contentDescription = "Warning",
+                        tint = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                    Text(
+                        consistencyWarning ?: "",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+            }
+        }
 
         // ── Tabbed Comparison Area ────────────────────────────────────
         LdrpidComparisonArea(
@@ -240,7 +318,14 @@ fun LdrpidScreen() {
             kfldrlMap = kfldrlMap,
             kfldimxMap = kfldimxMap,
             kfldimxXAxis = kfldimxXAxis,
-            onNonLinearChanged = { recomputeFromNonLinear(it) }
+            onNonLinearChanged = { recomputeFromNonLinear(it) },
+            nonLinearSampleCounts = nonLinearSampleCounts,
+            kfldrlSampleCounts = kfldrlSampleCounts,
+            kfldimxSampleCounts = kfldimxSampleCounts,
+            onExportToOptimizer = {
+                if (kfldrlMap != null) LdrpidOptimizerBridge.exportKfldrl(kfldrlMap!!)
+                if (kfldimxMap != null) LdrpidOptimizerBridge.exportKfldimx(kfldimxMap!!)
+            }
         )
 
         // ── Write to Binary Section ───────────────────────────────────
@@ -336,6 +421,19 @@ private fun LdrpidConfigCard(
 
 // ── Tabbed Comparison Area ────────────────────────────────────────────
 
+/** Build a cellColorProvider from sample counts: green=high confidence, yellow=low, null=interpolated */
+private fun sampleCountColorProvider(counts: Array<IntArray>?): ((Int, Int) -> Color?)? {
+    if (counts == null) return null
+    return { rowIdx, colIdx ->
+        val count = counts.getOrNull(rowIdx)?.getOrNull(colIdx) ?: 0
+        when {
+            count >= 5 -> Color(0x4000C853)   // green — high confidence
+            count >= 1 -> Color(0x40FFD600)   // yellow — low confidence
+            else -> null                       // interpolated — fall back to default HSB
+        }
+    }
+}
+
 @Composable
 private fun LdrpidComparisonArea(
     modifier: Modifier = Modifier,
@@ -346,19 +444,25 @@ private fun LdrpidComparisonArea(
     kfldrlMap: Map3d?,
     kfldimxMap: Map3d?,
     kfldimxXAxis: Array<Array<Double>>?,
-    onNonLinearChanged: (Map3d) -> Unit
+    onNonLinearChanged: (Map3d) -> Unit,
+    nonLinearSampleCounts: Array<IntArray>? = null,
+    kfldrlSampleCounts: Array<IntArray>? = null,
+    kfldimxSampleCounts: Array<IntArray>? = null,
+    onExportToOptimizer: () -> Unit = {}
 ) {
     Column(modifier = modifier) {
         PrimaryTabRow(selectedTabIndex = selectedTab) {
             Tab(selected = selectedTab == 0, onClick = { onTabSelected(0) }, text = { Text("Boost Tables") })
             Tab(selected = selectedTab == 1, onClick = { onTabSelected(1) }, text = { Text("KFLDRL") })
             Tab(selected = selectedTab == 2, onClick = { onTabSelected(2) }, text = { Text("KFLDIMX") })
+            Tab(selected = selectedTab == 3, onClick = { onTabSelected(3) }, text = { Text("PID Analysis") })
         }
 
         when (selectedTab) {
-            0 -> BoostTablesTab(nonLinearMap, linearMap, onNonLinearChanged, Modifier.fillMaxWidth().weight(1f))
-            1 -> KfldrlTab(kfldrlMap, Modifier.fillMaxWidth().weight(1f))
-            2 -> KfldimxTab(kfldimxMap, kfldimxXAxis, Modifier.fillMaxWidth().weight(1f))
+            0 -> BoostTablesTab(nonLinearMap, linearMap, onNonLinearChanged, Modifier.fillMaxWidth().weight(1f), nonLinearSampleCounts)
+            1 -> KfldrlTab(kfldrlMap, Modifier.fillMaxWidth().weight(1f), kfldrlSampleCounts, onExportToOptimizer)
+            2 -> KfldimxTab(kfldimxMap, kfldimxXAxis, Modifier.fillMaxWidth().weight(1f), kfldimxSampleCounts)
+            3 -> PidAnalysisTab(kfldrlMap, kfldimxMap, Modifier.fillMaxWidth().weight(1f))
         }
     }
 }
@@ -368,7 +472,8 @@ private fun BoostTablesTab(
     nonLinearMap: Map3d?,
     linearMap: Map3d?,
     onNonLinearChanged: (Map3d) -> Unit,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    nonLinearSampleCounts: Array<IntArray>? = null
 ) {
     Row(modifier = modifier, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
         // Non-Linear Boost (editable)
@@ -381,7 +486,12 @@ private fun BoostTablesTab(
             )
             if (nonLinearMap != null && nonLinearMap.zAxis.isNotEmpty()) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    MapTable(map = nonLinearMap, editable = true, onMapChanged = { onNonLinearChanged(it) })
+                    MapTable(
+                        map = nonLinearMap,
+                        editable = true,
+                        onMapChanged = { onNonLinearChanged(it) },
+                        cellColorProvider = sampleCountColorProvider(nonLinearSampleCounts)
+                    )
                 }
             } else {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -420,17 +530,34 @@ private fun BoostTablesTab(
 }
 
 @Composable
-private fun KfldrlTab(kfldrlMap: Map3d?, modifier: Modifier = Modifier) {
+private fun KfldrlTab(kfldrlMap: Map3d?, modifier: Modifier = Modifier, sampleCounts: Array<IntArray>? = null, onExportToOptimizer: () -> Unit = {}) {
     Column(modifier = modifier) {
-        Text(
-            text = "KFLDRL \u2014 Linearized Wastegate Duty Cycle",
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.primary,
-            modifier = Modifier.padding(vertical = 4.dp)
-        )
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Text(
+                text = "KFLDRL \u2014 Linearized Wastegate Duty Cycle",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.primary
+            )
+            if (kfldrlMap != null && kfldrlMap.zAxis.isNotEmpty()) {
+                OutlinedButton(
+                    onClick = onExportToOptimizer,
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
+                ) {
+                    Text("Export to Optimizer", style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
         if (kfldrlMap != null && kfldrlMap.zAxis.isNotEmpty()) {
             Box(modifier = Modifier.fillMaxSize()) {
-                MapTable(map = kfldrlMap, editable = false)
+                MapTable(
+                    map = kfldrlMap,
+                    editable = false,
+                    cellColorProvider = sampleCountColorProvider(sampleCounts)
+                )
             }
         } else {
             Text("No map data", style = MaterialTheme.typography.bodyMedium)
@@ -442,7 +569,8 @@ private fun KfldrlTab(kfldrlMap: Map3d?, modifier: Modifier = Modifier) {
 private fun KfldimxTab(
     kfldimxMap: Map3d?,
     kfldimxXAxis: Array<Array<Double>>?,
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    sampleCounts: Array<IntArray>? = null
 ) {
     Column(modifier = modifier) {
         if (kfldimxXAxis != null) {
@@ -471,11 +599,208 @@ private fun KfldimxTab(
         )
         if (kfldimxMap != null && kfldimxMap.zAxis.isNotEmpty()) {
             Box(modifier = Modifier.fillMaxSize()) {
-                MapTable(map = kfldimxMap, editable = false)
+                MapTable(
+                    map = kfldimxMap,
+                    editable = false,
+                    cellColorProvider = sampleCountColorProvider(sampleCounts)
+                )
             }
         } else {
             Text("No map data", style = MaterialTheme.typography.bodyMedium)
         }
+    }
+}
+
+// ── PID Analysis Tab ──────────────────────────────────────────────────
+
+private enum class StabilityRating(val label: String, val color: Color) {
+    STABLE("Stable", Color(0xFF00C853)),
+    MARGINAL("Marginal", Color(0xFFFFD600)),
+    UNSTABLE("Oscillation Risk", Color(0xFFFF1744))
+}
+
+/**
+ * Runs [PidSimulator] against the computed KFLDRL/KFLDIMX and displays
+ * per-RPM stability metrics with color-coded warnings.
+ */
+@Composable
+private fun PidAnalysisTab(
+    kfldrlMap: Map3d?,
+    kfldimxMap: Map3d?,
+    modifier: Modifier = Modifier
+) {
+    if (kfldrlMap == null || kfldrlMap.zAxis.isEmpty()) {
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("PID Analysis unavailable", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Load WOT log data and compute KFLDRL to enable PID analysis",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+        }
+        return
+    }
+
+    val rpmBreakpoints = kfldrlMap.yAxis
+    val analysisResults: List<Pair<Double, PidSimulator.PidSimulationResult>> = remember(kfldrlMap, kfldimxMap) {
+        rpmBreakpoints.map { rpm ->
+            val pull = buildSyntheticPull(rpm, targetBoostMbar = 2200.0, count = 60)
+            val result = PidSimulator.simulate(
+                pullEntries = pull,
+                kfldrq0 = null,
+                kfldrq1 = null,
+                kfldrq2 = null,
+                kfldrl = kfldrlMap,
+                kfldimx = kfldimxMap
+            )
+            rpm to result
+        }
+    }
+
+    Column(modifier = modifier.padding(top = 8.dp)) {
+        Text(
+            text = "PID Stability Analysis",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.padding(bottom = 8.dp)
+        )
+        Text(
+            text = "Synthetic WOT pulls at each RPM breakpoint \u2014 tests PID convergence with computed KFLDRL",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(bottom = 12.dp)
+        )
+
+        Surface(
+            shape = MaterialTheme.shapes.small,
+            tonalElevation = 1.dp,
+            modifier = Modifier.fillMaxWidth()
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("RPM", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(60.dp))
+                    Text("Status", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(120.dp))
+                    Text("Convergence", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(100.dp))
+                    Text("Oscillations", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(90.dp))
+                    Text("Overshoot", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(90.dp))
+                    Text("Avg |Error|", style = MaterialTheme.typography.labelSmall, modifier = Modifier.width(90.dp))
+                }
+
+                HorizontalDivider()
+
+                for (entry in analysisResults) {
+                    val rpm = entry.first
+                    val d = entry.second.diagnosis
+                    val rating = when {
+                        d.oscillationDetected -> StabilityRating.UNSTABLE
+                        d.slowConvergence || d.overshootDetected || d.windupDetected -> StabilityRating.MARGINAL
+                        else -> StabilityRating.STABLE
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            "${rpm.toInt()}",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.width(60.dp)
+                        )
+                        Row(modifier = Modifier.width(120.dp), verticalAlignment = Alignment.CenterVertically) {
+                            Surface(
+                                shape = MaterialTheme.shapes.extraSmall,
+                                color = rating.color.copy(alpha = 0.2f),
+                                modifier = Modifier.padding(end = 4.dp)
+                            ) {
+                                Text(
+                                    rating.label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = rating.color,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        Text(
+                            "${String.format("%.0f", d.convergenceTimeMs)} ms",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.width(100.dp)
+                        )
+                        Text(
+                            "${d.oscillationCount}",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.width(90.dp)
+                        )
+                        Text(
+                            if (d.overshootDetected) "${String.format("%.0f", d.overshootMagnitude)} mbar" else "\u2014",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.width(90.dp)
+                        )
+                        Text(
+                            "${String.format("%.1f", d.avgAbsLde)} mbar",
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.width(90.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // Recommendations
+        val allRecommendations: List<String> = analysisResults.flatMap { pair -> pair.second.diagnosis.recommendations }.distinct()
+        if (allRecommendations.isNotEmpty()) {
+            Spacer(Modifier.height(12.dp))
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f),
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(modifier = Modifier.padding(12.dp)) {
+                    Text(
+                        "Recommendations",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.padding(bottom = 4.dp)
+                    )
+                    for (rec in allRecommendations) {
+                        Text(
+                            "\u2022 $rec",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onErrorContainer,
+                            modifier = Modifier.padding(vertical = 2.dp)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** Build a synthetic WOT pull at a fixed RPM for PID stability probing. */
+private fun buildSyntheticPull(
+    rpm: Double,
+    targetBoostMbar: Double = 2200.0,
+    barometricPressure: Double = 1013.0,
+    count: Int = 60
+): List<OptimizerCalculator.WotLogEntry> {
+    return (0 until count).map { i ->
+        val rampFraction = (i.toDouble() / (count / 2)).coerceAtMost(1.0)
+        val actualMap = barometricPressure + (targetBoostMbar - barometricPressure) * rampFraction
+        OptimizerCalculator.WotLogEntry(
+            rpm = rpm,
+            requestedLoad = 191.0,
+            actualLoad = 191.0,
+            requestedMap = targetBoostMbar,
+            actualMap = actualMap,
+            barometricPressure = barometricPressure,
+            wgdc = 60.0,
+            throttleAngle = 100.0
+        )
     }
 }
 

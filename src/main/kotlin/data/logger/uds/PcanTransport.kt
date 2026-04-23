@@ -1,17 +1,17 @@
 package data.logger.uds
 
 import kotlinx.coroutines.delay
+import peak.can.basic.*
 
 /**
- * PCAN-USB transport using Peak's PCAN-Basic Java API.
+ * PCAN-USB transport using Peak's PCAN-Basic Java JNI API.
  *
- * Requires Peak drivers + PCANBasic native library installed.
- * Gracefully degrades if the native lib is not available.
+ * Requires Peak drivers + PCANBasic_JNI native bridge installed.
+ * Users must install from https://www.peak-system.com
  */
 class PcanTransport : CanTransport {
 
-    private var handle: Any? = null
-    private var pcanClass: Class<*>? = null
+    private var pcan: PCANBasic? = null
     private var config: CanConfig? = null
     private var _isOpen = false
 
@@ -19,95 +19,91 @@ class PcanTransport : CanTransport {
         this.config = config
 
         try {
-            pcanClass = Class.forName("peak.can.basic.PCANBasic")
-        } catch (_: ClassNotFoundException) {
-            throw PcanException("PCAN-Basic library not found. Install Peak drivers from https://www.peak-system.com")
-        }
+            val api = PCANBasic()
+            if (!api.initializeAPI()) {
+                throw PcanException(
+                    "PCAN-Basic native library not loaded. " +
+                    "Install Peak PCAN drivers from https://www.peak-system.com"
+                )
+            }
+            pcan = api
 
-        try {
-            val pcan = pcanClass!!.getDeclaredConstructor().newInstance()
-            handle = pcan
+            val baudrate = bitrateToTpcan(config.bitrate)
+            val status = api.Initialize(
+                TPCANHandle.PCAN_USBBUS1,
+                baudrate,
+                TPCANType.PCAN_TYPE_NONE,
+                0,
+                0.toShort()
+            )
 
-            // Initialize: CAN_Initialize(channel, baudrate, ...)
-            val tpcanBaudrate = bitrateToTpcan(config.bitrate)
-            val initMethod = pcanClass!!.getMethod("Initialize", Int::class.java, Int::class.java)
-            val result = initMethod.invoke(pcan, PCAN_USBBUS1, tpcanBaudrate) as? Int ?: -1
-
-            if (result != PCAN_ERROR_OK) {
-                throw PcanException("PCAN Initialize failed with error code: 0x${String.format("%X", result)}")
+            if (status != TPCANStatus.PCAN_ERROR_OK) {
+                throw PcanException(
+                    "PCAN Initialize failed: ${status.name} (0x${String.format("%X", status.value)})"
+                )
             }
 
             _isOpen = true
         } catch (e: PcanException) {
             throw e
+        } catch (e: UnsatisfiedLinkError) {
+            throw PcanException(
+                "PCANBasic_JNI native library not found. " +
+                "Install Peak PCAN drivers from https://www.peak-system.com",
+                e
+            )
+        } catch (e: ExceptionInInitializerError) {
+            throw PcanException(
+                "PCANBasic_JNI native library not found. " +
+                "Install Peak PCAN drivers from https://www.peak-system.com",
+                e
+            )
         } catch (e: Exception) {
             throw PcanException("PCAN initialization error: ${e.message}", e)
         }
     }
 
     override suspend fun sendFrame(id: Int, data: ByteArray) {
-        val pcan = handle ?: throw PcanException("PCAN not initialized")
-        val cls = pcanClass ?: throw PcanException("PCAN class not loaded")
+        val api = pcan ?: throw PcanException("PCAN not initialized")
 
-        try {
-            // Build TPCANMsg via reflection
-            val msgClass = Class.forName("peak.can.basic.TPCANMsg")
-            val msg = msgClass.getDeclaredConstructor().newInstance()
+        val msg = TPCANMsg()
+        msg.setID(id)
+        msg.setLength(data.size.toByte())
+        msg.setType(TPCANMsg.MSGTYPE_STANDARD)
+        msg.setData(data, data.size.toByte())
 
-            msgClass.getField("ID").setInt(msg, id)
-            msgClass.getField("LEN").setByte(msg, data.size.toByte())
-            msgClass.getField("MSGTYPE").setByte(msg, 0) // standard
-
-            val dataField = msgClass.getField("DATA")
-            val msgData = dataField.get(msg) as ByteArray
-            data.copyInto(msgData)
-
-            val writeMethod = cls.getMethod("Write", Int::class.java, msgClass)
-            val result = writeMethod.invoke(pcan, PCAN_USBBUS1, msg) as? Int ?: -1
-
-            if (result != PCAN_ERROR_OK) {
-                throw PcanException("PCAN Write failed: 0x${String.format("%X", result)}")
-            }
-        } catch (e: PcanException) {
-            throw e
-        } catch (e: Exception) {
-            throw PcanException("PCAN write error: ${e.message}", e)
+        val status = api.Write(TPCANHandle.PCAN_USBBUS1, msg)
+        if (status != TPCANStatus.PCAN_ERROR_OK) {
+            throw PcanException("PCAN Write failed: ${status.name} (0x${String.format("%X", status.value)})")
         }
     }
 
     override suspend fun receiveFrame(timeout: Long): CanFrame? {
-        val pcan = handle ?: throw PcanException("PCAN not initialized")
-        val cls = pcanClass ?: throw PcanException("PCAN class not loaded")
+        val api = pcan ?: throw PcanException("PCAN not initialized")
         val startTime = System.currentTimeMillis()
 
-        try {
-            val msgClass = Class.forName("peak.can.basic.TPCANMsg")
-            val readMethod = cls.getMethod("Read", Int::class.java, msgClass)
+        while (System.currentTimeMillis() - startTime < timeout) {
+            val msg = TPCANMsg()
+            val status = api.Read(TPCANHandle.PCAN_USBBUS1, msg, null)
 
-            while (System.currentTimeMillis() - startTime < timeout) {
-                val msg = msgClass.getDeclaredConstructor().newInstance()
-                val result = readMethod.invoke(pcan, PCAN_USBBUS1, msg) as? Int ?: -1
+            when (status) {
+                TPCANStatus.PCAN_ERROR_OK -> {
+                    val frameId = msg.getID()
+                    val len = msg.getLength().toInt() and 0xFF
+                    val data = msg.getData().copyOf(len)
 
-                if (result == PCAN_ERROR_OK) {
-                    val id = msgClass.getField("ID").getInt(msg)
-                    val len = msgClass.getField("LEN").getByte(msg).toInt() and 0xFF
-                    val data = (msgClass.getField("DATA").get(msg) as ByteArray).copyOf(len)
-
-                    // Filter by expected RX ID
                     val rxId = config?.rxId
-                    if (rxId == null || id == rxId) {
-                        return CanFrame(id, data)
+                    if (rxId == null || frameId == rxId) {
+                        return CanFrame(frameId, data)
                     }
-                } else if (result == PCAN_ERROR_QRCVEMPTY) {
-                    delay(1) // No message available, poll again
-                } else {
-                    throw PcanException("PCAN Read failed: 0x${String.format("%X", result)}")
+                }
+                TPCANStatus.PCAN_ERROR_QRCVEMPTY -> {
+                    delay(1)
+                }
+                else -> {
+                    throw PcanException("PCAN Read failed: ${status.name} (0x${String.format("%X", status.value)})")
                 }
             }
-        } catch (e: PcanException) {
-            throw e
-        } catch (e: Exception) {
-            throw PcanException("PCAN read error: ${e.message}", e)
         }
 
         return null
@@ -116,45 +112,38 @@ class PcanTransport : CanTransport {
     override fun close() {
         if (_isOpen) {
             try {
-                val cls = pcanClass ?: return
-                val uninitMethod = cls.getMethod("Uninitialize", Int::class.java)
-                uninitMethod.invoke(handle, PCAN_USBBUS1)
+                pcan?.Uninitialize(TPCANHandle.PCAN_USBBUS1)
             } catch (_: Exception) { }
             _isOpen = false
-            handle = null
+            pcan = null
         }
     }
 
     companion object {
-        // PCAN channel constants
-        private const val PCAN_USBBUS1 = 0x51
-
-        // PCAN error codes
-        private const val PCAN_ERROR_OK = 0x00000
-        private const val PCAN_ERROR_QRCVEMPTY = 0x00020
-
-        // PCAN baudrate constants (TPCANBaudrate)
-        private const val PCAN_BAUD_500K = 0x001C
-        private const val PCAN_BAUD_250K = 0x011C
-        private const val PCAN_BAUD_125K = 0x031C
-        private const val PCAN_BAUD_1M = 0x0014
-
-        fun bitrateToTpcan(bitrate: Int): Int = when (bitrate) {
-            1_000_000 -> PCAN_BAUD_1M
-            500_000 -> PCAN_BAUD_500K
-            250_000 -> PCAN_BAUD_250K
-            125_000 -> PCAN_BAUD_125K
-            else -> PCAN_BAUD_500K
+        fun bitrateToTpcan(bitrate: Int): TPCANBaudrate = when (bitrate) {
+            1_000_000 -> TPCANBaudrate.PCAN_BAUD_1M
+            500_000 -> TPCANBaudrate.PCAN_BAUD_500K
+            250_000 -> TPCANBaudrate.PCAN_BAUD_250K
+            125_000 -> TPCANBaudrate.PCAN_BAUD_125K
+            100_000 -> TPCANBaudrate.PCAN_BAUD_100K
+            50_000 -> TPCANBaudrate.PCAN_BAUD_50K
+            20_000 -> TPCANBaudrate.PCAN_BAUD_20K
+            10_000 -> TPCANBaudrate.PCAN_BAUD_10K
+            else -> TPCANBaudrate.PCAN_BAUD_500K
         }
 
         /**
-         * Check if PCAN-Basic native library is available.
+         * Check if PCAN-Basic native library is available on this system.
          */
         fun isAvailable(): Boolean {
             return try {
-                Class.forName("peak.can.basic.PCANBasic")
-                true
-            } catch (_: ClassNotFoundException) {
+                val api = PCANBasic()
+                api.initializeAPI()
+            } catch (_: UnsatisfiedLinkError) {
+                false
+            } catch (_: ExceptionInInitializerError) {
+                false
+            } catch (_: Exception) {
                 false
             }
         }

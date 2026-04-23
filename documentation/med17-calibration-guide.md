@@ -22,7 +22,7 @@ MED17 follows the same torque-based architecture as ME7 — torque request, load
 | Torque Tables | KFMIOP / KFMIRL | KFLMIOP / KFLMIRL (same math, different names) |
 | Fuel Trim | Closed/Open Loop (MAF correction via O2) | rk_w STFT/LTFT analysis (Fuel Trim tab) |
 | Boost PID | KFLDRL / KFLDIMX | Same maps, same PID — but non-linear response with aftermarket hardware |
-| Log Format | ME7Logger CSV | ScorpionEFI CSV |
+| Log Format | ME7Logger CSV | DS1 CSV |
 
 The most significant architectural difference is the adaptive VE model. ME7 uses static maps (KFURL, KFPBRK) to convert between pressure and load — if you change hardware, you have to recalibrate those maps manually. MED17 replaces this with an adaptive volumetric efficiency value (`fupsrls_w`, approximately 0.091 for the 2.5T at standard conditions) that the ECU adjusts continuously. This means you never have to manually scale the MAF or fiddle with VE correction factors. The ECU handles it. When the adaptive model drifts (hardware changes, altitude, aging), the ECU compensates through fuel trims — and the Fuel Trim tool corrects those.
 
@@ -127,13 +127,13 @@ The Fuel Trim tab is the MED17 equivalent of the ME7 Closed Loop MLHFM workflow.
 
 The FuelTrimAnalyzer works as follows:
 
-1. **Parse logs:** Load one or more ScorpionEFI CSV files containing fuel trim data
+1. **Parse logs:** Load one or more DS1 CSV files containing fuel trim data
 2. **Bin samples:** Each sample's RPM (`nmot_w`) and load (`rl_w`) are snapped to the nearest `rk_w` grid cell. The combined trim `(STFT - 1.0) + (LTFT - 1.0)` is accumulated per cell as a percentage
 3. **Average:** Cells with at least 3 samples get an average correction. Cells below the sample threshold are left uncorrected
 4. **Apply:** The corrected `rk_w` value is `original_value * (1 + correction% / 100)` — positive correction adds fuel, negative removes it
 5. **Flag outliers:** Cells where the average trim exceeds +/-3% are flagged with warnings and sample counts
 
-### What to Log (ScorpionEFI)
+### What to Log (DS1)
 
 | Signal | Purpose |
 |--------|---------|
@@ -148,7 +148,7 @@ Log at a variety of RPM and load conditions — idle, cruise, part-throttle, lig
 
 1. Select the `rk_w` map definition in the Configuration tab
 2. Open the **Fuel Trim** tab (visible only in MED17 mode)
-3. Load one or more ScorpionEFI CSV logs using the file picker
+3. Load one or more DS1 CSV logs using the file picker
 4. Review the per-bin average trims — look for systematic patterns (e.g., consistently rich at high RPM, lean at low load)
 5. Review the corrected `rk_w` output map
 6. Write the corrected `rk_w` to your BIN
@@ -177,7 +177,7 @@ MED17's live VE value (`fupsrls_w`) is approximately 0.091 for the 2.5T TFSI at 
 
 ### Log Overlay
 
-PLSOL supports loading a directory of ScorpionEFI logs to overlay actual WOT data points on the pressure/load chart. The logged points appear in green alongside the theoretical curves — so you can see exactly where your hardware is operating relative to the model. On MED17, the overlay extracts the mean `fupsrls_w` (≈ KFURL) directly from the logs and auto-fills it into the calculator. No guessing, no manual entry.
+PLSOL supports loading a directory of DS1 logs to overlay actual WOT data points on the pressure/load chart. The logged points appear in green alongside the theoretical curves — so you can see exactly where your hardware is operating relative to the model. On MED17, the overlay extracts the mean `fupsrls_w` (≈ KFURL) directly from the logs and auto-fills it into the calculator. No guessing, no manual entry.
 
 <img src="/documentation/images/med17/plsol_med17.png" width="800">
 
@@ -333,7 +333,7 @@ The linearization process is tedious to do by hand — you need WOT pulls at var
 
 The algorithm fits a one-dimensional polynomial to the duty cycle vs. boost relationship from logged data. This produces a smoother result from far more data — MxT can parse millions of data points across dozens of log files, versus the handful of points you'd get from doing it manually.
 
-### What to Log (ScorpionEFI)
+### What to Log (DS1)
 
 | Signal | Description |
 |--------|-------------|
@@ -344,7 +344,7 @@ The algorithm fits a one-dimensional polynomial to the duty cycle vs. boost rela
 | `tvldste_w` | Final wastegate duty cycle (%) |
 | `gangi` | Selected gear |
 
-MxT's adapter layer handles the translation from ScorpionEFI signal names to the internal equivalents automatically — configure the MED17 headers in the Configuration tab and load your ScorpionEFI logs.
+MxT's adapter layer handles the translation from DS1 signal names to the internal equivalents automatically — configure the MED17 headers in the Configuration tab and load your DS1 logs.
 
 ### Usage
 
@@ -423,7 +423,7 @@ Sometimes the maximum load target won't be reached because a torque monitor or i
 2. If `rlsol_w < LDRXN * 0.95` during WOT, flag a **Torque Intervention Warning**
 3. If `psrg_w` consistently falls more than 50 mbar below `pvds_w`, flag a **Boost Target Not Reached** warning
 
-### What to Log (ScorpionEFI)
+### What to Log (DS1)
 
 | Signal | Description |
 |--------|-------------|
@@ -436,7 +436,7 @@ Sometimes the maximum load target won't be reached because a torque monitor or i
 | `rlsol_w` | Requested load (%) |
 | `rl_w` | Actual engine load (%) |
 
-Get WOT pulls across the full RPM range. More data points produce better suggestions. ScorpionEFI logs work identically to ME7Logger logs — load a single file or a directory.
+Get WOT pulls across the full RPM range. More data points produce better suggestions. DS1 logs work identically to ME7Logger logs — load a single file or a directory.
 
 ### Usage
 
@@ -444,11 +444,11 @@ Get WOT pulls across the full RPM range. More data points produce better suggest
 
 1. Go to the **Configuration** tab
 2. Select map definitions for KFLDRL and KFLDIMX
-3. Ensure the log header definitions are configured for ScorpionEFI signals
+3. Ensure the log header definitions are configured for DS1 signals
 
 #### Step 2: Collect WOT Logs
 
-Log the signals listed above during WOT pulls with ScorpionEFI. Get pulls across the full RPM range — more data points produce better suggestions.
+Log the signals listed above during WOT pulls with DS1. Get pulls across the full RPM range — more data points produce better suggestions.
 
 #### Step 3: Load and Analyze
 

@@ -40,11 +40,24 @@ private fun hsbColor(value: Double): Color {
     return Color(rgb or (0xFF shl 24))
 }
 
+/** Blend an overlay color on top of a base color using the overlay's alpha. */
+private fun blendColors(base: Color, overlay: Color): Color {
+    val a = overlay.alpha
+    return Color(
+        red = base.red * (1 - a) + overlay.red * a,
+        green = base.green * (1 - a) + overlay.green * a,
+        blue = base.blue * (1 - a) + overlay.blue * a,
+        alpha = 1f
+    )
+}
+
 @Composable
 fun MapTable(
     map: Map3d,
     editable: Boolean = true,
-    onMapChanged: ((Map3d) -> Unit)? = null
+    onMapChanged: ((Map3d) -> Unit)? = null,
+    cellColorProvider: ((rowIdx: Int, colIdx: Int) -> Color?)? = null,
+    onCellSelected: ((rowIdx: Int, colIdx: Int) -> Unit)? = null
 ) {
     val zAxis = map.zAxis
     if (zAxis.isEmpty() || zAxis[0].isEmpty()) return
@@ -79,10 +92,14 @@ fun MapTable(
     var editingCol by remember { mutableStateOf(-1) }
     var editText by remember { mutableStateOf("") }
 
-    fun notifyChanged(newZAxis: Array<Array<Double>>) {
+    fun notifyChanged(newZAxis: Array<Array<Double>>, debounce: Boolean = false) {
         debounceJob?.cancel()
-        debounceJob = scope.launch {
-            delay(100)
+        if (debounce) {
+            debounceJob = scope.launch {
+                delay(100)
+                onMapChanged?.invoke(Map3d(map.xAxis.clone(), map.yAxis.clone(), newZAxis))
+            }
+        } else {
             onMapChanged?.invoke(Map3d(map.xAxis.clone(), map.yAxis.clone(), newZAxis))
         }
     }
@@ -123,7 +140,7 @@ fun MapTable(
                 }
             }
         }
-        notifyChanged(newZAxis)
+        notifyChanged(newZAxis, debounce = true)
     }
 
     val horizontalScroll = rememberScrollState()
@@ -211,9 +228,13 @@ fun MapTable(
                                     1.0 - (value - minValue) / (maxValue - minValue)
                                 } else 0.5
 
+                                val baseColor = hsbColor(norm)
                                 val bgColor = when {
                                     isSelected -> Color.Cyan.copy(alpha = 0.3f)
-                                    else -> hsbColor(norm)
+                                    else -> {
+                                        val overlay = cellColorProvider?.invoke(r, c)
+                                        if (overlay != null) blendColors(baseColor, overlay) else baseColor
+                                    }
                                 }
 
                                 Box(
@@ -234,6 +255,7 @@ fun MapTable(
                                                 commitEdit()
                                                 selectedRow = r
                                                 selectedCol = c
+                                                onCellSelected?.invoke(r, c)
                                             }
                                         },
                                     contentAlignment = Alignment.Center

@@ -15,7 +15,13 @@ object LdrpidCalculator {
         val nonLinearOutput: Map3d,
         val linearOutput: Map3d,
         val kfldrl: Map3d,
-        val kfldimx: Map3d
+        val kfldimx: Map3d,
+        /** Per-cell sample count for the non-linear table [rpmIdx][dutyIdx]. Cells with 0 were interpolated. */
+        val nonLinearSampleCounts: Array<IntArray> = emptyArray(),
+        /** Per-cell sample count for KFLDRL [rpmIdx][pressureIdx]. Derived from non-linear table. */
+        val kfldrlSampleCounts: Array<IntArray> = emptyArray(),
+        /** Per-cell sample count for KFLDIMX [rpmIdx][pressureIdx]. Derived from KFLDRL. */
+        val kfldimxSampleCounts: Array<IntArray> = emptyArray()
     )
 
     private const val DEFAULT_RPM_ROWS = 8
@@ -117,25 +123,162 @@ object LdrpidCalculator {
             }
         }
 
-        for (array in nonLinearTable) {
-            array.sort()
-            for (i in 0 until array.size - 1) {
-                if (array[i] == 0.0) array[i] = 0.1
-                if (array[i] >= array[i + 1]) {
-                    array[i + 1] = if (i > 0) {
-                        val theta = array[i] / array[i - 1]
-                        array[i] * (1 + (theta - 1) / 2)
-                    } else {
-                        array[i] * 1.1
+        // Interpolate empty cells and enforce monotonicity.
+        // Empty cells are filled using physical model: boost scales with duty cycle.
+        for (rowIdx in nonLinearTable.indices) {
+            val row = nonLinearTable[rowIdx]
+            val filledIndices = row.indices.filter { count[rowIdx][it] > 0 }
+
+            if (filledIndices.isEmpty()) {
+                // No data in this RPM row — fill with small ascending placeholders
+                for (i in row.indices) row[i] = 0.1 + i * 0.01
+            } else {
+                // Interpolate/extrapolate empty cells
+                for (i in row.indices) {
+                    if (row[i] == 0.0) {
+                        val left = filledIndices.lastOrNull { it < i }
+                        val right = filledIndices.firstOrNull { it > i }
+                        row[i] = when {
+                            left != null && right != null -> {
+                                // Between two data points: linear interpolation
+                                val t = (i - left).toDouble() / (right - left)
+                                row[left] + t * (row[right] - row[left])
+                            }
+                            left != null -> {
+                                // Beyond rightmost data: gentle upward extrapolation
+                                val prevFilled = filledIndices.lastOrNull { it < left }
+                                if (prevFilled != null) {
+                                    val slope = (row[left] - row[prevFilled]) / (left - prevFilled)
+                                    (row[left] + slope * (i - left)).coerceAtLeast(row[left])
+                                } else {
+                                    row[left] * (1.0 + 0.02 * (i - left))
+                                }
+                            }
+                            right != null -> {
+                                // Before leftmost data: scale down proportionally to duty.
+                                // Physically, lower duty → lower boost (wastegate more open).
+                                val dutyHere = dutyAxis[i].coerceAtLeast(1.0)
+                                val dutyThere = dutyAxis[right].coerceAtLeast(1.0)
+                                (row[right] * dutyHere / dutyThere).coerceAtLeast(0.1)
+                            }
+                            else -> 0.1
+                        }
                     }
-                    if (array[i + 1].isNaN() || array[i + 1] == 0.0) {
-                        array[i + 1] = array[i] + 0.1
-                    }
+                }
+            }
+
+            // Enforce minimum and monotonicity (higher duty → higher or equal boost)
+            for (i in row.indices) {
+                if (row[i] <= 0.0 || row[i].isNaN()) row[i] = 0.1
+            }
+            for (i in 1 until row.size) {
+                if (row[i] < row[i - 1]) {
+                    row[i] = row[i - 1] + 0.01
                 }
             }
         }
 
         return Map3d(dutyAxis, rpmAxis, nonLinearTable)
+    }
+
+    /**
+     * Calculate the non-linear boost table and return per-cell sample counts.
+     * Cells with count=0 were interpolated rather than measured.
+     */
+    fun calculateNonLinearTableWithCounts(
+        values: Map<Me7LogFileContract.Header, List<Double>>,
+        kfldrlMap: Map3d
+    ): Pair<Map3d, Array<IntArray>> {
+        val throttlePlateAngles = values[Me7LogFileContract.Header.THROTTLE_PLATE_ANGLE_HEADER]!!
+        val rpms = values[Me7LogFileContract.Header.RPM_COLUMN_HEADER]!!
+        val dutyCycles = values[Me7LogFileContract.Header.WASTEGATE_DUTY_CYCLE_HEADER]!!
+        val barometricPressures = values[Me7LogFileContract.Header.BAROMETRIC_PRESSURE_HEADER]!!
+        val absoluteBoostPressures = values[Me7LogFileContract.Header.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER]!!
+
+        val rpmAxis = deriveRpmAxis(values, kfldrlMap.yAxis)
+        val dutyAxis = deriveDutyAxis(kfldrlMap.xAxis)
+
+        val nonLinearTable = Array(rpmAxis.size) { Array(dutyAxis.size) { 0.0 } }
+        val pressure = Array(rpmAxis.size) { DoubleArray(dutyAxis.size) }
+        val count = Array(rpmAxis.size) { DoubleArray(dutyAxis.size) }
+        val sampleCounts = Array(rpmAxis.size) { IntArray(dutyAxis.size) }
+
+        for (i in throttlePlateAngles.indices) {
+            if (throttlePlateAngles[i] >= 80) {
+                val rpm = rpms[i]
+                val dutyCycle = dutyCycles[i]
+                val barometricPressure = barometricPressures[i]
+                val absoluteBoostPressure = absoluteBoostPressures[i]
+                val relativeBoostPressure = absoluteBoostPressure - barometricPressure
+
+                val rpmIndex = Index.getInsertIndex(rpmAxis.toList(), rpm)
+                val dutyCycleIndex = Index.getInsertIndex(dutyAxis.toList(), dutyCycle)
+
+                if (relativeBoostPressure > 0) {
+                    pressure[rpmIndex][dutyCycleIndex] += relativeBoostPressure
+                    count[rpmIndex][dutyCycleIndex] += 1
+                    sampleCounts[rpmIndex][dutyCycleIndex]++
+                }
+            }
+        }
+
+        for (j in nonLinearTable.indices) {
+            for (k in nonLinearTable[j].indices) {
+                nonLinearTable[j][k] = if (count[j][k] != 0.0) {
+                    (pressure[j][k] / count[j][k]) * 0.0145038
+                } else {
+                    pressure[j][k] * 0.0145038
+                }
+            }
+        }
+
+        for (rowIdx in nonLinearTable.indices) {
+            val row = nonLinearTable[rowIdx]
+            val filledIndices = row.indices.filter { count[rowIdx][it] > 0 }
+
+            if (filledIndices.isEmpty()) {
+                for (i in row.indices) row[i] = 0.1 + i * 0.01
+            } else {
+                for (i in row.indices) {
+                    if (row[i] == 0.0) {
+                        val left = filledIndices.lastOrNull { it < i }
+                        val right = filledIndices.firstOrNull { it > i }
+                        row[i] = when {
+                            left != null && right != null -> {
+                                val t = (i - left).toDouble() / (right - left)
+                                row[left] + t * (row[right] - row[left])
+                            }
+                            left != null -> {
+                                val prevFilled = filledIndices.lastOrNull { it < left }
+                                if (prevFilled != null) {
+                                    val slope = (row[left] - row[prevFilled]) / (left - prevFilled)
+                                    (row[left] + slope * (i - left)).coerceAtLeast(row[left])
+                                } else {
+                                    row[left] * (1.0 + 0.02 * (i - left))
+                                }
+                            }
+                            right != null -> {
+                                val dutyHere = dutyAxis[i].coerceAtLeast(1.0)
+                                val dutyThere = dutyAxis[right].coerceAtLeast(1.0)
+                                (row[right] * dutyHere / dutyThere).coerceAtLeast(0.1)
+                            }
+                            else -> 0.1
+                        }
+                    }
+                }
+            }
+
+            for (i in row.indices) {
+                if (row[i] <= 0.0 || row[i].isNaN()) row[i] = 0.1
+            }
+            for (i in 1 until row.size) {
+                if (row[i] < row[i - 1]) {
+                    row[i] = row[i - 1] + 0.01
+                }
+            }
+        }
+
+        return Pair(Map3d(dutyAxis, rpmAxis, nonLinearTable), sampleCounts)
     }
 
     fun calculateLinearTable(nonLinearTable: Array<Array<Double>>, kfldrlMap: Map3d): Map3d {
@@ -160,11 +303,13 @@ object LdrpidCalculator {
     fun calculateKfldrl(nonLinearTable: Array<Array<Double>>, linearTable: Array<Array<Double>>, kfldrlMap: Map3d): Map3d {
         val dutyAxis = if (kfldrlMap.xAxis.size >= 2) kfldrlMap.xAxis else deriveDutyAxis(kfldrlMap.xAxis)
         val kfldrl = Array(nonLinearTable.size) { i ->
+            // Pair boost→duty and sort by boost so interpolation x-axis is ascending
+            val pairs = nonLinearTable[i].zip(dutyAxis).sortedBy { it.first }
+            val sortedBoost = pairs.map { it.first }.toTypedArray()
+            val sortedDuty = pairs.map { it.second }.toTypedArray()
             Array(nonLinearTable[i].size) { j ->
-                val x = nonLinearTable[i]
-                val y = dutyAxis
                 val xi = arrayOf(linearTable[i][j])
-                val result = LinearInterpolation.interpolate(x, y, xi)[0]
+                val result = LinearInterpolation.interpolate(sortedBoost, sortedDuty, xi)[0]
                 if (result.isNaN()) 0.0 else result
             }
         }
@@ -195,15 +340,99 @@ object LdrpidCalculator {
         }
 
         val kfldimx = Array(nonLinearTable.size) { i ->
+            // Pair linearBoostMax→duty and sort by boost for correct interpolation
+            val pairs = linearBoostMax.zip(dutyAxis).sortedBy { it.first }
+            val sortedBoost = pairs.map { it.first }.toTypedArray()
+            val sortedDuty = pairs.map { it.second }.toTypedArray()
             Array(kfldimxXAxis.size) { j ->
-                val x = linearBoostMax
-                val y = dutyAxis
                 val xi = arrayOf(kfldimxXAxis[j])
-                LinearInterpolation.interpolate(x, y, xi)[0]
+                LinearInterpolation.interpolate(sortedBoost, sortedDuty, xi)[0]
             }
         }
 
         return Map3d(kfldimxXAxis, kfldimxMap.yAxis, kfldimx)
+    }
+
+    /**
+     * Derive KFLDRL sample counts from the non-linear table counts.
+     * For each KFLDRL cell (RPM × pressure), find the non-linear duty column
+     * whose boost contributed via interpolation and copy its count.
+     */
+    fun deriveKfldrlSampleCounts(
+        nonLinearTable: Array<Array<Double>>,
+        linearTable: Array<Array<Double>>,
+        nonLinearCounts: Array<IntArray>,
+        kfldrlMap: Map3d
+    ): Array<IntArray> {
+        if (nonLinearTable.isEmpty() || nonLinearTable[0].isEmpty()) {
+            return Array(kfldrlMap.yAxis.size) { IntArray(kfldrlMap.xAxis.size) }
+        }
+        return Array(nonLinearTable.size) { rpmIdx ->
+            val boostValues = nonLinearTable[rpmIdx]
+            IntArray(linearTable[rpmIdx].size) { colIdx ->
+                val targetBoost = linearTable[rpmIdx][colIdx]
+                val nearestDutyIdx = boostValues.indices.minByOrNull {
+                    kotlin.math.abs(boostValues[it] - targetBoost)
+                } ?: 0
+                if (rpmIdx < nonLinearCounts.size && nearestDutyIdx < nonLinearCounts[rpmIdx].size) {
+                    nonLinearCounts[rpmIdx][nearestDutyIdx]
+                } else 0
+            }
+        }
+    }
+
+    /**
+     * Derive KFLDIMX sample counts from KFLDRL counts.
+     * For each KFLDIMX cell, find the corresponding KFLDRL column via index lookup.
+     */
+    fun deriveKfldimxSampleCounts(
+        kfldrlCounts: Array<IntArray>,
+        kfldrlMap: Map3d,
+        kfldimxMap: Map3d
+    ): Array<IntArray> {
+        if (kfldrlCounts.isEmpty()) {
+            return Array(kfldimxMap.yAxis.size) { IntArray(kfldimxMap.xAxis.size) }
+        }
+        return Array(kfldimxMap.yAxis.size) { rpmIdx ->
+            val kfldrlRpmIdx = if (kfldrlMap.yAxis.isNotEmpty()) {
+                Index.getInsertIndex(kfldrlMap.yAxis.toList(), kfldimxMap.yAxis.getOrElse(rpmIdx) { 0.0 })
+            } else rpmIdx
+            IntArray(kfldimxMap.xAxis.size) { colIdx ->
+                val kfldrlColIdx = if (kfldrlMap.xAxis.isNotEmpty()) {
+                    Index.getInsertIndex(kfldrlMap.xAxis.toList(), kfldimxMap.xAxis.getOrElse(colIdx) { 0.0 })
+                } else colIdx
+                if (kfldrlRpmIdx < kfldrlCounts.size && kfldrlColIdx < kfldrlCounts[kfldrlRpmIdx].size) {
+                    kfldrlCounts[kfldrlRpmIdx][kfldrlColIdx]
+                } else 0
+            }
+        }
+    }
+
+    /**
+     * Calculate all LDRPID tables with per-cell sample counts for confidence display.
+     */
+    fun calculateWithCounts(
+        values: Map<Me7LogFileContract.Header, List<Double>>,
+        kfldrlMap: Map3d,
+        kfldimxMap: Map3d
+    ): LdrpidResult {
+        val (nonLinearMap3d, nonLinearCounts) = calculateNonLinearTableWithCounts(values, kfldrlMap)
+        val linearTable = calculateLinearTable(nonLinearMap3d.zAxis, kfldrlMap)
+        val kfldrl = calculateKfldrl(nonLinearMap3d.zAxis, linearTable.zAxis, kfldrlMap)
+        val kfldimxMap3d = calculateKfldimx(nonLinearMap3d.zAxis, linearTable.zAxis, kfldrlMap, kfldimxMap)
+
+        val kfldrlCounts = deriveKfldrlSampleCounts(nonLinearMap3d.zAxis, linearTable.zAxis, nonLinearCounts, kfldrlMap)
+        val kfldimxCounts = deriveKfldimxSampleCounts(kfldrlCounts, kfldrl, kfldimxMap3d)
+
+        return LdrpidResult(
+            nonLinearOutput = nonLinearMap3d,
+            linearOutput = linearTable,
+            kfldrl = kfldrl,
+            kfldimx = kfldimxMap3d,
+            nonLinearSampleCounts = nonLinearCounts,
+            kfldrlSampleCounts = kfldrlCounts,
+            kfldimxSampleCounts = kfldimxCounts
+        )
     }
 
     fun calculateLdrpid(values: Map<Me7LogFileContract.Header, List<Double>>, kfldrlMap: Map3d, kfldimxMap: Map3d): LdrpidResult {
@@ -213,5 +442,50 @@ object LdrpidCalculator {
         val kfldimxMap3d = calculateKfldimx(nonLinearTable.zAxis, linearTable.zAxis, kfldrlMap, kfldimxMap)
 
         return LdrpidResult(nonLinearTable, linearTable, kfldrl, kfldimxMap3d)
+    }
+
+    /**
+     * Check whether multiple log files have consistent boost/duty relationships.
+     * Returns a warning message if files appear to be from different tune stages,
+     * or null if the data looks consistent (or there's only one file).
+     *
+     * The check computes a "tune signature" per file: the median relative boost
+     * pressure observed during WOT. If the signatures differ by more than 50%
+     * (ratio of max to min), the logs likely come from different calibrations
+     * and will produce unreliable KFLDRL output.
+     */
+    fun checkLogConsistency(
+        perFileData: List<Map<Me7LogFileContract.Header, List<Double>>>
+    ): String? {
+        if (perFileData.size <= 1) return null
+
+        val signatures = perFileData.mapNotNull { fileData ->
+            val throttles = fileData[Me7LogFileContract.Header.THROTTLE_PLATE_ANGLE_HEADER] ?: return@mapNotNull null
+            val boosts = fileData[Me7LogFileContract.Header.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER] ?: return@mapNotNull null
+            val baros = fileData[Me7LogFileContract.Header.BAROMETRIC_PRESSURE_HEADER] ?: return@mapNotNull null
+
+            val wotBoosts = throttles.indices
+                .filter { throttles[it] >= 80.0 }
+                .map { boosts[it] - baros[it] }
+                .filter { it > 0 }
+
+            if (wotBoosts.isEmpty()) return@mapNotNull null
+            wotBoosts.sorted()[wotBoosts.size / 2]  // median relative boost
+        }
+
+        if (signatures.size <= 1) return null
+
+        val minSig = signatures.min()
+        val maxSig = signatures.max()
+
+        if (minSig <= 0) return null
+
+        val ratio = maxSig / minSig
+        return if (ratio > 2.0) {
+            "Warning: Loaded log files appear to be from different tune stages " +
+                "(boost levels vary by %.0f%%). ".format((ratio - 1) * 100) +
+                "Mixing logs from different calibrations may produce unreliable " +
+                "KFLDRL/KFLDIMX output. Use logs from a single tune stage for best results."
+        } else null
     }
 }

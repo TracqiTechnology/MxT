@@ -188,12 +188,119 @@ class Med17LogParserTest {
             Med17LogParser.ProgressCallback { _, _ -> progressCalls++ }
         )
 
-        // 3 CSV files → should be called 3 times
-        assertEquals(3, progressCalls, "Progress callback should fire once per file")
+        // All CSV files in test resources/logs/ → should be called once per file
+        val csvCount = logDir.listFiles()!!.count { it.name.endsWith(".csv", true) }
+        assertEquals(csvCount, progressCalls, "Progress callback should fire once per file")
 
-        // Total rows should be sum of all 3 files: 949 + 1347 + 543 = 2839
+        // Total rows should include all parseable logs
         val totalRows = result[H.RPM_COLUMN_HEADER]!!.size
-        assertEquals(2839, totalRows, "Total optimizer rows across all 3 logs")
+        assertTrue(totalRows > 2839, "Total optimizer rows should include new log files (was 2839 for 3 files)")
+    }
+
+    // ── rlmds_w fallback tests (2026 log has rlmds_w but NOT rlsol_w) ──
+
+    @Test
+    fun `parse 2026 log as OPTIMIZER succeeds via rlmds_w fallback`() {
+        val result = parser.parseLogFile(Med17LogParser.LogType.OPTIMIZER, logFile("2026-03-22_18.13.11_log.csv"))
+        val rpmList = result[H.RPM_COLUMN_HEADER]!!
+        assertTrue(rpmList.isNotEmpty(), "2026 log should parse successfully using rlmds_w fallback for rlsol_w")
+    }
+
+    @Test
+    fun `2026 log requested load populated from rlmds_w fallback`() {
+        val result = parser.parseLogFile(Med17LogParser.LogType.OPTIMIZER, logFile("2026-03-22_18.13.11_log.csv"))
+        val reqLoads = result[H.REQUESTED_LOAD_HEADER]!!
+        assertTrue(reqLoads.isNotEmpty(), "Requested load should be populated from rlmds_w")
+        // rlmds_w is load target from torque request — values should be in 0-400% range
+        assertTrue(reqLoads.all { it in -10.0..500.0 }, "Requested load values should be in sane range")
+    }
+
+    @Test
+    fun `2026 log all optimizer signals populated`() {
+        val result = parser.parseLogFile(Med17LogParser.LogType.OPTIMIZER, logFile("2026-03-22_18.13.11_log.csv"))
+
+        assertTrue(result[H.RPM_COLUMN_HEADER]!!.isNotEmpty(), "RPM")
+        assertTrue(result[H.ENGINE_LOAD_HEADER]!!.isNotEmpty(), "Engine load")
+        assertTrue(result[H.REQUESTED_LOAD_HEADER]!!.isNotEmpty(), "Requested load (via rlmds_w)")
+        assertTrue(result[H.THROTTLE_PLATE_ANGLE_HEADER]!!.isNotEmpty(), "Throttle")
+        assertTrue(result[H.WASTEGATE_DUTY_CYCLE_HEADER]!!.isNotEmpty(), "WGDC")
+        assertTrue(result[H.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER]!!.isNotEmpty(), "Actual boost")
+        assertTrue(result[H.REQUESTED_PRESSURE_HEADER]!!.isNotEmpty(), "Requested pressure")
+        assertTrue(result[H.BAROMETRIC_PRESSURE_HEADER]!!.isNotEmpty(), "Baro pressure")
+    }
+
+    @Test
+    fun `2024-10-25 log with both rlsol_w and rlmds_w uses primary rlsol_w`() {
+        // This log has both rlsol_w and rlmds_w — should use rlsol_w (primary)
+        val result = parser.parseLogFile(Med17LogParser.LogType.OPTIMIZER, logFile("2024-10-25_17.50.39_log.csv"))
+        val rpmList = result[H.RPM_COLUMN_HEADER]!!
+        assertTrue(rpmList.isNotEmpty(), "2024-10-25 log should parse successfully")
+        val reqLoads = result[H.REQUESTED_LOAD_HEADER]!!
+        assertTrue(reqLoads.isNotEmpty(), "Requested load should be populated from rlsol_w")
+    }
+
+    @Test
+    fun `2026 log parse diagnostics report rlmds_w as matched`() {
+        parser.parseLogFile(Med17LogParser.LogType.OPTIMIZER, logFile("2026-03-22_18.13.11_log.csv"))
+        val diag = parser.lastDiagnostics
+        assertNotNull(diag, "Parse diagnostics should be populated")
+        assertTrue(diag!!.matchedHeaders.contains("rlmds_w"),
+            "rlmds_w should appear in matched headers: ${diag.matchedHeaders}")
+    }
+
+    @Test
+    fun `2026 log as PLSOL also parses successfully`() {
+        val result = parser.parseLogFile(Med17LogParser.LogType.PLSOL, logFile("2026-03-22_18.13.11_log.csv"))
+        val loadList = result[H.ENGINE_LOAD_HEADER]!!
+        assertTrue(loadList.isNotEmpty(), "PLSOL should parse 2026 log (doesn't need rlsol_w)")
+    }
+
+    @Test
+    fun `PLSOL parse produces all required signals for chart display`() {
+        // Bug: customer says "nothing displays when I upload a log"
+        // Verify ALL signals the PlsolScreen needs are populated.
+        val result = parser.parseLogFile(Med17LogParser.LogType.PLSOL, logFile("2025-01-21_16.24.32_log(1).csv"))
+
+        val loads = result[H.ENGINE_LOAD_HEADER] ?: emptyList()
+        val pressures = result[H.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER] ?: emptyList()
+        val baros = result[H.BAROMETRIC_PRESSURE_HEADER] ?: emptyList()
+        val throttles = result[H.THROTTLE_PLATE_ANGLE_HEADER] ?: emptyList()
+        val fupsrls = result[H.FUPSRLS_HEADER] ?: emptyList()
+
+        assertTrue(loads.isNotEmpty(), "ENGINE_LOAD should be populated")
+        assertTrue(pressures.isNotEmpty(), "BOOST PRESSURE should be populated")
+        assertTrue(baros.isNotEmpty(), "BARO should be populated")
+        assertTrue(throttles.isNotEmpty(), "THROTTLE should be populated")
+        assertTrue(fupsrls.isNotEmpty(), "FUPSRLS should be populated from log")
+
+        // All lists should have same length (one entry per parsed row)
+        assertEquals(loads.size, pressures.size, "loads and pressures should have same count")
+        assertEquals(loads.size, baros.size, "loads and baros should have same count")
+        assertEquals(loads.size, throttles.size, "loads and throttles should have same count")
+        // fupsrls may be shorter if some rows lack it, but should not be empty
+    }
+
+    @Test
+    fun `PLSOL WOT filter passes rows from WOT log`() {
+        // PlsolScreen.kt filters to throttle > 90%. Verify WOT log has qualifying rows.
+        val result = parser.parseLogFile(Med17LogParser.LogType.PLSOL, logFile("2025-01-21_16.24.32_log(1).csv"))
+
+        val throttles = result[H.THROTTLE_PLATE_ANGLE_HEADER] ?: emptyList()
+        val wotCount = throttles.count { it > 90.0 }
+
+        assertTrue(wotCount > 0,
+            "WOT log should have rows with throttle > 90%. " +
+            "Max throttle: ${throttles.maxOrNull()}, total rows: ${throttles.size}")
+    }
+
+    @Test
+    fun `PLSOL parse extracts intake temperature from log`() {
+        val result = parser.parseLogFile(Med17LogParser.LogType.PLSOL, logFile("2025-01-21_16.24.32_log(1).csv"))
+
+        val intakeTemps = result[H.INTAKE_TEMPERATURE_HEADER] ?: emptyList()
+        assertTrue(intakeTemps.isNotEmpty(), "Intake temperature (tans) should be parsed from log")
+        assertTrue(intakeTemps.all { it in -40.0..100.0 },
+            "Intake temps should be physically plausible (-40°C to 100°C)")
     }
 
     // ── PFI_SPLIT log type ──────────────────────────────────────────

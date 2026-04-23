@@ -312,7 +312,77 @@ class LdrpidMed17E2ETest {
         assertTrue(hasBoostData, "WOT log should produce non-trivial boost values")
     }
 
-    // ── 11. Degenerate maps (partial BIN) produce sensible output ─────
+    // ── 11. NonLinear boost values are in correct duty-column positions ──
+
+    @Test
+    fun `nonLinear boost at RPM 5000 has data spread across columns not just right edge`() {
+        // Bug: sort() pushed real boost data to the rightmost columns and
+        // filled left columns with 0.10/0.11/0.12 filler. After fix, data
+        // should appear in the actual duty-cycle columns where it was measured.
+        val parser = Med17LogParser()
+        val med17Data = parser.parseLogFile(LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
+        val me7Data = Med17LogAdapter.toMe7LdrpidFormat(med17Data)
+
+        val result = LdrpidCalculator.calculateLdrpid(me7Data, buildKfldrlMap(), buildKfldimxMap())
+
+        // RPM=5000 is index 2. The log has WOT data at various duty cycles for this RPM.
+        // After fix, real boost data should NOT all be crammed into the last 4-5 columns.
+        val row5000 = result.nonLinearOutput.zAxis[2]
+
+        // Count columns with filler-level values (< 0.5 PSI)
+        val fillerCount = row5000.count { it < 0.5 }
+
+        // With the sort bug, 5 of 10 columns are filler (0.10-0.12).
+        // After fix, at most 2-3 columns should be filler (duty ranges with no WOT data)
+        assertTrue(fillerCount <= 4,
+            "RPM=5000 row should not have >4 filler columns. Got $fillerCount filler in: ${row5000.map { "%.2f".format(it) }}")
+    }
+
+    // ── 12. KFLDRL at low RPM should NOT echo the duty axis ────────
+
+    @Test
+    fun `KFLDRL at populated RPMs is not a duty axis echo`() {
+        // Bug: When nonLinear was all ~0.12, KFLDRL echoed [10,20,30,...,95].
+        // After fix, KFLDRL at RPMs with actual WOT data should have meaningful
+        // duty corrections, not a 1:1 echo of the duty axis.
+        val parser = Med17LogParser()
+        val med17Data = parser.parseLogFile(LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
+        val me7Data = Med17LogAdapter.toMe7LdrpidFormat(med17Data)
+
+        val result = LdrpidCalculator.calculateLdrpid(me7Data, buildKfldrlMap(), buildKfldimxMap())
+
+        // RPM=5500 (index 3) has WOT data in the log. KFLDRL should NOT echo axis.
+        val kfldrlRow = result.kfldrl.zAxis[3]
+        val isExactAxisEcho = kfldrlRow.zip(dutyAxis).all { (v, d) ->
+            kotlin.math.abs(v - d) < 0.01
+        }
+        assertFalse(isExactAxisEcho,
+            "KFLDRL at RPM=5500 should NOT be an exact echo of the duty axis. " +
+            "Got: ${kfldrlRow.map { "%.2f".format(it) }}")
+
+        // RPMs with no WOT data (like 3000) may echo the axis — that's acceptable
+        // since placeholder values produce proportional duty output.
+    }
+
+    // ── 13. KFLDIMX has values below max duty ──────────────────────
+
+    @Test
+    fun `KFLDIMX values span a range not all clamped to max`() {
+        val parser = Med17LogParser()
+        val med17Data = parser.parseLogFile(LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
+        val me7Data = Med17LogAdapter.toMe7LdrpidFormat(med17Data)
+
+        val result = LdrpidCalculator.calculateLdrpid(me7Data, buildKfldrlMap(), buildKfldimxMap())
+
+        val kfldimxFlat = result.kfldimx.zAxis.flatMap { it.toList() }
+        val distinctRounded = kfldimxFlat.map { "%.0f".format(it) }.distinct()
+
+        assertTrue(distinctRounded.size >= 3,
+            "KFLDIMX should have at least 3 distinct values, not all clamped. " +
+            "Distinct values: $distinctRounded")
+    }
+
+    // ── 14. Degenerate maps (partial BIN) produce sensible output ─────
 
     @Test
     fun `degenerate 1-row map from partial BIN derives RPM axis from log data`() {
@@ -341,5 +411,51 @@ class LdrpidMed17E2ETest {
         val rowsWithRealBoost = result.nonLinearOutput.zAxis.count { row -> row.any { it > 1.0 } }
         assertTrue(rowsWithRealBoost >= 2,
             "Degenerate map recovery should still produce ≥2 rows with real boost data")
+    }
+
+    // ── 15. Log consistency check — single file is always clean ────
+
+    @Test
+    fun `single log file produces no consistency warning`() {
+        val parser = Med17LogParser()
+        val data = parser.parseLogFile(LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
+        val me7Data = Med17LogAdapter.toMe7LdrpidFormat(data)
+        val warning = LdrpidCalculator.checkLogConsistency(listOf(me7Data))
+        assertNull(warning, "Single log should never trigger consistency warning")
+    }
+
+    // ── 16. Conflicting logs from different tune stages trigger warning ─
+
+    @Test
+    fun `mixing logs from different tune stages triggers consistency warning`() {
+        val parser = Med17LogParser()
+        // 2025 log: aggressive tune, 2000-3400 hPa boost, duty 43-100%
+        val aggressive = Med17LogAdapter.toMe7LdrpidFormat(
+            parser.parseLogFile(LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
+        )
+        // 2026 log: low boost, 300-700 hPa, duty pinned at ~20%
+        val lowBoost = Med17LogAdapter.toMe7LdrpidFormat(
+            Med17LogParser().parseLogFile(LogType.LDRPID, logFile("2026-03-22_18.13.11_log.csv"))
+        )
+        val warning = LdrpidCalculator.checkLogConsistency(listOf(aggressive, lowBoost))
+        assertNotNull(warning, "Mixing aggressive and low-boost logs should trigger warning")
+        assertTrue(warning.contains("different tune stages"),
+            "Warning should mention 'different tune stages'")
+    }
+
+    // ── 17. Consistent logs from same tune stage produce no warning ──
+
+    @Test
+    fun `consistent logs from similar tune stage produce no warning`() {
+        val parser = Med17LogParser()
+        // Two logs from similar tune stages
+        val log1 = Med17LogAdapter.toMe7LdrpidFormat(
+            parser.parseLogFile(LogType.LDRPID, logFile("2023-05-19_21.31.12_log.csv"))
+        )
+        val log2 = Med17LogAdapter.toMe7LdrpidFormat(
+            Med17LogParser().parseLogFile(LogType.LDRPID, logFile("2024-10-25_17.50.39_log.csv"))
+        )
+        val warning = LdrpidCalculator.checkLogConsistency(listOf(log1, log2))
+        assertNull(warning, "Similar-stage logs should not produce a warning")
     }
 }

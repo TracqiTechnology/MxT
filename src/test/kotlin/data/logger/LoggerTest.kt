@@ -191,6 +191,331 @@ class Me7LoggerProcessTest {
     }
 }
 
+class Me7LoggerProcessEdgeCaseTest {
+
+    // --- Malformed header tests ---
+
+    @Test
+    fun `header with fewer aliases than signals pads with empty strings`() = runBlocking {
+        val input = """
+            TimeStamp, nmot_w, rl_w, pvdks_w
+              sec.ms , 1/min , %   , mbar
+            "TIME","EngineSpeed"
+            0.0, 2400, 35.2, 1013
+        """.trimIndent()
+
+        val logger = Me7LoggerProcess()
+        logger.parseOutputStream(BufferedReader(StringReader(input)))
+
+        val vars = logger.variables.value
+        assertEquals(4, vars.size)
+        assertEquals("EngineSpeed", vars[1].alias)
+        // Missing aliases should be empty
+        assertEquals("", vars[2].alias)
+        assertEquals("", vars[3].alias)
+    }
+
+    @Test
+    fun `header with fewer units than signals pads with empty strings`() = runBlocking {
+        val input = """
+            TimeStamp, nmot_w, rl_w, pvdks_w
+              sec.ms
+            "TIME","EngineSpeed","EngineLoad","BoostPressure"
+            0.0, 2400, 35.2, 1013
+        """.trimIndent()
+
+        val logger = Me7LoggerProcess()
+        logger.parseOutputStream(BufferedReader(StringReader(input)))
+
+        val vars = logger.variables.value
+        assertEquals(4, vars.size)
+        assertEquals("sec.ms", vars[0].unit.trim())
+        assertEquals("", vars[1].unit)
+        assertEquals("", vars[2].unit)
+    }
+
+    // --- Non-numeric data handling ---
+
+    @Test
+    fun `data row with non-numeric values defaults to zero`() = runBlocking {
+        val input = """
+            TimeStamp, nmot_w, rl_w
+              sec.ms , 1/min , %
+            "TIME","EngineSpeed","EngineLoad"
+            0.0, abc, 35.2
+            0.05, 2400, xyz
+        """.trimIndent()
+
+        val logger = Me7LoggerProcess()
+        logger.parseOutputStream(BufferedReader(StringReader(input)))
+
+        val session = logger.session.value!!
+        assertEquals(2, session.sampleCount)
+        // "abc" → 0.0
+        assertEquals(0.0, session.samples[0].values[1], 0.001)
+        assertEquals(35.2, session.samples[0].values[2], 0.1)
+        // "xyz" → 0.0
+        assertEquals(2400.0, session.samples[1].values[1], 0.1)
+        assertEquals(0.0, session.samples[1].values[2], 0.001)
+    }
+
+    @Test
+    fun `data row with NaN and Infinity strings defaults to zero`() = runBlocking {
+        val input = """
+            TimeStamp, nmot_w, rl_w
+              sec.ms , 1/min , %
+            "TIME","EngineSpeed","EngineLoad"
+            0.0, NaN, Infinity
+        """.trimIndent()
+
+        val logger = Me7LoggerProcess()
+        logger.parseOutputStream(BufferedReader(StringReader(input)))
+
+        val session = logger.session.value!!
+        assertEquals(1, session.sampleCount)
+        // Kotlin's toDoubleOrNull() parses "NaN" and "Infinity" as valid doubles
+        // Verify they don't crash and produce a sample
+        assertEquals(3, session.samples[0].values.size)
+    }
+
+    @Test
+    fun `data row with fewer fields than header still produces sample`() = runBlocking {
+        val input = """
+            TimeStamp, nmot_w, rl_w, pvdks_w
+              sec.ms , 1/min , %   , mbar
+            "TIME","EngineSpeed","EngineLoad","BoostPressure"
+            0.0, 2400
+        """.trimIndent()
+
+        val logger = Me7LoggerProcess()
+        logger.parseOutputStream(BufferedReader(StringReader(input)))
+
+        val session = logger.session.value!!
+        assertEquals(1, session.sampleCount)
+        // Only 2 values parsed (fewer than 4 header vars)
+        assertEquals(2, session.samples[0].values.size)
+    }
+
+    @Test
+    fun `data row with single field is skipped`() = runBlocking {
+        val input = """
+            TimeStamp, nmot_w, rl_w
+              sec.ms , 1/min , %
+            "TIME","EngineSpeed","EngineLoad"
+            0.0
+            0.05, 2400, 35.2
+        """.trimIndent()
+
+        val logger = Me7LoggerProcess()
+        logger.parseOutputStream(BufferedReader(StringReader(input)))
+
+        val session = logger.session.value!!
+        // First data row "0.0" has only 1 field (parts.size < 2), so skipped
+        assertEquals(1, session.sampleCount)
+        assertEquals(0.05, session.samples[0].timestamp, 0.001)
+    }
+
+    // --- Comment handling ---
+
+    @Test
+    fun `comments between header and data rows are skipped`() = runBlocking {
+        val input = """
+            ; Preamble comment
+            TimeStamp, nmot_w, rl_w
+              sec.ms , 1/min , %
+            "TIME","EngineSpeed","EngineLoad"
+            ; Inline comment after header
+            0.0, 2400, 35.2
+            0.05, 2450, 36.1
+        """.trimIndent()
+
+        val logger = Me7LoggerProcess()
+        logger.parseOutputStream(BufferedReader(StringReader(input)))
+
+        val session = logger.session.value!!
+        assertEquals(2, session.sampleCount)
+        assertEquals(2400.0, session.samples[0].values[1], 0.1)
+    }
+
+    @Test
+    fun `blank lines between header rows are skipped correctly`() = runBlocking {
+        // Blank lines between rows should be skipped without advancing headerRowCount
+        val input = """
+            ; Comment
+            
+            TimeStamp, nmot_w
+            
+              sec.ms , 1/min
+            
+            "TIME","EngineSpeed"
+            0.0, 2400
+        """.trimIndent()
+
+        val logger = Me7LoggerProcess()
+        logger.parseOutputStream(BufferedReader(StringReader(input)))
+
+        val vars = logger.variables.value
+        assertEquals(2, vars.size)
+        assertEquals("TimeStamp", vars[0].name)
+        assertEquals("EngineSpeed", vars[1].alias)
+
+        val session = logger.session.value!!
+        assertEquals(1, session.sampleCount)
+    }
+
+    // --- Lifecycle edge cases ---
+
+    @Test
+    fun `startLogging without connect sets error`() = runBlocking {
+        val logger = Me7LoggerProcess()
+
+        logger.startLogging()
+
+        assertEquals(LoggerStatus.ERROR, logger.status.value)
+        assertTrue(logger.statusMessage.value.contains("Not configured"))
+    }
+
+    @Test
+    fun `stopLogging without startLogging is safe`() = runBlocking {
+        val logger = Me7LoggerProcess()
+
+        // Should not throw
+        logger.stopLogging()
+
+        assertEquals(LoggerStatus.CONNECTED, logger.status.value)
+    }
+
+    @Test
+    fun `disconnect resets all state`() = runBlocking {
+        val logger = Me7LoggerProcess()
+
+        // Parse some data to populate state
+        val input = """
+            TimeStamp, nmot_w
+              sec.ms , 1/min
+            "TIME","EngineSpeed"
+            0.0, 2400
+        """.trimIndent()
+        logger.parseOutputStream(BufferedReader(StringReader(input)))
+        assertEquals(LoggerStatus.CONNECTED, logger.status.value)
+        assertTrue(logger.variables.value.isNotEmpty())
+
+        // Disconnect should clear everything
+        logger.disconnect()
+
+        assertEquals(LoggerStatus.DISCONNECTED, logger.status.value)
+        assertEquals("", logger.statusMessage.value)
+        assertTrue(logger.variables.value.isEmpty())
+    }
+
+    // --- Minimum viable input ---
+
+    @Test
+    fun `single data row produces valid session`() = runBlocking {
+        val input = """
+            TimeStamp, nmot_w
+              sec.ms , 1/min
+            "TIME","EngineSpeed"
+            0.0, 2400
+        """.trimIndent()
+
+        val logger = Me7LoggerProcess()
+        logger.parseOutputStream(BufferedReader(StringReader(input)))
+
+        val session = logger.session.value!!
+        assertEquals(1, session.sampleCount)
+        assertEquals(0.0, session.duration, 0.001) // single sample → 0 duration
+    }
+
+    @Test
+    fun `header-only input produces empty session with variables`() = runBlocking {
+        val input = """
+            TimeStamp, nmot_w, rl_w
+              sec.ms , 1/min , %
+            "TIME","EngineSpeed","EngineLoad"
+        """.trimIndent()
+
+        val logger = Me7LoggerProcess()
+        logger.parseOutputStream(BufferedReader(StringReader(input)))
+
+        val vars = logger.variables.value
+        assertEquals(3, vars.size)
+
+        val session = logger.session.value!!
+        assertEquals(0, session.sampleCount)
+    }
+
+    // --- parseLogFile edge cases ---
+
+    @Test
+    fun `parseLogFile with header-only file returns empty session`() {
+        val content = """
+            ; Comment
+            TimeStamp, nmot_w
+              sec.ms , 1/min
+            "TIME","EngineSpeed"
+        """.trimIndent()
+
+        val tmpFile = File.createTempFile("test_header_only_", ".csv")
+        tmpFile.deleteOnExit()
+        tmpFile.writeText(content)
+
+        val logger = Me7LoggerProcess()
+        val session = logger.parseLogFile(tmpFile)
+
+        assertEquals(2, session.variables.size)
+        assertEquals(0, session.sampleCount)
+    }
+
+    @Test
+    fun `parseLogFile with mixed line endings parses correctly`() {
+        // Simulate Windows CRLF mixed with Unix LF
+        val content = "; Comment\r\n" +
+            "TimeStamp, nmot_w\r\n" +
+            "  sec.ms , 1/min\r\n" +
+            "\"TIME\",\"EngineSpeed\"\r\n" +
+            "0.0, 2400\r\n" +
+            "0.05, 2450\n" +
+            "0.10, 2500\r\n"
+
+        val tmpFile = File.createTempFile("test_crlf_", ".csv")
+        tmpFile.deleteOnExit()
+        tmpFile.writeText(content)
+
+        val logger = Me7LoggerProcess()
+        val session = logger.parseLogFile(tmpFile)
+
+        assertEquals(2, session.variables.size)
+        assertEquals(3, session.sampleCount)
+        assertEquals(2400.0, session.samples[0].values[1], 0.1)
+    }
+
+    @Test
+    fun `parseLogFile with extra whitespace in values`() {
+        val content = """
+            ; ME7Logger
+            TimeStamp , nmot_w , rl_w
+              sec.ms  ,  1/min ,  %
+            "TIME" , "EngineSpeed" , "EngineLoad"
+              0.0  ,  2400  ,  35.2
+              0.05 ,  2450  ,  36.1
+        """.trimIndent()
+
+        val tmpFile = File.createTempFile("test_whitespace_", ".csv")
+        tmpFile.deleteOnExit()
+        tmpFile.writeText(content)
+
+        val logger = Me7LoggerProcess()
+        val session = logger.parseLogFile(tmpFile)
+
+        assertEquals(3, session.variables.size)
+        assertEquals("TimeStamp", session.variables[0].name)
+        assertEquals("EngineSpeed", session.variables[1].alias)
+        assertEquals(2, session.sampleCount)
+        assertEquals(2400.0, session.samples[0].values[1], 0.1)
+    }
+}
+
 class CsvExporterTest {
 
     @Test

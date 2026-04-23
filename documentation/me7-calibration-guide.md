@@ -93,9 +93,15 @@ The Fueling tab consolidates all fuel-injector-related calibration into one plac
 
 The first step is to calculate a reasonable value for KRKTE (primary fueling). This is the value that allows the ECU to determine how much fuel is required to achieve a given AFR (air fuel ratio) based on a requested load/cylinder filling. It is critical that KRKTE is close to the calculated value. If your KRKTE deviates significantly from the calculated value, your MAF is likely over/under scaled.
 
-Pay attention to the density of gasoline (Gasoline Grams per Cubic Centimeter). The stock M-box assumes a value of 0.71 g/cc^3, although the [generally accepted density of gasoline](https://www.aqua-calc.com/page/density-table) is 0.75 g/cc^3. Also consider that ethanol has a density of 0.7893 g/cc^3 so high ethanol blends can be even denser.
+Pay attention to the density of gasoline (Gasoline Grams per Cubic Centimeter). The Funktionsrahmen contains contradictory references:
 
-Note that the decision to use a fuel density of 0.71 g/cc^3 (versus ~0.75 g/cc^3) will have the effect of under-scaling the MAF (more fuel will be injected per duty cycle so less airflow will need to be reported from the MAF to compensate). As a result, the measured engine load (rl_w) will be under-scaled which is key to keeping estimated manifold pressure (ps_w) slightly below actual pressure (pvdks_w) without making irrational changes to the VE model (KFURL) which converts pressure to load and load to pressure.
+- **BGKV section** (MED17.1.62 page 8419): explicitly states ρ₀ₖₛ = 755 g/dm³ (0.755 g/cc) with LST = 14.7
+- **KRKATE section** (MED17.1.62 page 8765): uses a valve correction factor of 1.05, which was originally derived from 0.7135 g/cc (petrol density at 15°C, per the ME7.5 guide: 0.7135 / 0.6795 ≈ 1.05)
+- **ME7.5 guide**: explicitly uses 0.7135 g/cc with the 1.05 correction factor
+
+The default value of 0.755 g/cc matches the FR BGKV section. Using 0.7135 g/cc instead will produce a richer calibration (the ECU injects more fuel per load percent), which is safer for modified injector setups that tend to run lean. The field is editable — enter whichever value matches your fuel or tuning preference. Also consider that ethanol has a density of 0.789 g/cc, so high ethanol blends can be even denser.
+
+Note that the decision to use a fuel density of 0.7135 g/cc (versus 0.755 g/cc) will have the effect of under-scaling the MAF (more fuel will be injected per duty cycle so less airflow will need to be reported from the MAF to compensate). As a result, the measured engine load (rl_w) will be under-scaled which is key to keeping estimated manifold pressure (ps_w) slightly below actual pressure (pvdks_w) without making irrational changes to the VE model (KFURL) which converts pressure to load and load to pressure.
 
 The KRKTE tab will help you calculate a value for KRKTE. Fill in the constants with the appropriate values and let it do the math.
 

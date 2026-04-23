@@ -201,7 +201,98 @@ class LdrpidCalculatorTest {
             "KFLDIMX should have ${rpmAxis.size} RPM rows")
     }
 
-    // ── 6. No WOT data ─────────────────────────────────────────────
+    // ── 6. Boost values stay in correct duty-column positions ──────
+
+    @Test
+    fun `calculateNonLinearTable preserves boost at correct duty columns`() {
+        // Bug: sort() was reordering boost values within each row, destroying
+        // the mapping between duty-cycle columns and measured boost.
+        // Seed two data points at known duty positions:
+        //   duty=40% → boost=500 mbar relative → 7.25 PSI
+        //   duty=80% → boost=1000 mbar relative → 14.50 PSI
+        val data = buildLogData(
+            rpms           = listOf(3000.0, 3000.0),
+            throttles      = listOf(85.0, 90.0),
+            dutyCycles     = listOf(40.0, 80.0),
+            baroPressures  = listOf(1013.0, 1013.0),
+            boostPressures = listOf(1513.0, 2013.0) // relative: 500, 1000
+        )
+
+        val result = LdrpidCalculator.calculateNonLinearTable(data, buildKfldrlMap())
+
+        // duty=40 maps to column index 1, duty=80 maps to column index 3
+        val dutyCol40 = 1  // dutyAxis=[20,40,60,80,95], index 1=40
+        val dutyCol80 = 3  // index 3=80
+
+        val row = result.zAxis[1] // RPM=3000 is index 1
+
+        val expectedPsi40 = 500.0 * 0.0145038  // ~7.25
+        val expectedPsi80 = 1000.0 * 0.0145038 // ~14.50
+
+        // The boost at the 40% duty column should be close to 7.25 PSI
+        assertEquals(expectedPsi40, row[dutyCol40], 1.0,
+            "Boost at 40% duty column should be ~${expectedPsi40} PSI, got ${row[dutyCol40]}")
+        // The boost at the 80% duty column should be close to 14.50 PSI
+        assertEquals(expectedPsi80, row[dutyCol80], 1.0,
+            "Boost at 80% duty column should be ~${expectedPsi80} PSI, got ${row[dutyCol80]}")
+        // The 40% column should have LESS boost than the 80% column (physical constraint)
+        assertTrue(row[dutyCol40] < row[dutyCol80],
+            "40% duty should produce less boost than 80% duty")
+    }
+
+    // ── 7. KFLDRL does NOT echo the duty axis ──────────────────────
+
+    @Test
+    fun `KFLDRL output is not a simple echo of duty axis`() {
+        // Bug: When nonLinear table was all ~0.12 due to sort pushing real data right,
+        // KFLDRL just echoed the duty axis values [20, 40, 60, 80, 95] because
+        // interpolating through near-identical x values maps 1:1 to the y axis.
+        // Generate realistic WOT data at 2 RPM points with distinct boost levels
+        val data = buildLogData(
+            rpms           = listOf(3000.0, 3000.0, 3000.0, 5000.0, 5000.0, 5000.0),
+            throttles      = listOf(85.0, 85.0, 85.0, 90.0, 90.0, 90.0),
+            dutyCycles     = listOf(40.0, 60.0, 80.0, 40.0, 60.0, 80.0),
+            baroPressures  = listOf(1013.0, 1013.0, 1013.0, 1013.0, 1013.0, 1013.0),
+            boostPressures = listOf(1213.0, 1513.0, 1813.0, 1313.0, 1713.0, 2013.0)
+        )
+
+        val kfldrl = buildKfldrlMap()
+        val result = LdrpidCalculator.calculateLdrpid(data, kfldrl, buildKfldimxMap())
+
+        // Check RPM=3000 row (index 1). KFLDRL should NOT be [20, 40, 60, 80, 95]
+        val kfldrlRow = result.kfldrl.zAxis[1]
+        val isEchoingAxis = kfldrlRow.zip(dutyAxis).all { (v, d) ->
+            kotlin.math.abs(v - d) < 1.0
+        }
+        assertFalse(isEchoingAxis,
+            "KFLDRL row should NOT just echo the duty axis. Got: ${kfldrlRow.contentToString()}")
+    }
+
+    // ── 8. KFLDIMX values are spread across range ──────────────────
+
+    @Test
+    fun `KFLDIMX has varied values not all clamped to maximum`() {
+        // Bug: When nonLinear was degenerate (~0.12 everywhere), linearBoostMax
+        // was tiny (~10 mbar), kfldimxXAxis was all ~100, and interpolation
+        // clamped every output to max duty (~95 or 100).
+        val data = buildLogData(
+            rpms           = listOf(3000.0, 3000.0, 5000.0, 5000.0),
+            throttles      = listOf(85.0, 90.0, 85.0, 90.0),
+            dutyCycles     = listOf(40.0, 80.0, 40.0, 80.0),
+            baroPressures  = listOf(1013.0, 1013.0, 1013.0, 1013.0),
+            boostPressures = listOf(1313.0, 1813.0, 1413.0, 2013.0)
+        )
+
+        val result = LdrpidCalculator.calculateLdrpid(data, buildKfldrlMap(), buildKfldimxMap())
+
+        val kfldimxFlat = result.kfldimx.zAxis.flatMap { it.toList() }
+        // Not all values should be the same (clamped to max)
+        val distinctValues = kfldimxFlat.map { "%.1f".format(it) }.distinct()
+        assertTrue(distinctValues.size >= 2,
+            "KFLDIMX should have varied values, not all clamped. Distinct: $distinctValues")
+    }
+
+    // ── 9. No WOT data ─────────────────────────────────────────────
 
     @Test
     fun `calculateNonLinearTable with no WOT data produces valid output`() {
@@ -229,5 +320,69 @@ class LdrpidCalculatorTest {
                     "All values should be non-negative even with no WOT data")
             }
         }
+    }
+
+    // ── 10. Log consistency detection ───────────────────────────────
+
+    @Test
+    fun `checkLogConsistency returns no warning for single file`() {
+        val fileData = listOf(
+            buildLogData(
+                rpms           = listOf(4000.0, 5000.0, 6000.0),
+                throttles      = listOf(95.0,   95.0,   95.0),
+                dutyCycles     = listOf(60.0,   55.0,   50.0),
+                baroPressures  = listOf(1013.0, 1013.0, 1013.0),
+                boostPressures = listOf(2500.0, 2600.0, 2700.0)
+            )
+        )
+        val warning = LdrpidCalculator.checkLogConsistency(fileData)
+        assertNull(warning, "Single file should never produce a consistency warning")
+    }
+
+    @Test
+    fun `checkLogConsistency returns no warning for consistent files`() {
+        // Two logs from the same tune stage — similar boost at similar duty
+        val fileData = listOf(
+            buildLogData(
+                rpms           = listOf(4000.0, 5000.0, 6000.0),
+                throttles      = listOf(95.0,   95.0,   95.0),
+                dutyCycles     = listOf(60.0,   55.0,   50.0),
+                baroPressures  = listOf(1013.0, 1013.0, 1013.0),
+                boostPressures = listOf(2500.0, 2600.0, 2700.0)
+            ),
+            buildLogData(
+                rpms           = listOf(4500.0, 5500.0),
+                throttles      = listOf(90.0,   90.0),
+                dutyCycles     = listOf(58.0,   52.0),
+                baroPressures  = listOf(1013.0, 1013.0),
+                boostPressures = listOf(2550.0, 2650.0)
+            )
+        )
+        val warning = LdrpidCalculator.checkLogConsistency(fileData)
+        assertNull(warning, "Consistent logs should not produce a warning")
+    }
+
+    @Test
+    fun `checkLogConsistency returns warning for conflicting tune stages`() {
+        // Log 1: high boost at moderate duty (aggressive tune)
+        // Log 2: low boost at low duty (stock/detuned)
+        val fileData = listOf(
+            buildLogData(
+                rpms           = listOf(5000.0, 5000.0, 6000.0, 6000.0),
+                throttles      = listOf(95.0,   95.0,   95.0,   95.0),
+                dutyCycles     = listOf(50.0,   60.0,   50.0,   60.0),
+                baroPressures  = listOf(1013.0, 1013.0, 1013.0, 1013.0),
+                boostPressures = listOf(2800.0, 3000.0, 2900.0, 3100.0)
+            ),
+            buildLogData(
+                rpms           = listOf(5000.0, 5000.0, 6000.0, 6000.0),
+                throttles      = listOf(95.0,   95.0,   95.0,   95.0),
+                dutyCycles     = listOf(20.0,   20.0,   20.0,   20.0),
+                baroPressures  = listOf(1013.0, 1013.0, 1013.0, 1013.0),
+                boostPressures = listOf(1300.0, 1400.0, 1350.0, 1450.0)
+            )
+        )
+        val warning = LdrpidCalculator.checkLogConsistency(fileData)
+        assertNotNull(warning, "Conflicting tune stages should produce a warning")
     }
 }

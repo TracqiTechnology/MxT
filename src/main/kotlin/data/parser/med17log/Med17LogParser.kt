@@ -227,7 +227,8 @@ class Med17LogParser {
         val baro = getDouble(record, H.BAROMETRIC_PRESSURE_HEADER) ?: return
         val absBoost = getDouble(record, H.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER) ?: return
         val reqPressure = getDouble(record, H.REQUESTED_PRESSURE_HEADER) ?: return
-        val reqLoad = getDouble(record, H.REQUESTED_LOAD_HEADER) ?: return
+        val reqLoad = getDouble(record, H.REQUESTED_LOAD_HEADER)
+            ?: getDouble(record, H.REQUESTED_LOAD_ALT_HEADER) ?: return
         val engLoad = getDouble(record, H.ENGINE_LOAD_HEADER) ?: return
 
         map[H.TIME_STAMP_COLUMN_HEADER]!!.add(time)
@@ -287,6 +288,7 @@ class Med17LogParser {
         }
         getDouble(record, H.FUEL_MASS_REL_HEADER)?.let { map[H.FUEL_MASS_REL_HEADER]?.add(it) }
         getDouble(record, H.LAMBDA_CONTROL_ACTIVE_HEADER)?.let { map[H.LAMBDA_CONTROL_ACTIVE_HEADER]?.add(it) }
+        getDouble(record, H.REQUESTED_LAMBDA_HEADER)?.let { map[H.REQUESTED_LAMBDA_HEADER]?.add(it) }
     }
 
     private fun parsePlsolRow(
@@ -306,6 +308,7 @@ class Med17LogParser {
         map[H.THROTTLE_PLATE_ANGLE_HEADER]!!.add(throttle)
 
         getDouble(record, H.FUPSRLS_HEADER)?.let { map[H.FUPSRLS_HEADER]?.add(it) }
+        getDouble(record, H.INTAKE_TEMPERATURE_HEADER)?.let { map[H.INTAKE_TEMPERATURE_HEADER]?.add(it) }
     }
 
     private fun parsePfiSplitRow(
@@ -319,6 +322,7 @@ class Med17LogParser {
         map[H.RPM_COLUMN_HEADER]!!.add(rpm)
         map[H.PFI_SPLIT_FACTOR_HEADER]!!.add(pfi)
         getDouble(record, H.PFI_SPLIT_FACTOR_UNLIM_HEADER)?.let { map[H.PFI_SPLIT_FACTOR_UNLIM_HEADER]?.add(it) }
+        getDouble(record, H.ENGINE_LOAD_HEADER)?.let { map[H.ENGINE_LOAD_HEADER]?.add(it) }
     }
 
     private fun getDouble(
@@ -347,7 +351,8 @@ class Med17LogParser {
             LogType.OPTIMIZER -> hasTime && hasRpm && hasThrottle && hasBaro && hasBoost &&
                     hasWgdc &&
                     H.REQUESTED_PRESSURE_HEADER in columnIndices &&
-                    H.REQUESTED_LOAD_HEADER in columnIndices &&
+                    (H.REQUESTED_LOAD_HEADER in columnIndices ||
+                     H.REQUESTED_LOAD_ALT_HEADER in columnIndices) &&
                     H.ENGINE_LOAD_HEADER in columnIndices
             LogType.FUEL_TRIM -> {
                 val hasStft = H.STFT_COLUMN_HEADER in columnIndices ||
@@ -389,6 +394,7 @@ class Med17LogParser {
                 rpm, throttle, baro, boost, wgdc, ldr,
                 H.REQUESTED_PRESSURE_HEADER.header,
                 H.REQUESTED_LOAD_HEADER.header,
+                H.REQUESTED_LOAD_ALT_HEADER.header,
                 H.ENGINE_LOAD_HEADER.header
             )
             LogType.FUEL_TRIM -> setOf(
@@ -448,12 +454,14 @@ class Med17LogParser {
                 map[H.LONG_TERM_FT_HEADER] = mutableListOf()
                 map[H.FUEL_MASS_REL_HEADER] = mutableListOf()
                 map[H.LAMBDA_CONTROL_ACTIVE_HEADER] = mutableListOf()
+                map[H.REQUESTED_LAMBDA_HEADER] = mutableListOf()
             }
             LogType.PFI_SPLIT -> {
                 map[H.TIME_STAMP_COLUMN_HEADER] = mutableListOf()
                 map[H.RPM_COLUMN_HEADER] = mutableListOf()
                 map[H.PFI_SPLIT_FACTOR_HEADER] = mutableListOf()
                 map[H.PFI_SPLIT_FACTOR_UNLIM_HEADER] = mutableListOf()
+                map[H.ENGINE_LOAD_HEADER] = mutableListOf()
             }
             LogType.PLSOL -> {
                 map[H.TIME_STAMP_COLUMN_HEADER] = mutableListOf()
@@ -462,6 +470,7 @@ class Med17LogParser {
                 map[H.BAROMETRIC_PRESSURE_HEADER] = mutableListOf()
                 map[H.THROTTLE_PLATE_ANGLE_HEADER] = mutableListOf()
                 map[H.FUPSRLS_HEADER] = mutableListOf()
+                map[H.INTAKE_TEMPERATURE_HEADER] = mutableListOf()
             }
         }
 

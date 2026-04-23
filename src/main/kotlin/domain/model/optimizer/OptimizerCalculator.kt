@@ -694,6 +694,85 @@ object OptimizerCalculator {
         )
     }
 
+    /**
+     * Simplified MED17 prediction: boost-only.
+     *
+     * For each WOT entry, estimates the boost error reduction if the suggested
+     * KFLDRL is applied. No VE model simulation — only boost control chain.
+     * Conservative 80% improvement factor accounts for PID dynamics.
+     */
+    fun predictMed17Outcome(
+        wotEntries: List<WotLogEntry>,
+        syntheticSimResults: List<Me7Simulator.SimulationResult>,
+        suggestedMaps: SuggestedMaps,
+        ldrxnTarget: Double,
+        toleranceMbar: Double
+    ): PredictionResult? {
+        if (wotEntries.isEmpty() || suggestedMaps.kfldrl == null) return null
+
+        val boostImprovement = 0.80
+        val predictedPressure = mutableListOf<Pair<Double, Double>>()
+        val predictedLoad = mutableListOf<Pair<Double, Double>>()
+        val predictedSimResults = mutableListOf<Me7Simulator.SimulationResult>()
+
+        for (i in wotEntries.indices) {
+            val entry = wotEntries[i]
+            val sim = syntheticSimResults[i]
+
+            // Boost error: requested - actual pressure
+            val boostError = maxOf(entry.requestedMap - entry.actualMap, 0.0)
+            val correctedBoostError = boostError * (1.0 - boostImprovement)
+            val predictedPvdks = entry.actualMap + (boostError - correctedBoostError)
+
+            predictedPressure.add(Pair(entry.rpm, predictedPvdks))
+            // Load prediction: no VE model, so keep actual load but note improvement
+            predictedLoad.add(Pair(entry.rpm, entry.actualLoad))
+
+            val isCapped = entry.rpm >= 3500.0 && entry.requestedLoad < ldrxnTarget * 0.95
+            predictedSimResults.add(sim.copy(
+                actualPvdks = predictedPvdks,
+                boostError = correctedBoostError,
+                dominantError = when {
+                    isCapped -> Me7Simulator.ErrorSource.TORQUE_CAPPED
+                    correctedBoostError > toleranceMbar -> Me7Simulator.ErrorSource.BOOST_SHORTFALL
+                    else -> Me7Simulator.ErrorSource.ON_TARGET
+                },
+                totalLoadDeficit = if (isCapped) ldrxnTarget - entry.requestedLoad else 0.0
+            ))
+        }
+
+        val currentAvgPressureError = syntheticSimResults.map { it.boostError }.average()
+        val predictedAvgPressureError = predictedSimResults.map { it.boostError }.average()
+        // Load deficit stays the same for MED17 (no VE model to correct)
+        val currentAvgLoadDeficit = syntheticSimResults.map { it.totalLoadDeficit }.average()
+        val predictedAvgLoadDeficit = currentAvgLoadDeficit
+
+        val predictedChainHealth = buildMed17ChainDiagnosis(
+            wotEntries.mapIndexed { idx, entry ->
+                // Create synthetic entries with predicted pressure for chain diagnosis
+                entry.copy(actualMap = predictedPressure[idx].second)
+            },
+            ldrxnTarget, toleranceMbar
+        )
+
+        val currentTotalError = abs(currentAvgPressureError)
+        val predictedTotalError = abs(predictedAvgPressureError)
+        val improvement = if (currentTotalError > 0) {
+            (1.0 - predictedTotalError / currentTotalError) * 100.0
+        } else 0.0
+
+        return PredictionResult(
+            predictedPressureSeries = predictedPressure,
+            predictedLoadSeries = predictedLoad,
+            currentAvgLoadDeficit = currentAvgLoadDeficit,
+            predictedAvgLoadDeficit = predictedAvgLoadDeficit,
+            currentAvgPressureError = currentAvgPressureError,
+            predictedAvgPressureError = predictedAvgPressureError,
+            predictedChainHealth = predictedChainHealth,
+            convergenceImprovement = improvement.coerceIn(0.0, 100.0)
+        )
+    }
+
     // ── Chain Diagnosis ──────────────────────────────────────────────
 
     data class ChainDiagnosis(
@@ -1355,6 +1434,12 @@ object OptimizerCalculator {
 
         val allWarnings = interventionWarnings + v4Warnings
 
+        // ── MED17 Simplified Prediction (boost-only) ────────────────
+        val prediction = predictMed17Outcome(
+            wotEntries, syntheticSimResults, suggestedMaps,
+            ldrxnTarget, toleranceMbar
+        )
+
         return OptimizerResult(
             suggestedKfldrl = suggestedKfldrl,
             suggestedKfldimx = suggestedKfldimx,
@@ -1370,7 +1455,7 @@ object OptimizerCalculator {
             chainDiagnosis = chainDiagnosis,
             suggestedMaps = suggestedMaps,
             perRpmAnalysis = perRpmAnalysis,
-            prediction = null,
+            prediction = prediction,
             logSummaries = logSummaries,
             pulls = pulls,
             pullConsistency = pullConsistency,

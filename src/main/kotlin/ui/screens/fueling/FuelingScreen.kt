@@ -29,7 +29,9 @@ import ui.screens.krkte.KrkteScreen
 @Composable
 fun FuelingScreen() {
     var selectedTab by remember { mutableStateOf(0) }
-    val tabTitles = listOf("KRKTE", "Injector Scaling")
+    val isMed17 = EcuPlatformPreference.platform == EcuPlatform.MED17
+    val krkteLabel = if (isMed17) "KRKATE" else "KRKTE"
+    val tabTitles = listOf(krkteLabel, "Injector Scaling")
 
     Column(modifier = Modifier.fillMaxSize()) {
         TabRow(selectedTabIndex = selectedTab) {
@@ -146,11 +148,14 @@ private fun InjectorScalingTab() {
                     ParameterField(
                         value = oldPressure,
                         onValueChange = { oldPressure = it },
-                        label = "Fuel Pressure (bar)",
+                        label = when {
+                            isMed17 -> "Fuel Pressure (bar, gauge)"
+                            else -> "Fuel Pressure (bar, gauge)"
+                        },
                         tooltip = when {
-                            isMed17 -> "Rail fuel pressure at which the stock injector flow rate was measured. MED17 port injectors typically run 4.0 bar. Used for pressure-corrected flow scaling."
+                            isMed17 -> "Rail fuel pressure at which the stock injector flow rate was measured. MED17 port injectors typically run 3.0 bar gauge (4.0 bar absolute). Used for pressure-corrected flow scaling."
                             isMed9 -> "Rail fuel pressure at which the stock injector flow rate was measured. MED9 direct injectors run at high pressure (50–110 bar via HPFP). Used for pressure-corrected flow scaling."
-                            else -> "Rail fuel pressure at which the stock injector flow rate was measured. ME7 typically runs 3.0 bar. Used for pressure-corrected flow scaling."
+                            else -> "Rail fuel pressure at which the stock injector flow rate was measured. ME7 typically runs 3.0 bar gauge. Used for pressure-corrected flow scaling."
                         },
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         modifier = Modifier.weight(1f)
@@ -192,8 +197,8 @@ private fun InjectorScalingTab() {
                     ParameterField(
                         value = newPressure,
                         onValueChange = { newPressure = it },
-                        label = "Fuel Pressure (bar)",
-                        tooltip = "Rail fuel pressure at which the new injector flow rate was measured. Flow rate is corrected to match the actual rail pressure.",
+                        label = "Fuel Pressure (bar, gauge)",
+                        tooltip = "Rail fuel pressure at which the new injector flow rate was measured (gauge, not absolute). Flow rate is corrected to match the actual rail pressure.",
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
                         modifier = Modifier.weight(1f)
                     )

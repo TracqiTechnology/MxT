@@ -378,33 +378,46 @@ fun main() {
         MxTApp(navState)
     }
 
+    // Axis Rescaler
+    captureScreen("tools/axis_rescaler.png") {
+        val navState = NavigationState()
+        navState.navigateToTools(ToolsTab.AXIS_RESCALER)
+        MxTApp(navState)
+    }
+
     println("All Tools screenshots generated.\n")
 
     // --- MED17 Screenshots ---
     println("\n--- MED17 Screenshots ---")
     EcuPlatformPreference.platform = EcuPlatform.MED17
 
-    // Load MED17 XDF+BIN
-    XdfFilePreferences.setFile(File("technical/med17/Audi_RS3vlmspec_Gv004.xdf"))
-    BinFilePreferences.setFile(File("technical/med17/OTS tunes/404J/MED17_1_62_STOCK.bin"))
+    // Load MED17 XDF+BIN (404E has proper map descriptions for auto-select)
+    XdfFilePreferences.setFile(File("example/med17/404E/404E_normal.xdf"))
+    BinFilePreferences.setFile(File("example/med17/404E/MED17_1_62_STOCK.bin"))
 
-    // Wait for re-parse
+    // Wait for 404E XDF to parse and BIN to re-parse (look for a 404E-specific table title)
     println("Waiting for MED17 BIN parsing...")
-    runBlocking { BinParser.mapList.first { it.isNotEmpty() } }
+    runBlocking {
+        BinParser.mapList.first { maps ->
+            maps.any { it.first.tableName == "Opt eng tq" }
+        }
+    }
     println("MED17 BIN parsed: ${BinParser.mapList.value.size} maps loaded")
 
-    // Auto-select MED17 maps
+    // Auto-select MED17 maps (searches tableName + tableDescription)
     autoSelectMap(KrktePreferences, "KRKTE")
     autoSelectMap(KfmiopPreferences, "KFMIOP")
     autoSelectMap(KfmirlPreferences, "KFMIRL")
     autoSelectMap(KfzwopPreferences, "KFZWOP")
     autoSelectMap(KfzwPreferences, "KFZW")
     autoSelectMap(KfldrlPreferences, "KFLDRL")
-    autoSelectMap(KfldimxPreferences, "KFLDIMX")
-    autoSelectMap(RkwPreferences, "rk_w")
+    autoSelectMap(KfldimxPreferences, "KFLDIMX plsolr")
+    autoSelectMap(RkwPreferences, "InjSys_RelMCorHom1_MAP Gasoline 0")
 
     val med17OutputDir = File("documentation/images/med17")
     med17OutputDir.mkdirs()
+
+    val med17LogDir = File("example/med17/logs/aggressive-tune")
 
     // MED17 hero shot / overview
     captureScreen("med17/me7Tuner_med17.png") {
@@ -420,9 +433,12 @@ fun main() {
         MxTApp(navState)
     }
 
-    // Dual Injection (MED17-only tab)
-    captureScreen("med17/dual_injection.png") {
+    // Dual Injection — Split Calculator tab with RPM sweep computed
+    captureScreen("med17/dual_injection.png", height = 1400) {
         val navState = NavigationState()
+        navState.dualInjectionTab = 2
+        navState.dualInjectionKrktePfi = "0.066"
+        navState.dualInjectionKrkteGdi = "0.045"
         navState.navigateToCalibration(CalibrationTab.DUAL_INJECTION)
         MxTApp(navState)
     }
@@ -441,9 +457,13 @@ fun main() {
         MxTApp(navState)
     }
 
-    // LDRPID in MED17 mode
-    captureScreen("med17/ldrpid_med17.png") {
+    // LDRPID in MED17 mode — with WOT log data loaded
+    captureScreenWithLogData(
+        filename = "med17/ldrpid_med17.png",
+        loadData = { Thread.sleep(100) }
+    ) {
         val navState = NavigationState()
+        navState.ldrpidLogDir = med17LogDir
         navState.navigateToCalibration(CalibrationTab.LDRPID)
         MxTApp(navState)
     }
@@ -462,9 +482,18 @@ fun main() {
         MxTApp(navState)
     }
 
-    // Fuel Trim (MED17-only)
-    captureScreen("med17/fuel_trim_med17.png") {
+    // Fuel Trim (MED17-only) — with fuel trim log data loaded
+    val fuelTrimLogs = File("example/med17/logs").listFiles()
+        ?.filter { it.isFile && it.name.endsWith(".csv", ignoreCase = true) }
+        ?.take(3)
+        ?: emptyList()
+    captureScreenWithLogData(
+        filename = "med17/fuel_trim_med17.png",
+        height = 1800,
+        loadData = { Thread.sleep(100) }
+    ) {
         val navState = NavigationState()
+        navState.fuelTrimLogFiles = fuelTrimLogs
         navState.navigateToCalibration(CalibrationTab.FUEL_TRIM)
         MxTApp(navState)
     }
@@ -498,7 +527,10 @@ fun main() {
 
 private fun autoSelectMap(preference: MapPreference, keyword: String) {
     val match = BinParser.mapList.value.firstOrNull {
-        it.first.tableName.contains(keyword, ignoreCase = true)
+        val name = it.first.tableName
+        val desc = it.first.tableDescription
+        !name.startsWith("Axis:", ignoreCase = true) &&
+            (name.contains(keyword, ignoreCase = true) || desc.contains(keyword, ignoreCase = true))
     }
     if (match != null) {
         preference.setSelectedMap(match.first)

@@ -17,7 +17,9 @@ import data.parser.xdf.XdfParser
 import data.preferences.MapPreference
 import data.preferences.bin.BinFilePreferences
 import data.preferences.kfmiop.KfmiopPreferences
+import data.preferences.SharedAxisPreferences
 import data.writer.BinWriter
+import domain.math.AxisRescaler
 import domain.math.map.Map3d
 import domain.model.kfmiop.Kfmiop
 import domain.model.rlsol.Rlsol
@@ -35,6 +37,29 @@ import ui.theme.ChartRed
 import ui.theme.Primary
 
 private enum class WriteStatus { Idle, Success, Error }
+
+private enum class BoostUnit(val label: String) {
+    PSI("PSI"),
+    MBAR("mbar abs");
+
+    fun convert(psiValue: Double): Double = when (this) {
+        PSI -> psiValue
+        MBAR -> psiValue / 0.0145038 + 1013.0
+    }
+
+    fun convertMap(map: Map3d): Map3d {
+        if (this == PSI) return map
+        val newZ = Array(map.zAxis.size) { r ->
+            Array(map.zAxis[r].size) { c -> convert(map.zAxis[r][c]) }
+        }
+        return Map3d(map.xAxis, map.yAxis, newZ)
+    }
+
+    fun convertPoints(points: List<Pair<Double, Double>>): List<Pair<Double, Double>> {
+        if (this == PSI) return points
+        return points.map { (rpm, psi) -> Pair(rpm, convert(psi)) }
+    }
+}
 
 private fun findMap(
     mapList: List<Pair<TableDefinition, Map3d>>,
@@ -99,6 +124,48 @@ fun KfmiopScreen() {
         } else null
     }
 
+    // Editable Y-axis (RPM breakpoints) for output KFMIOP
+    var editedYAxis by remember(inputKfmiop, isScalar) {
+        mutableStateOf(
+            if (!isScalar && inputKfmiop != null && inputKfmiop.yAxis.isNotEmpty())
+                arrayOf(inputKfmiop.yAxis.copyOf())
+            else arrayOf(emptyArray<Double>())
+        )
+    }
+
+    // Rescale output when Y-axis is edited
+    val yAxisRescaleResult = remember(kfmiopResult, editedYAxis, isScalar) {
+        if (isScalar) return@remember null
+        val output = kfmiopResult?.outputKfmiop ?: return@remember null
+        val hasYAxisEdit = editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty()
+        if (!hasYAxisEdit) return@remember null
+        try {
+            AxisRescaler.rescaleMap(output, newYAxis = editedYAxis[0])
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+
+    val finalOutputKfmiop = yAxisRescaleResult?.rescaledMap ?: kfmiopResult?.outputKfmiop
+
+    // Emit Y-axis edits for cross-screen sync
+    LaunchedEffect(editedYAxis) {
+        if (!isScalar && editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty()) {
+            SharedAxisPreferences.setKfmiopEditedYAxis(editedYAxis[0])
+        }
+    }
+
+    // Emit output X-axis (load) for KFZW/KFZWOP sync
+    LaunchedEffect(finalOutputKfmiop) {
+        val xAxis = finalOutputKfmiop?.xAxis
+        if (!isScalar && xAxis != null && xAxis.isNotEmpty()) {
+            SharedAxisPreferences.setKfmiopEditedXAxis(xAxis)
+        }
+    }
+
+    // Collect Y-axis edits from KFMIRL for sync
+    val kfmirlSyncYAxis by SharedAxisPreferences.kfmirlEditedYAxis.collectAsState(initial = null)
+
     // Boost comparison chart data — peak boost per RPM
     val boostChartData = remember(kfmiopResult) {
         val result = kfmiopResult ?: return@remember Pair(emptyList<Pair<Double, Double>>(), emptyList<Pair<Double, Double>>())
@@ -126,7 +193,7 @@ fun KfmiopScreen() {
     val kfmiopMapConfigured = kfmiopPair != null
     val canWrite = binLoaded && kfmiopMapConfigured && (
         if (isScalar) scalarOutputMap != null
-        else kfmiopResult?.outputKfmiop != null
+        else finalOutputKfmiop != null
     )
 
     var showWriteConfirmation by remember { mutableStateOf(false) }
@@ -147,7 +214,8 @@ fun KfmiopScreen() {
             tableDefinitions = tableDefinitions,
             initialValue = kfmiopPair?.first,
             onSelected = { KfmiopPreferences.setSelectedMap(it) },
-            onDismiss = { showMapPicker = false }
+            onDismiss = { showMapPicker = false },
+            initialFilter = CalibrationTab.KFMIOP.label
         )
     }
 
@@ -165,7 +233,7 @@ fun KfmiopScreen() {
             confirmButton = {
                 TextButton(onClick = {
                     showWriteConfirmation = false
-                    val outputMap = if (isScalar) scalarOutputMap else kfmiopResult?.outputKfmiop
+                    val outputMap = if (isScalar) scalarOutputMap else finalOutputKfmiop
                     val tableDef = kfmiopPair?.first
                     if (outputMap != null && tableDef != null) {
                         try {
@@ -245,7 +313,14 @@ fun KfmiopScreen() {
                     it.toDoubleOrNull()?.let { v -> KfmiopPreferences.maxBoostPressure = v }
                 },
                 mapDefinitionName = kfmiopPair?.first?.tableName,
-                onSelectMap = { showMapPicker = true }
+                onSelectMap = { showMapPicker = true },
+                editedYAxis = editedYAxis,
+                onYAxisChanged = { editedYAxis = it },
+                extrapolatedCount = yAxisRescaleResult?.extrapolatedCount ?: 0,
+                totalCells = yAxisRescaleResult?.totalCells ?: 0,
+                mapLabel = mapLabel,
+                syncYAxis = kfmirlSyncYAxis,
+                onApplySyncYAxis = { syncAxis -> editedYAxis = arrayOf(syncAxis) }
             )
 
             ComparisonArea(
@@ -254,6 +329,7 @@ fun KfmiopScreen() {
                 onTabSelected = { selectedTab = it },
                 inputKfmiop = inputKfmiop,
                 kfmiopResult = kfmiopResult,
+                finalOutputKfmiop = finalOutputKfmiop,
                 currentPeakBoost = boostChartData.first,
                 targetPeakBoost = boostChartData.second
             )
@@ -409,7 +485,14 @@ private fun ConfigurationCard(
     onDesiredMaxMapPressureChange: (String) -> Unit,
     onDesiredMaxBoostPressureChange: (String) -> Unit,
     mapDefinitionName: String?,
-    onSelectMap: () -> Unit
+    onSelectMap: () -> Unit,
+    editedYAxis: Array<Array<Double>> = arrayOf(emptyArray()),
+    onYAxisChanged: (Array<Array<Double>>) -> Unit = {},
+    extrapolatedCount: Int = 0,
+    totalCells: Int = 0,
+    mapLabel: String = "KFMIOP",
+    syncYAxis: Array<Double>? = null,
+    onApplySyncYAxis: (Array<Double>) -> Unit = {}
 ) {
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -484,6 +567,87 @@ private fun ConfigurationCard(
                     Text("Select Map")
                 }
             }
+
+            // Y-axis (RPM) editing
+            if (editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty()) {
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.padding(bottom = 4.dp)
+                ) {
+                    Text(
+                        text = "$mapLabel RPM Axis (Editable)",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Text(
+                        text = "(defines the output RPM breakpoints)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                MapAxis(
+                    data = editedYAxis,
+                    editable = true,
+                    onDataChanged = onYAxisChanged
+                )
+            }
+
+            // Extrapolation warning
+            if (extrapolatedCount > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Extrapolation notice",
+                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "$extrapolatedCount of $totalCells cells were extrapolated beyond the original axis range — edge values were held constant",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                        )
+                    }
+                }
+            }
+
+            // Sync banner from KFMIRL
+            if (syncYAxis != null && syncYAxis.isNotEmpty() &&
+                editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty() &&
+                !syncYAxis.contentEquals(editedYAxis[0])) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Surface(
+                    color = MaterialTheme.colorScheme.tertiaryContainer,
+                    shape = MaterialTheme.shapes.small,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.padding(12.dp)
+                    ) {
+                        Text(
+                            text = "KFMIRL RPM axis was edited.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onTertiaryContainer,
+                            modifier = Modifier.weight(1f)
+                        )
+                        TextButton(onClick = { onApplySyncYAxis(syncYAxis) }) {
+                            Text("Apply to $mapLabel")
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -548,9 +712,12 @@ private fun ComparisonArea(
     onTabSelected: (Int) -> Unit,
     inputKfmiop: Map3d?,
     kfmiopResult: Kfmiop?,
+    finalOutputKfmiop: Map3d?,
     currentPeakBoost: List<Pair<Double, Double>>,
     targetPeakBoost: List<Pair<Double, Double>>
 ) {
+    var boostUnit by remember { mutableStateOf(BoostUnit.PSI) }
+
     Column(modifier = modifier) {
         PrimaryTabRow(selectedTabIndex = selectedTab) {
             Tab(
@@ -572,31 +739,33 @@ private fun ComparisonArea(
 
         when (selectedTab) {
             0 -> {
-                val outputKfmiop = kfmiopResult?.outputKfmiop
-                if (outputKfmiop != null) {
-                    OutputAxisBanner(outputKfmiop = outputKfmiop)
+                if (finalOutputKfmiop != null) {
+                    OutputAxisBanner(outputKfmiop = finalOutputKfmiop)
                 }
                 SideBySideTables(
                     inputLabel = "KFMIOP (Current)",
                     inputMap = inputKfmiop,
                     outputLabel = "KFMIOP (Rescaled)",
-                    outputMap = kfmiopResult?.outputKfmiop,
+                    outputMap = finalOutputKfmiop,
                     modifier = Modifier.fillMaxWidth().weight(1f)
                 )
             }
             1 -> {
+                BoostUnitToggle(boostUnit) { boostUnit = it }
                 SideBySideTables(
-                    inputLabel = "Boost (Current)",
-                    inputMap = kfmiopResult?.inputBoost,
-                    outputLabel = "Boost (Rescaled)",
-                    outputMap = kfmiopResult?.outputBoost,
+                    inputLabel = "Boost (Current) — ${boostUnit.label}",
+                    inputMap = kfmiopResult?.inputBoost?.let { boostUnit.convertMap(it) },
+                    outputLabel = "Boost (Rescaled) — ${boostUnit.label}",
+                    outputMap = kfmiopResult?.outputBoost?.let { boostUnit.convertMap(it) },
                     modifier = Modifier.fillMaxWidth().weight(1f)
                 )
             }
             2 -> {
+                BoostUnitToggle(boostUnit) { boostUnit = it }
                 BoostComparisonChart(
-                    currentPeakBoost = currentPeakBoost,
-                    targetPeakBoost = targetPeakBoost,
+                    currentPeakBoost = boostUnit.convertPoints(currentPeakBoost),
+                    targetPeakBoost = boostUnit.convertPoints(targetPeakBoost),
+                    yAxisLabel = boostUnit.label,
                     modifier = Modifier.fillMaxWidth().weight(1f).padding(8.dp)
                 )
             }
@@ -631,7 +800,7 @@ private fun OutputAxisBanner(outputKfmiop: Map3d) {
             val xAxisData = remember(outputKfmiop) {
                 arrayOf(outputKfmiop.xAxis.copyOf())
             }
-            MapAxis(data = xAxisData, editable = true)
+            MapAxis(data = xAxisData, editable = false)
         }
     }
 }
@@ -685,9 +854,32 @@ private fun SideBySideTables(
 }
 
 @Composable
+private fun BoostUnitToggle(selected: BoostUnit, onSelected: (BoostUnit) -> Unit) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
+        horizontalArrangement = Arrangement.End,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text("Unit:", style = MaterialTheme.typography.labelSmall, modifier = Modifier.padding(end = 8.dp))
+        SingleChoiceSegmentedButtonRow {
+            BoostUnit.entries.forEachIndexed { index, unit ->
+                SegmentedButton(
+                    selected = selected == unit,
+                    onClick = { onSelected(unit) },
+                    shape = SegmentedButtonDefaults.itemShape(index = index, count = BoostUnit.entries.size)
+                ) {
+                    Text(unit.label, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun BoostComparisonChart(
     currentPeakBoost: List<Pair<Double, Double>>,
     targetPeakBoost: List<Pair<Double, Double>>,
+    yAxisLabel: String = "PSI",
     modifier: Modifier = Modifier
 ) {
     Box(modifier = modifier) {
@@ -706,7 +898,7 @@ private fun BoostComparisonChart(
             ),
             title = "Peak Boost Comparison",
             xAxisLabel = "RPM",
-            yAxisLabel = "PSI"
+            yAxisLabel = yAxisLabel
         )
     }
 }

@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.dp
 import data.contract.Me7LogFileContract
 import data.model.EcuPlatform
 import data.parser.bin.BinParser
+import data.parser.xdf.TableDefinition
 import data.parser.xdf.XdfParser
 import data.preferences.MapPreference
 import data.preferences.MapPreferenceManager
@@ -51,6 +52,7 @@ import data.preferences.rkw.RkwPreferences
 import data.preferences.tvub.TvubPfiPreferences
 import data.preferences.wdkugdn.WdkugdnPreferences
 import data.profile.ProfileManager
+import domain.model.fueltrim.FuelTrimAnalyzer
 import ui.components.MapPickerDialog
 import ui.components.InfoTooltip
 import ui.navigation.NavigationState
@@ -63,7 +65,8 @@ import javax.swing.SwingUtilities
 private data class MapDefinitionEntry(
     val title: String,
     val preference: MapPreference,
-    val platforms: Set<EcuPlatform> = EcuPlatform.entries.toSet()
+    val platforms: Set<EcuPlatform> = EcuPlatform.entries.toSet(),
+    val recommendedPredicate: ((TableDefinition) -> Boolean)? = null
 )
 
 private val allMapDefinitions = listOf(
@@ -97,8 +100,16 @@ private val allMapDefinitions = listOf(
     MapDefinitionEntry("KFLDRQ0", Kfldrq0Preferences),
     MapDefinitionEntry("KFLDRQ1", Kfldrq1Preferences),
     MapDefinitionEntry("KFLDRQ2", Kfldrq2Preferences),
-    // MED17-only — fuel trim correction map
-    MapDefinitionEntry("rk_w (Fuel Trim)", RkwPreferences, platforms = setOf(EcuPlatform.MED17)),
+    // MED17-only — fuel trim correction map (prefer map-switch variants on DS1 tunes)
+    MapDefinitionEntry(
+        title = "rk_w (Fuel Trim)",
+        preference = RkwPreferences,
+        platforms = setOf(EcuPlatform.MED17),
+        recommendedPredicate = { def ->
+            FuelTrimAnalyzer.isRkwTable(def.tableDescription) &&
+                FuelTrimAnalyzer.isMapSwitchTable(def.tableDescription)
+        }
+    ),
 )
 
 /** Returns map definitions filtered for the active platform. */
@@ -360,15 +371,13 @@ private fun QuickSetupSection(navState: NavigationState) {
     val allUserProfiles by ProfileManager.userProfiles.collectAsState()
     var statusMessage by remember { mutableStateOf<String?>(null) }
 
-    // Group all profiles by platform (show all, not just current)
-    val defaultByPlatform = remember(allDefaultProfiles) {
-        allDefaultProfiles.groupBy { it.ecuPlatform }
+    // Filter profiles to current platform only
+    val currentPlatform = navState.ecuPlatform.name
+    val defaultsForPlatform = remember(allDefaultProfiles, currentPlatform) {
+        allDefaultProfiles.filter { it.ecuPlatform == currentPlatform }
     }
-    val userByPlatform = remember(allUserProfiles) {
-        allUserProfiles.groupBy { it.ecuPlatform }
-    }
-    val allPlatformKeys = remember(defaultByPlatform, userByPlatform) {
-        (defaultByPlatform.keys + userByPlatform.keys).distinct().sorted()
+    val usersForPlatform = remember(allUserProfiles, currentPlatform) {
+        allUserProfiles.filter { it.ecuPlatform == currentPlatform }
     }
 
     /** Switch platform to match the profile (if needed) then apply. */
@@ -398,32 +407,27 @@ private fun QuickSetupSection(navState: NavigationState) {
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                for (platformKey in allPlatformKeys) {
-                    val defaults = defaultByPlatform[platformKey].orEmpty()
-                    val users = userByPlatform[platformKey].orEmpty()
-                    if (defaults.isEmpty() && users.isEmpty()) continue
+                for (profile in defaultsForPlatform) {
+                    ProfileRow(profile = profile, onApply = {
+                        ProfileManager.applyProfile(profile)
+                        statusMessage = "Applied profile: ${profile.name}"
+                    })
+                }
+                for (profile in usersForPlatform) {
+                    ProfileRow(profile = profile, onApply = {
+                        ProfileManager.applyProfile(profile)
+                        statusMessage = "Applied profile: ${profile.name}"
+                    })
+                }
 
-                    // Platform section header
+                if (defaultsForPlatform.isEmpty() && usersForPlatform.isEmpty()) {
                     Text(
-                        text = platformKey,
-                        style = MaterialTheme.typography.labelMedium,
+                        text = "No bundled profiles for ${currentPlatform}. Load a custom profile below.",
+                        style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp)
+                        modifier = Modifier.padding(vertical = 8.dp)
                     )
-
-                    for (profile in defaults) {
-                        ProfileRow(profile = profile, onApply = {
-                            applyWithPlatformSwitch(profile)
-                            statusMessage = "Applied profile: ${profile.name}"
-                        })
-                    }
-                    for (profile in users) {
-                        ProfileRow(profile = profile, onApply = {
-                            applyWithPlatformSwitch(profile)
-                            statusMessage = "Applied profile: ${profile.name}"
-                        })
-                    }
-
+                } else {
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                 }
 
@@ -620,7 +624,8 @@ private fun MapDefinitionsSection(navState: NavigationState, modifier: Modifier 
             onSelected = { tableDefinition ->
                 entry.preference.setSelectedMap(tableDefinition)
             },
-            onDismiss = { pickerDialogEntry = null }
+            onDismiss = { pickerDialogEntry = null },
+            recommendedPredicate = entry.recommendedPredicate
         )
     }
 }

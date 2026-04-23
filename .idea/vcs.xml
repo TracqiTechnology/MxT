@@ -2,5 +2,7 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="$PROJECT_DIR$" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/technical/med9/community-resources/tools/MED9RamReader" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/technical/med9/community-resources/tools/pq-flasher" vcs="Git" />
   </component>
 </project>
