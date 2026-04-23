@@ -34,6 +34,8 @@ class NavigationState {
     // Pre-loaded log data for screenshot harness (screens auto-load when non-null)
     var ldrpidLogDir: java.io.File? = null
     var fuelTrimLogFiles: List<java.io.File>? = null
+    var optimizerLogDir: java.io.File? = null
+    var axisRescalerPreloadMap: domain.math.map.Map3d? = null
 
     fun navigateTo(destination: RailDestination) {
         railDestination = destination

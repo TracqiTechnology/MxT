@@ -28,17 +28,19 @@ private const val DEFAULT_COLS = 8
 private const val MAX_DIMENSION = 50
 
 @Composable
-fun AxisRescalerScreen() {
+fun AxisRescalerScreen(preloadedMap: Map3d? = null) {
     val clipboardManager = LocalClipboardManager.current
 
     // Input map dimensions and data
-    var inputRowsText by remember { mutableStateOf(DEFAULT_ROWS.toString()) }
-    var inputColsText by remember { mutableStateOf(DEFAULT_COLS.toString()) }
-    var inputRows by remember { mutableStateOf(DEFAULT_ROWS) }
-    var inputCols by remember { mutableStateOf(DEFAULT_COLS) }
+    val initRows = preloadedMap?.yAxis?.size ?: DEFAULT_ROWS
+    val initCols = preloadedMap?.xAxis?.size ?: DEFAULT_COLS
+    var inputRowsText by remember { mutableStateOf(initRows.toString()) }
+    var inputColsText by remember { mutableStateOf(initCols.toString()) }
+    var inputRows by remember { mutableStateOf(initRows) }
+    var inputCols by remember { mutableStateOf(initCols) }
 
     var inputMap by remember {
-        mutableStateOf(buildEmptyMap(DEFAULT_ROWS, DEFAULT_COLS))
+        mutableStateOf(preloadedMap ?: buildEmptyMap(DEFAULT_ROWS, DEFAULT_COLS))
     }
 
     // Output dimensions — always match input

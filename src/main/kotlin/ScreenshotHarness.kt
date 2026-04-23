@@ -378,9 +378,14 @@ fun main() {
         MxTApp(navState)
     }
 
-    // Axis Rescaler
-    captureScreen("tools/axis_rescaler.png") {
+    // Axis Rescaler — preload with KFLDRL map data from BIN (2D with proper axes)
+    val rescalerMap = BinParser.mapList.value.firstOrNull {
+        it.first.tableName.contains("KFLDRL", ignoreCase = true) ||
+            it.first.tableDescription.contains("KFLDRL", ignoreCase = true)
+    }?.second
+    captureScreen("tools/axis_rescaler.png", height = 1400) {
         val navState = NavigationState()
+        navState.axisRescalerPreloadMap = rescalerMap
         navState.navigateToTools(ToolsTab.AXIS_RESCALER)
         MxTApp(navState)
     }
@@ -460,7 +465,8 @@ fun main() {
     // LDRPID in MED17 mode — with WOT log data loaded
     captureScreenWithLogData(
         filename = "med17/ldrpid_med17.png",
-        loadData = { Thread.sleep(100) }
+        height = 1200,
+        loadData = { Thread.sleep(500) }
     ) {
         val navState = NavigationState()
         navState.ldrpidLogDir = med17LogDir
@@ -475,9 +481,14 @@ fun main() {
         MxTApp(navState)
     }
 
-    // Optimizer in MED17 mode
-    captureScreen("med17/optimizer_med17.png") {
+    // Optimizer in MED17 mode — with WOT log data loaded
+    captureScreenWithLogData(
+        filename = "med17/optimizer_med17.png",
+        height = 1400,
+        loadData = { Thread.sleep(100) }
+    ) {
         val navState = NavigationState()
+        navState.optimizerLogDir = med17LogDir
         navState.navigateToOptimizer()
         MxTApp(navState)
     }
@@ -572,17 +583,17 @@ private fun captureScreenWithLogData(
         MxTTheme { content() }
     }
     // Initial render to start LaunchedEffect collectors
-    repeat(5) { scene.render(it * 16_000_000L) }
+    repeat(10) { scene.render(it * 16_000_000L) }
 
     // Trigger log parsing (emits to SharedFlow)
     loadData()
 
     // Allow time for async parsing and state propagation
-    Thread.sleep(2000)
+    Thread.sleep(4000)
 
     // Render many frames to let state propagate through compose tree
-    repeat(30) { scene.render((it + 5) * 16_000_000L) }
-    val image = scene.render(560_000_000L)
+    repeat(40) { scene.render((it + 10) * 16_000_000L) }
+    val image = scene.render(800_000_000L)
     val data = image.encodeToData(EncodedImageFormat.PNG)
         ?: error("Failed to encode $filename to PNG")
     File("documentation/images/$filename").writeBytes(data.bytes)

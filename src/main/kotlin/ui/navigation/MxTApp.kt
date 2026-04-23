@@ -139,7 +139,7 @@ fun MxTApp(navState: NavigationState = remember { NavigationState() }) {
                     }
                     RailDestination.OPTIMIZER -> {
                         if (isConfigured) {
-                            OptimizerScreen()
+                            OptimizerScreen(preloadedLogDir = navState.optimizerLogDir)
                         } else {
                             ConfigurationRequiredPlaceholder()
                         }

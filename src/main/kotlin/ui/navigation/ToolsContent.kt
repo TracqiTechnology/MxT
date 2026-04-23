@@ -56,7 +56,7 @@ fun ToolsContent(navState: NavigationState) {
                 ToolsTab.A2L_GENERATOR -> A2lToEcuScreen()
                 ToolsTab.LOGGER -> LoggerScreen(ecuPlatform = navState.ecuPlatform)
                 ToolsTab.RAM_SNIFFER -> RamSnifferScreen()
-                ToolsTab.AXIS_RESCALER -> AxisRescalerScreen()
+                ToolsTab.AXIS_RESCALER -> AxisRescalerScreen(preloadedMap = navState.axisRescalerPreloadMap)
             }
         }
     }

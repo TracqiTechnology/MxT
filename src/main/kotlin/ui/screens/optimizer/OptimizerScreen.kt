@@ -198,7 +198,7 @@ private fun TaggedMessageRow(
 }
 
 @Composable
-fun OptimizerScreen() {
+fun OptimizerScreen(preloadedLogDir: java.io.File? = null) {
     val mapList by BinParser.mapList.collectAsState()
     val scope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
@@ -238,6 +238,101 @@ fun OptimizerScreen() {
     // Result state
     var result by remember { mutableStateOf<OptimizerCalculator.OptimizerResult?>(null) }
     var logFileName by remember { mutableStateOf("No Log Selected") }
+
+    // Auto-load log data when preloadedLogDir is provided (screenshot harness)
+    LaunchedEffect(preloadedLogDir, kfldrlPair, kfldimxPair, kfmiopPair, kfmirlPair) {
+        if (preloadedLogDir != null && kfldrlPair != null && kfldimxPair != null) {
+            withContext(Dispatchers.IO) {
+                val isMed17 = EcuPlatformPreference.platform == EcuPlatform.MED17
+                val minAngle = minThrottleAngle.toDoubleOrNull() ?: 80.0
+
+                val logFiles = preloadedLogDir.listFiles()
+                    ?.filter { it.isFile && it.name.endsWith(".csv", ignoreCase = true) }
+                    ?: emptyList()
+                val summaries = mutableListOf<LogSummary>()
+
+                var rawMed17Values: Map<data.contract.Med17LogFileContract.Header, List<Double>>? = null
+                val mergedValues = if (isMed17) {
+                    val med17Parser = Med17LogParser()
+                    val med17Values = med17Parser.parseLogDirectory(
+                        Med17LogParser.LogType.OPTIMIZER, preloadedLogDir
+                    ) { _, _ -> }
+                    rawMed17Values = med17Values
+                    Med17LogAdapter.toMe7OptimizerFormat(med17Values)
+                } else {
+                    val parser = Me7LogParser()
+                    parser.parseLogDirectory(
+                        Me7LogParser.LogType.OPTIMIZER, preloadedLogDir
+                    ) { _, _ -> }
+                }
+
+                for (logFile in logFiles) {
+                    try {
+                        val fileValues = if (isMed17) {
+                            val fileParser = Med17LogParser()
+                            val med17Values = fileParser.parseLogFile(Med17LogParser.LogType.OPTIMIZER, logFile)
+                            Med17LogAdapter.toMe7OptimizerFormat(med17Values)
+                        } else {
+                            val fileParser = Me7LogParser()
+                            fileParser.parseLogFile(Me7LogParser.LogType.OPTIMIZER, logFile)
+                        }
+                        val wotEntries = OptimizerCalculator.filterWotEntries(fileValues, minAngle)
+                        if (wotEntries.isNotEmpty()) {
+                            summaries.add(LogSummary(
+                                fileName = logFile.name,
+                                wotSampleCount = wotEntries.size,
+                                rpmRange = "${wotEntries.minOf { it.rpm }.toInt()} – ${wotEntries.maxOf { it.rpm }.toInt()}",
+                                avgPressureError = wotEntries.map { it.requestedMap - it.actualMap }.average()
+                            ))
+                        }
+                    } catch (_: Exception) { }
+                }
+
+                val analysisResult = if (isMed17) {
+                    OptimizerCalculator.analyzeMed17(
+                        values = mergedValues,
+                        kfldrlMap = kfldrlPair.second,
+                        kfldimxMap = kfldimxPair.second,
+                        kfmiopMap = kfmiopPair?.second,
+                        kfmirlMap = kfmirlPair?.second,
+                        ldrxnTarget = ldrxnTarget.toDoubleOrNull() ?: 191.0,
+                        toleranceMbar = toleranceMbar.toDoubleOrNull() ?: 30.0,
+                        minThrottleAngle = minAngle,
+                        kfldimxOverheadPercent = kfldimxOverhead.toDoubleOrNull() ?: 8.0,
+                        logSummaries = summaries,
+                        kfldrq0Map = kfldrq0Pair?.second,
+                        kfldrq1Map = kfldrq1Pair?.second,
+                        kfldrq2Map = kfldrq2Pair?.second,
+                        fupsrlsValues = rawMed17Values?.get(data.contract.Med17LogFileContract.Header.FUPSRLS_HEADER)
+                    )
+                } else {
+                    OptimizerCalculator.analyze(
+                        values = mergedValues,
+                        kfldrlMap = kfldrlPair.second,
+                        kfldimxMap = kfldimxPair.second,
+                        kfpbrkMap = kfpbrkPair?.second,
+                        kfmiopMap = kfmiopPair?.second,
+                        kfmirlMap = kfmirlPair?.second,
+                        ldrxnTarget = ldrxnTarget.toDoubleOrNull() ?: 191.0,
+                        toleranceMbar = toleranceMbar.toDoubleOrNull() ?: 30.0,
+                        minThrottleAngle = minAngle,
+                        kfldimxOverheadPercent = kfldimxOverhead.toDoubleOrNull() ?: 8.0,
+                        kfurl = kfurl.toDoubleOrNull() ?: 0.106,
+                        kfurlMap = autoKfurlMap,
+                        logSummaries = summaries,
+                        kfldrq0Map = kfldrq0Pair?.second,
+                        kfldrq1Map = kfldrq1Pair?.second,
+                        kfldrq2Map = kfldrq2Pair?.second
+                    )
+                }
+
+                withContext(Dispatchers.Main) {
+                    result = analysisResult
+                    logFileName = preloadedLogDir.name
+                }
+            }
+        }
+    }
     var showProgress by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableStateOf(0) }
 
