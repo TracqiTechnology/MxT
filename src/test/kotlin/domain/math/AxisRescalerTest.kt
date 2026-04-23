@@ -441,8 +441,8 @@ class AxisRescalerTest {
     // ── Non-linear surface ────────────────────────────────────────────
 
     @Test
-    fun `rescale non-linear surface uses bilinear interpolation`() {
-        // Non-linear Z values where bilinear ≠ simple linear
+    fun `rescale non-linear surface interpolates correctly`() {
+        // Non-linear Z values on a 2×2 grid (cubic degenerates to bilinear here)
         val original = Map3d(
             arrayOf(0.0, 10.0),
             arrayOf(0.0, 10.0),
@@ -459,8 +459,8 @@ class AxisRescalerTest {
         )
 
         val map = result.rescaledMap
-        // Bilinear at (5, 5): (0+10+10+40)/4 = 15.0
-        assertEquals(15.0, map.zAxis[1][1], 1e-9, "Bilinear midpoint of non-linear surface")
+        // Midpoint at (5, 5): (0+10+10+40)/4 = 15.0
+        assertEquals(15.0, map.zAxis[1][1], 1e-9, "Midpoint of non-linear surface")
 
         // Edge midpoints
         assertEquals(5.0, map.zAxis[0][1], 1e-9, "Top edge midpoint")

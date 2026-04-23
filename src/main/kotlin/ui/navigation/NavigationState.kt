@@ -27,6 +27,13 @@ class NavigationState {
     var openLoopLogSubTab by mutableStateOf(0)
     var openLoopCorrectionSubTab by mutableStateOf(0)
     var plsolTab by mutableStateOf(0)
+    var dualInjectionTab by mutableStateOf(0)
+    var dualInjectionKrktePfi: String? = null
+    var dualInjectionKrkteGdi: String? = null
+
+    // Pre-loaded log data for screenshot harness (screens auto-load when non-null)
+    var ldrpidLogDir: java.io.File? = null
+    var fuelTrimLogFiles: List<java.io.File>? = null
 
     fun navigateTo(destination: RailDestination) {
         railDestination = destination

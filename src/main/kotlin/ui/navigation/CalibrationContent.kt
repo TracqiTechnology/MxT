@@ -69,8 +69,12 @@ fun CalibrationContent(navState: NavigationState) {
                     initialCorrectionSubTab = navState.openLoopCorrectionSubTab,
                     autoFitDegree = navState.autoFitDegree
                 )
-                CalibrationTab.DUAL_INJECTION -> DualInjectionScreen()
-                CalibrationTab.FUEL_TRIM -> FuelTrimScreen()
+                CalibrationTab.DUAL_INJECTION -> DualInjectionScreen(
+                    initialTab = navState.dualInjectionTab,
+                    initialKrktePfi = navState.dualInjectionKrktePfi,
+                    initialKrkteGdi = navState.dualInjectionKrkteGdi
+                )
+                CalibrationTab.FUEL_TRIM -> FuelTrimScreen(preloadedLogFiles = navState.fuelTrimLogFiles)
                 CalibrationTab.PLSOL -> PlsolScreen(initialTab = navState.plsolTab)
                 CalibrationTab.KFMIOP -> KfmiopScreen()
                 CalibrationTab.KFMIRL -> KfmirlScreen()
@@ -78,7 +82,7 @@ fun CalibrationContent(navState: NavigationState) {
                 CalibrationTab.KFZW -> KfzwScreen()
                 CalibrationTab.KFVPDKSD -> KfvpdksdScreen()
                 CalibrationTab.WDKUGDN -> WdkugdnScreen()
-                CalibrationTab.LDRPID -> LdrpidScreen()
+                CalibrationTab.LDRPID -> LdrpidScreen(preloadedLogDir = navState.ldrpidLogDir)
             }
         }
     }

@@ -55,7 +55,7 @@ private fun findMap(
  * corrections → apply to rk_w → show corrected map (output) → write to BIN.
  */
 @Composable
-fun FuelTrimScreen() {
+fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
     val scrollState = rememberScrollState()
     val scope = rememberCoroutineScope()
 
@@ -133,6 +133,45 @@ fun FuelTrimScreen() {
 
     // ── Per-cell diagnostics state ──
     var selectedDiagCell by remember { mutableStateOf<FuelTrimCellDiagnostic?>(null) }
+
+    // Auto-load log data when preloadedLogFiles is provided (screenshot harness)
+    LaunchedEffect(preloadedLogFiles, inputRkw) {
+        if (preloadedLogFiles != null && preloadedLogFiles.isNotEmpty()) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val parser = Med17LogParser()
+                    var merged: Map<Med17LogFileContract.Header, List<Double>>? = null
+                    for (f in preloadedLogFiles) {
+                        val logData = parser.parseLogFile(Med17LogParser.LogType.FUEL_TRIM, f)
+                        if (merged == null) {
+                            merged = logData.toMutableMap()
+                        } else {
+                            val m = merged!!.toMutableMap()
+                            for ((key, list) in logData) {
+                                val existing = m[key]
+                                m[key] = if (existing != null) existing + list else list
+                            }
+                            merged = m
+                        }
+                    }
+                    val allLogData = merged ?: emptyMap()
+                    val rpmBins = inputRkw?.yAxis?.map { it }?.toDoubleArray()
+                        ?: FuelTrimAnalyzer.DEFAULT_RPM_BINS
+                    val loadBins = inputRkw?.xAxis?.map { it }?.toDoubleArray()
+                        ?: FuelTrimAnalyzer.DEFAULT_LOAD_BINS
+                    val diagResult = FuelTrimAnalyzer.analyzeMed17TrimsWithDiagnostics(
+                        allLogData, rpmBins, loadBins
+                    )
+                    val analyzed = diagResult.toFuelTrimResult()
+                    withContext(Dispatchers.Main) {
+                        trimResult = analyzed
+                        diagnosticResult = diagResult
+                        logStatus = "✓ Loaded ${preloadedLogFiles.size} file(s)"
+                    }
+                } catch (_: Exception) { }
+            }
+        }
+    }
 
     // ── Bulk apply state ──
     var showBulkApply by remember { mutableStateOf(false) }

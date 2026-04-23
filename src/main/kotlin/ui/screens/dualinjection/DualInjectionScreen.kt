@@ -55,8 +55,12 @@ private enum class WriteStatus { Idle, Success, Error }
  * 3. Split Calculator — port vs DI fuel share at given load/RPM
  */
 @Composable
-fun DualInjectionScreen() {
-    var selectedTab by remember { mutableStateOf(0) }
+fun DualInjectionScreen(
+    initialTab: Int = 0,
+    initialKrktePfi: String? = null,
+    initialKrkteGdi: String? = null
+) {
+    var selectedTab by remember { mutableStateOf(initialTab) }
     val tabTitles = listOf("Port Injector", "Direct Injector", "Split Calculator")
 
     Column(modifier = Modifier.fillMaxSize()) {
@@ -73,7 +77,7 @@ fun DualInjectionScreen() {
         when (selectedTab) {
             0 -> PortInjectorTab()
             1 -> DirectInjectorTab()
-            2 -> SplitCalculatorTab()
+            2 -> SplitCalculatorTab(initialKrktePfi, initialKrkteGdi)
         }
     }
 }
@@ -645,12 +649,15 @@ private fun DirectInjectorTab() {
 // ── Split Calculator Tab ──────────────────────────────────────────────
 
 @Composable
-private fun SplitCalculatorTab() {
+private fun SplitCalculatorTab(
+    initialKrktePfi: String? = null,
+    initialKrkteGdi: String? = null
+) {
     val scrollState = rememberScrollState()
     val scope = rememberCoroutineScope()
 
-    var portKrkte by remember { mutableStateOf("") }
-    var diKrkte by remember { mutableStateOf("") }
+    var portKrkte by remember { mutableStateOf(initialKrktePfi ?: "") }
+    var diKrkte by remember { mutableStateOf(initialKrkteGdi ?: "") }
     var targetLoad by remember { mutableStateOf("150.0") }
     var targetRpm by remember { mutableStateOf("5000.0") }
 
@@ -674,6 +681,21 @@ private fun SplitCalculatorTab() {
     LaunchedEffect(Unit) {
         if (pfiResult == null) {
             pfiResult = PfiShareCalculator.calculateRpmDependentShare()
+        }
+    }
+
+    // Auto-trigger RPM sweep when initial KRKTE values are provided (screenshot harness)
+    LaunchedEffect(pfiResult) {
+        if (initialKrktePfi != null && initialKrkteGdi != null && pfiResult != null && sweepRows.isEmpty()) {
+            try {
+                val curve = pfiResult ?: PfiShareCalculator.calculateRpmDependentShare()
+                sweepRows = PfiShareCalculator.calculateRpmSweep(
+                    loadPercent = sweepLoad.toDouble(),
+                    pfiShareCurve = curve,
+                    portKrkte = portKrkte.toDouble(),
+                    directKrkte = diKrkte.toDouble()
+                )
+            } catch (_: Exception) { }
         }
     }
 

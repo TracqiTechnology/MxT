@@ -79,12 +79,12 @@ class KfmiopYAxisEditTest {
         assertEquals(40.0, map.zAxis[0][2], 1e-9, "Corner (200, 1000)")
         assertEquals(80.0, map.zAxis[4][2], 1e-9, "Corner (200, 5000)")
 
-        // Bilinear interpolation at (125, 2000):
+        // Monotone cubic interpolation at (125, 2000):
         // Original grid points: (100, 1000)=20, (150, 1000)=30, (100, 3000)=30, (150, 3000)=45
-        // x=125 → xFrac=0.5 between 100 and 150
-        // y=2000 → yFrac=0.5 between 1000 and 3000
-        // Bilinear: (20 + 30)/2 = 25 at y=1000; (30 + 45)/2 = 37.5 at y=3000; (25+37.5)/2 = 31.25
-        assertEquals(31.25, map.zAxis[1][1], 1e-9, "Bilinear at (125, 2000)")
+        // Surface is bilinear (linear along each axis), so cubic reproduces exact result.
+        // x=125 → midpoint between 100 and 150; y=2000 → midpoint between 1000 and 3000
+        // Separable: X-pass gives 25 at y=1000 and 37.5 at y=3000; Y-pass gives (25+37.5)/2 = 31.25
+        assertEquals(31.25, map.zAxis[1][1], 1e-9, "Cubic at (125, 2000)")
     }
 
     @Test

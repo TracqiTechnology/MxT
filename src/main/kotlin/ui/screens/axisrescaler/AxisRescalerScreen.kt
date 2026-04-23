@@ -2,12 +2,11 @@ package ui.screens.axisrescaler
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
-import androidx.compose.material.icons.filled.ContentPaste
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.RestartAlt
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -15,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import domain.math.AxisRescaler
 import domain.math.map.Map3d
@@ -23,50 +23,56 @@ import ui.components.MapTable
 import java.text.DecimalFormat
 
 private val formatter = DecimalFormat("#.##")
+private const val DEFAULT_ROWS = 8
+private const val DEFAULT_COLS = 8
+private const val MAX_DIMENSION = 50
 
 @Composable
 fun AxisRescalerScreen() {
     val clipboardManager = LocalClipboardManager.current
 
-    var inputMap by remember { mutableStateOf<Map3d?>(null) }
-    var editedXAxis by remember { mutableStateOf<Array<Double>>(emptyArray()) }
-    var editedYAxis by remember { mutableStateOf<Array<Double>>(emptyArray()) }
+    // Input map dimensions and data
+    var inputRowsText by remember { mutableStateOf(DEFAULT_ROWS.toString()) }
+    var inputColsText by remember { mutableStateOf(DEFAULT_COLS.toString()) }
+    var inputRows by remember { mutableStateOf(DEFAULT_ROWS) }
+    var inputCols by remember { mutableStateOf(DEFAULT_COLS) }
+
+    var inputMap by remember {
+        mutableStateOf(buildEmptyMap(DEFAULT_ROWS, DEFAULT_COLS))
+    }
+
+    // Output dimensions — always match input
+    val outputRows = inputRows
+    val outputCols = inputCols
+
+    // Derived output axes — linearly spaced across input range
+    val outputXAxis by remember(inputMap.xAxis, outputCols) {
+        mutableStateOf(deriveAxis(inputMap.xAxis, outputCols))
+    }
+    val outputYAxis by remember(inputMap.yAxis, outputRows) {
+        mutableStateOf(deriveAxis(inputMap.yAxis, outputRows))
+    }
+
     var rescaleResult by remember { mutableStateOf<AxisRescaler.RescaleResult?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     var statusMessage by remember { mutableStateOf<String?>(null) }
 
-    fun resetAxes(map: Map3d) {
-        editedXAxis = map.xAxis.copyOf()
-        editedYAxis = map.yAxis.copyOf()
+    fun updateInputDimensions(rows: Int, cols: Int) {
+        val r = rows.coerceIn(1, MAX_DIMENSION)
+        val c = cols.coerceIn(1, MAX_DIMENSION)
+        inputRows = r
+        inputCols = c
+        inputMap = resizeMap(inputMap, r, c)
         rescaleResult = null
-        errorMessage = null
-        statusMessage = null
-    }
-
-    fun handlePaste() {
-        val text = clipboardManager.getText()?.text
-        if (text.isNullOrBlank()) {
-            errorMessage = "Clipboard is empty"
-            return
-        }
-        val parsed = MapClipboardParser.parseTsv(text)
-        if (parsed == null) {
-            errorMessage = "Could not parse clipboard content as a map table"
-            return
-        }
-        inputMap = parsed
-        resetAxes(parsed)
-        statusMessage = "Loaded ${parsed.yAxis.size}×${parsed.xAxis.size} map from clipboard"
     }
 
     fun handleRescale() {
-        val map = inputMap ?: return
         errorMessage = null
         try {
             val result = AxisRescaler.rescaleMap(
-                original = map,
-                newXAxis = editedXAxis,
-                newYAxis = editedYAxis
+                original = inputMap,
+                newXAxis = outputXAxis,
+                newYAxis = outputYAxis
             )
             rescaleResult = result
             statusMessage = "Rescaled: ${result.exactMatchCount} exact, " +
@@ -83,12 +89,10 @@ fun AxisRescalerScreen() {
         val map = result.rescaledMap
         val sb = StringBuilder()
 
-        // Header row: empty cell + X-axis values
         sb.append("\t")
         sb.append(map.xAxis.joinToString("\t") { formatter.format(it) })
         sb.appendLine()
 
-        // Data rows: Y-axis value + Z values
         for (r in map.yAxis.indices) {
             sb.append(formatter.format(map.yAxis[r]))
             for (c in map.xAxis.indices) {
@@ -118,7 +122,7 @@ fun AxisRescalerScreen() {
             color = MaterialTheme.colorScheme.primary
         )
         Text(
-            text = "Paste any map, edit the X/Y axis breakpoints, and rescale using bilinear interpolation.",
+            text = "Set input dimensions, paste map data and axis values, set output dimensions, and rescale.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -132,106 +136,111 @@ fun AxisRescalerScreen() {
 
         // ── Input section ─────────────────────────────────────────────
         SectionCard("Input Map") {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { handlePaste() }) {
-                    Icon(Icons.Default.ContentPaste, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(4.dp))
-                    Text("Paste Map")
-                }
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Dimensions:", style = MaterialTheme.typography.labelMedium)
+                OutlinedTextField(
+                    value = inputRowsText,
+                    onValueChange = { value ->
+                        inputRowsText = value
+                        val n = value.toIntOrNull()
+                        if (n != null && n in 1..MAX_DIMENSION) {
+                            updateInputDimensions(n, inputCols)
+                        }
+                    },
+                    label = { Text("Rows") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.width(80.dp),
+                    singleLine = true,
+                )
+                Text("×", style = MaterialTheme.typography.labelLarge)
+                OutlinedTextField(
+                    value = inputColsText,
+                    onValueChange = { value ->
+                        inputColsText = value
+                        val n = value.toIntOrNull()
+                        if (n != null && n in 1..MAX_DIMENSION) {
+                            updateInputDimensions(inputRows, n)
+                        }
+                    },
+                    label = { Text("Cols") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.width(80.dp),
+                    singleLine = true,
+                )
             }
 
-            val map = inputMap
-            if (map != null) {
-                Spacer(Modifier.height(8.dp))
-                Text("X-Axis", style = MaterialTheme.typography.labelMedium)
-                MapAxis(
-                    data = arrayOf(map.xAxis),
-                    editable = false
-                )
+            Spacer(Modifier.height(8.dp))
 
-                Spacer(Modifier.height(4.dp))
-                Text("Y-Axis", style = MaterialTheme.typography.labelMedium)
-                MapAxis(
-                    data = arrayOf(map.yAxis),
-                    editable = false
-                )
-
-                Spacer(Modifier.height(8.dp))
-                Text("Map Data (${map.yAxis.size} rows × ${map.xAxis.size} cols)", style = MaterialTheme.typography.labelMedium)
-                Box(modifier = Modifier.heightIn(max = 300.dp)) {
-                    MapTable(map = map, editable = false)
+            Text("X-Axis (paste or edit values)", style = MaterialTheme.typography.labelMedium)
+            MapAxis(
+                data = arrayOf(inputMap.xAxis),
+                editable = true,
+                onDataChanged = { newData ->
+                    if (newData.isNotEmpty() && newData[0].isNotEmpty()) {
+                        inputMap = Map3d(newData[0], inputMap.yAxis, inputMap.zAxis)
+                    }
                 }
+            )
+
+            Spacer(Modifier.height(4.dp))
+
+            Text("Y-Axis (paste or edit values)", style = MaterialTheme.typography.labelMedium)
+            MapAxis(
+                data = arrayOf(inputMap.yAxis),
+                editable = true,
+                onDataChanged = { newData ->
+                    if (newData.isNotEmpty() && newData[0].isNotEmpty()) {
+                        inputMap = Map3d(inputMap.xAxis, newData[0], inputMap.zAxis)
+                    }
+                }
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            Text(
+                "Map Data (${inputRows}×${inputCols} — select a cell and paste with ${modifierKeyName()}+V)",
+                style = MaterialTheme.typography.labelMedium
+            )
+            Box(modifier = Modifier.heightIn(max = 400.dp)) {
+                MapTable(
+                    map = inputMap,
+                    editable = true,
+                    onMapChanged = { newMap -> inputMap = newMap }
+                )
             }
         }
 
-        // ── Edit axes section ─────────────────────────────────────────
-        if (inputMap != null) {
-            SectionCard("Edit Axes") {
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("New X-Axis", style = MaterialTheme.typography.labelMedium)
-                    OutlinedButton(
-                        onClick = { inputMap?.let { editedXAxis = it.xAxis.copyOf() } },
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                    ) {
-                        Icon(Icons.Default.RestartAlt, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Reset X")
-                    }
-                }
-                if (editedXAxis.isNotEmpty()) {
-                    MapAxis(
-                        data = arrayOf(editedXAxis),
-                        editable = true,
-                        onDataChanged = { newData ->
-                            if (newData.isNotEmpty()) editedXAxis = newData[0]
-                        }
-                    )
-                }
+        // ── Output section ────────────────────────────────────────────
+        SectionCard("Output") {
+            // Derived output axes (read-only)
+            Text("Output X-Axis", style = MaterialTheme.typography.labelMedium)
+            MapAxis(data = arrayOf(outputXAxis), editable = false)
 
-                Spacer(Modifier.height(8.dp))
+            Spacer(Modifier.height(4.dp))
+            Text("Output Y-Axis", style = MaterialTheme.typography.labelMedium)
+            MapAxis(data = arrayOf(outputYAxis), editable = false)
 
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text("New Y-Axis", style = MaterialTheme.typography.labelMedium)
-                    OutlinedButton(
-                        onClick = { inputMap?.let { editedYAxis = it.yAxis.copyOf() } },
-                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)
-                    ) {
-                        Icon(Icons.Default.RestartAlt, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(Modifier.width(4.dp))
-                        Text("Reset Y")
-                    }
-                }
-                if (editedYAxis.isNotEmpty()) {
-                    MapAxis(
-                        data = arrayOf(editedYAxis),
-                        editable = true,
-                        onDataChanged = { newData ->
-                            if (newData.isNotEmpty()) editedYAxis = newData[0]
-                        }
-                    )
-                }
+            Spacer(Modifier.height(12.dp))
 
-                Spacer(Modifier.height(12.dp))
-
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Button(onClick = { handleRescale() }) {
                     Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
                     Text("Rescale")
                 }
             }
-        }
 
-        // ── Output section ────────────────────────────────────────────
-        val result = rescaleResult
-        if (result != null) {
-            SectionCard("Rescaled Output") {
-                // Diagnostics row
+            // Rescaled result
+            val result = rescaleResult
+            if (result != null) {
+                Spacer(Modifier.height(12.dp))
+
                 Row(horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                     DiagnosticChip("Total", result.totalCells.toString())
                     DiagnosticChip("Exact", result.exactMatchCount.toString())
@@ -243,7 +252,7 @@ fun AxisRescalerScreen() {
 
                 Spacer(Modifier.height(8.dp))
 
-                Box(modifier = Modifier.heightIn(max = 300.dp)) {
+                Box(modifier = Modifier.heightIn(max = 400.dp)) {
                     MapTable(
                         map = result.rescaledMap,
                         editable = false,
@@ -268,6 +277,65 @@ fun AxisRescalerScreen() {
         }
     }
 }
+
+private fun buildEmptyMap(rows: Int, cols: Int): Map3d {
+    val xAxis = buildDefaultAxis(cols)
+    val yAxis = buildDefaultAxis(rows)
+    val zAxis = Array(rows) { Array(cols) { 0.0 } }
+    return Map3d(xAxis, yAxis, zAxis)
+}
+
+private fun buildDefaultAxis(size: Int): Array<Double> =
+    Array(size) { (it + 1).toDouble() }
+
+/** Linearly space [count] breakpoints across the range of [inputAxis]. */
+private fun deriveAxis(inputAxis: Array<Double>, count: Int): Array<Double> {
+    if (count <= 0 || inputAxis.isEmpty()) return buildDefaultAxis(count.coerceAtLeast(1))
+    if (count == 1) return arrayOf(inputAxis.first())
+
+    val min = inputAxis.first()
+    val max = inputAxis.last()
+    val step = (max - min) / (count - 1)
+    return Array(count) { i -> min + step * i }
+}
+
+private fun resizeMap(current: Map3d, newRows: Int, newCols: Int): Map3d {
+    val xAxis = resizeAxis(current.xAxis, newCols)
+    val yAxis = resizeAxis(current.yAxis, newRows)
+    val zAxis = Array(newRows) { r ->
+        Array(newCols) { c ->
+            if (r < current.zAxis.size && c < current.zAxis[0].size) {
+                current.zAxis[r][c]
+            } else {
+                0.0
+            }
+        }
+    }
+    return Map3d(xAxis, yAxis, zAxis)
+}
+
+private fun resizeAxis(current: Array<Double>, newSize: Int): Array<Double> {
+    if (newSize <= 0) return current
+    if (newSize == current.size) return current
+    if (current.isEmpty()) return buildDefaultAxis(newSize)
+
+    return if (newSize < current.size) {
+        current.copyOfRange(0, newSize)
+    } else {
+        val step = if (current.size >= 2) {
+            current.last() - current[current.size - 2]
+        } else {
+            1.0
+        }
+        Array(newSize) { i ->
+            if (i < current.size) current[i]
+            else current.last() + step * (i - current.size + 1)
+        }
+    }
+}
+
+private fun modifierKeyName(): String =
+    if (System.getProperty("os.name").lowercase().contains("mac")) "⌘" else "Ctrl"
 
 @Composable
 private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Unit) {

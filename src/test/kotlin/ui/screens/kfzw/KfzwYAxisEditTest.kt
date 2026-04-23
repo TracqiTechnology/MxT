@@ -10,7 +10,7 @@ import kotlin.test.*
  *
  * Validates the computation pipeline:
  *   1. X-axis rescaling via [Kfzw.generateKfzw] (row-wise linear interpolation)
- *   2. Y-axis rescaling via [AxisRescaler.rescaleMap] (bilinear interpolation)
+ *   2. Y-axis rescaling via [AxisRescaler.rescaleMap] (monotone cubic Hermite interpolation)
  *   3. Combined X+Y rescaling
  *   4. Extrapolation diagnostics for out-of-range RPM breakpoints
  */
@@ -96,10 +96,13 @@ class KfzwYAxisEditTest {
         assertEquals(12.0, map.zAxis[0][1], 1e-9, "RPM=1000, Load=40")
         assertEquals(14.0, map.zAxis[0][2], 1e-9, "RPM=1000, Load=60")
 
-        // RPM=2500: midpoint between RPM=2000 and RPM=3000
-        assertEquals(17.5, map.zAxis[1][0], 1e-9, "RPM=2500, Load=20 (midpoint 15,20)")
-        assertEquals(21.0, map.zAxis[1][1], 1e-9, "RPM=2500, Load=40 (midpoint 18,24)")
-        assertEquals(23.0, map.zAxis[1][2], 1e-9, "RPM=2500, Load=60 (midpoint 20,26)")
+        // RPM=2500: monotone cubic interpolation between RPM=2000 and RPM=3000.
+        // The curve decelerates from 3000→4000 (smaller delta), so the cubic
+        // pulls midpoint values slightly above the bilinear average, correctly
+        // capturing the curvature of the ignition map.
+        assertEquals(17.767857142857142, map.zAxis[1][0], 1e-9, "RPM=2500, Load=20 (cubic 15→20)")
+        assertEquals(21.375, map.zAxis[1][1], 1e-9, "RPM=2500, Load=40 (cubic 18→24)")
+        assertEquals(23.375, map.zAxis[1][2], 1e-9, "RPM=2500, Load=60 (cubic 20→26)")
 
         // RPM=4000: exact match to original last row
         assertEquals(22.0, map.zAxis[2][0], 1e-9, "RPM=4000, Load=20")

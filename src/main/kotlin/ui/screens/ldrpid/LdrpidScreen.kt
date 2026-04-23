@@ -52,7 +52,7 @@ private fun findMap(
 }
 
 @Composable
-fun LdrpidScreen() {
+fun LdrpidScreen(preloadedLogDir: java.io.File? = null) {
     val mapList by BinParser.mapList.collectAsState()
     val scope = rememberCoroutineScope()
 
@@ -101,6 +101,31 @@ fun LdrpidScreen() {
     var showProgress by remember { mutableStateOf(false) }
     var logDirName by remember { mutableStateOf("No Directory Selected") }
     var consistencyWarning by remember { mutableStateOf<String?>(null) }
+
+    // Auto-load log data when preloadedLogDir is provided (screenshot harness)
+    LaunchedEffect(preloadedLogDir, kfldrlPair, kfldimxPair) {
+        if (preloadedLogDir != null && kfldrlPair != null && kfldimxPair != null) {
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                val med17Parser = Med17LogParser()
+                val med17Values = med17Parser.parseLogDirectory(
+                    Med17LogParser.LogType.LDRPID, preloadedLogDir
+                ) { _, _ -> }
+                val values = Med17LogAdapter.toMe7LdrpidFormat(med17Values)
+                val result = LdrpidCalculator.calculateWithCounts(values, kfldrlPair!!.second, kfldimxPair!!.second)
+                kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                    nonLinearMap = result.nonLinearOutput
+                    linearMap = result.linearOutput
+                    kfldrlMap = result.kfldrl
+                    kfldimxMap = result.kfldimx
+                    kfldimxXAxis = arrayOf(result.kfldimx.xAxis)
+                    nonLinearSampleCounts = result.nonLinearSampleCounts
+                    kfldrlSampleCounts = result.kfldrlSampleCounts
+                    kfldimxSampleCounts = result.kfldimxSampleCounts
+                    logDirName = preloadedLogDir.name
+                }
+            }
+        }
+    }
 
     // Write state
     val binFile by BinFilePreferences.file.collectAsState()
