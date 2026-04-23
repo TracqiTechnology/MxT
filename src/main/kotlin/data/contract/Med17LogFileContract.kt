@@ -51,6 +51,8 @@ object Med17LogFileContract {
     const val PFI_SPLIT_FACTOR_UNLIM_LABEL = "InjSys_facPrtnPfiSpUnlimModNew"
     const val REQUESTED_PRESSURE_MAX_LABEL = "pvdxs_w"
     const val INTAKE_TEMPERATURE_LABEL = "tans"
+    const val STFT_BANK1_LABEL = "fr_w_b1"
+    const val STFT_BANK2_LABEL = "fr_w_b2"
 
     enum class Header(var header: String, val title: String) {
         START_TIME_HEADER(START_TIME_LABEL, "Start Time"),
@@ -92,6 +94,8 @@ object Med17LogFileContract {
         PFI_SPLIT_FACTOR_HEADER(PFI_SPLIT_FACTOR_LABEL, "PFI Split Factor"),
         PFI_SPLIT_FACTOR_UNLIM_HEADER(PFI_SPLIT_FACTOR_UNLIM_LABEL, "PFI Split Factor (Unlimited)"),
         REQUESTED_PRESSURE_MAX_HEADER(REQUESTED_PRESSURE_MAX_LABEL, "Max Requested Pressure"),
-        INTAKE_TEMPERATURE_HEADER(INTAKE_TEMPERATURE_LABEL, "Charge Air Temperature")
+        INTAKE_TEMPERATURE_HEADER(INTAKE_TEMPERATURE_LABEL, "Charge Air Temperature"),
+        STFT_BANK1_HEADER(STFT_BANK1_LABEL, "Short Term Fuel Trim Bank 1"),
+        STFT_BANK2_HEADER(STFT_BANK2_LABEL, "Short Term Fuel Trim Bank 2")
     }
 }

@@ -30,6 +30,10 @@ object FuelTrimAnalyzer {
     /** Default std-dev threshold (%) — bins with higher variance are rejected. */
     private const val STD_DEV_THRESHOLD_PCT = 5.0
 
+    /** Maximum RPM rate of change (RPM/sample) to consider a sample steady-state.
+     *  At typical 10 Hz logging, 50 RPM/sample ≈ 500 RPM/s. */
+    private const val MAX_RPM_RATE = 50.0
+
     // Default RPM bins — coarse grid covering typical MED17 operating range
     val DEFAULT_RPM_BINS = doubleArrayOf(
         750.0, 1000.0, 1500.0, 2000.0, 2500.0, 3000.0,
@@ -104,8 +108,15 @@ object FuelTrimAnalyzer {
         // Accumulate combined trim per bin
         val trimSums = Array(rpmBins.size) { DoubleArray(loadBins.size) }
         val trimCounts = Array(rpmBins.size) { IntArray(loadBins.size) }
+        var transientFiltered = 0
 
         for (i in 0 until sampleCount) {
+            // Transient filter: skip samples during rapid RPM change
+            // (wall-film wetting and overrun fuel-cut corrupt trim readings)
+            if (i > 0 && abs(rpm[i] - rpm[i - 1]) > MAX_RPM_RATE) {
+                transientFiltered++
+                continue
+            }
             val rpmWeights = interpolatedBinWeights(rpm[i], rpmBins)
             val loadWeights = interpolatedBinWeights(load[i], loadBins)
 
@@ -121,6 +132,10 @@ object FuelTrimAnalyzer {
                     trimCounts[rpmIdx][loadIdx]++
                 }
             }
+        }
+
+        if (transientFiltered > 0) {
+            warnings.add(0, "Transient filter: excluded $transientFiltered samples (dRPM > ${MAX_RPM_RATE.toInt()} RPM/sample)")
         }
 
         // Compute averages and generate corrections
@@ -223,12 +238,15 @@ object FuelTrimAnalyzer {
         val sumSq = Array(rpmBins.size) { DoubleArray(loadBins.size) }
         val counts = Array(rpmBins.size) { IntArray(loadBins.size) }
         var filtered = 0
+        var transientFiltered = 0
 
         for (i in 0 until sampleCount) {
             // Closed-loop filter: B_lr must be 1.0 (active)
             if (bLr != null && bLr[i] != 1.0) { filtered++; continue }
             // Lambda request filter: must be near stoichiometric
             if (lamsbgW != null && abs(lamsbgW[i] - 1.0) >= 0.05) { filtered++; continue }
+            // Transient filter: skip samples during rapid RPM change
+            if (i > 0 && abs(rpm[i] - rpm[i - 1]) > MAX_RPM_RATE) { transientFiltered++; continue }
 
             val rpmWeights = interpolatedBinWeights(rpm[i], rpmBins)
             val loadWeights = interpolatedBinWeights(load[i], loadBins)
@@ -309,10 +327,15 @@ object FuelTrimAnalyzer {
             }
         }
 
+        if (transientFiltered > 0) warnings.add("Transient filter: excluded $transientFiltered samples (dRPM > ${MAX_RPM_RATE.toInt()} RPM/sample)")
+
+        // ── Bank imbalance detection ────────────────────────────────────
+        detectBankImbalance(logData, sampleCount, rpm, bLr, lamsbgW, warnings)
+
         // Summary warning at position 0
         warnings.add(0,
-            "Processed %,d samples (%,d filtered: closed-loop only) | %d bins with data, %d rejected"
-                .format(sampleCount, filtered, binsWithData, binsRejected)
+            "Processed %,d samples (%,d filtered: closed-loop/lambda, %,d transient) | %d bins with data, %d rejected"
+                .format(sampleCount, filtered, transientFiltered, binsWithData, binsRejected)
         )
 
         return FuelTrimDiagnosticResult(
@@ -354,6 +377,65 @@ object FuelTrimAnalyzer {
     fun isRkwTable(tableDescription: String): Boolean {
         return tableDescription.contains("RelMCor", ignoreCase = true) ||
                 tableDescription.contains("rk_w", ignoreCase = true)
+    }
+
+    // ── bank imbalance detection ───────────────────────────────────
+
+    /** Threshold (%) for bank-to-bank trim imbalance warning. */
+    private const val BANK_IMBALANCE_THRESHOLD_PCT = 2.0
+
+    /**
+     * Detect per-bank fuel trim imbalance.
+     *
+     * If the log contains bank-specific STFT channels (fr_w_b1 / fr_w_b2),
+     * computes the average trim for each bank and warns if the difference
+     * exceeds [BANK_IMBALANCE_THRESHOLD_PCT]. A consistent imbalance
+     * indicates injector aging or flow drift on one bank.
+     */
+    private fun detectBankImbalance(
+        logData: Map<Med17LogFileContract.Header, List<Double>>,
+        sampleCount: Int,
+        rpm: List<Double>,
+        bLr: List<Double>?,
+        lamsbgW: List<Double>?,
+        warnings: MutableList<String>
+    ) {
+        val b1 = logData[H.STFT_BANK1_HEADER]?.takeIf { it.isNotEmpty() } ?: return
+        val b2 = logData[H.STFT_BANK2_HEADER]?.takeIf { it.isNotEmpty() } ?: return
+
+        val n = minOf(sampleCount, b1.size, b2.size)
+        var sum1 = 0.0
+        var sum2 = 0.0
+        var count = 0
+
+        for (i in 0 until n) {
+            if (bLr != null && i < bLr.size && bLr[i] != 1.0) continue
+            if (lamsbgW != null && i < lamsbgW.size && abs(lamsbgW[i] - 1.0) >= 0.05) continue
+            if (i > 0 && abs(rpm[i] - rpm[i - 1]) > MAX_RPM_RATE) continue
+
+            sum1 += (b1[i] - 1.0) * 100.0
+            sum2 += (b2[i] - 1.0) * 100.0
+            count++
+        }
+
+        if (count >= MIN_SAMPLES) {
+            val avg1 = sum1 / count
+            val avg2 = sum2 / count
+            val imbalance = abs(avg1 - avg2)
+
+            if (imbalance > BANK_IMBALANCE_THRESHOLD_PCT) {
+                val richer = if (avg1 > avg2) "Bank 1" else "Bank 2"
+                warnings.add(
+                    "⚠ Bank imbalance detected: Bank 1 avg %+.1f%%, Bank 2 avg %+.1f%% (Δ%.1f%%) — %s is richer, possible injector aging"
+                        .format(avg1, avg2, imbalance, richer)
+                )
+            } else {
+                warnings.add(
+                    "Bank trims balanced: Bank 1 avg %+.1f%%, Bank 2 avg %+.1f%% (Δ%.1f%%, threshold ±%.0f%%)"
+                        .format(avg1, avg2, imbalance, BANK_IMBALANCE_THRESHOLD_PCT)
+                )
+            }
+        }
     }
 
     // ── helpers ──────────────────────────────────────────────────────

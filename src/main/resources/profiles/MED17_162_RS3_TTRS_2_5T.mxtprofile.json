@@ -165,7 +165,9 @@
         "FUEL_PRESSURE_DIRECT_HEADER": "pfuel_hde_w",
         "FUEL_PRESSURE_PORT_HEADER": "pfuel_pfi_w",
         "PORT_FUEL_SHARE_HEADER": "tqfuel_pfi_w",
-        "INTAKE_TEMPERATURE_HEADER": "tans"
+        "INTAKE_TEMPERATURE_HEADER": "tans",
+        "STFT_BANK1_HEADER": "fr_w_b1",
+        "STFT_BANK2_HEADER": "fr_w_b2"
     },
     "multiMapDefinitions": {
         "KFZW_SWITCH": [

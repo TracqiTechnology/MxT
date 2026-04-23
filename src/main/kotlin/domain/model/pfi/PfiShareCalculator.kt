@@ -4,6 +4,7 @@ import data.contract.Med17LogFileContract
 import data.contract.Med17LogFileContract.Header
 import kotlin.math.abs
 import kotlin.math.min
+import kotlin.math.sqrt
 
 /**
  * Status of an injector at a given operating point.
@@ -282,6 +283,11 @@ object PfiShareCalculator {
      * @param portKrkte      KRKTE for port injectors (ms/%)
      * @param directKrkte    KRKTE for GDI injectors (ms/%)
      * @param diMaxOnTimeMs  Max DI on-time before HPFP limit (default 6.0 ms)
+     * @param portFuelPressureBar  PFI fuel rail pressure in bar gauge (default 4.0 for 2.5T)
+     * @param boostPressureBar     Boost pressure in bar gauge (default 0.0 = atmospheric).
+     *                             When > 0, PFI flow is corrected for reduced ΔP:
+     *                             `correction = √((P_fuel - P_boost) / P_fuel)`.
+     *                             Per MED17 FR (FRLFSDP): injector flow ∝ √ΔP.
      * @return ordered list of [RpmSweepRow], one per RPM step
      */
     fun calculateRpmSweep(
@@ -292,11 +298,23 @@ object PfiShareCalculator {
         pfiShareCurve: PfiShareResult,
         portKrkte: Double,
         directKrkte: Double,
-        diMaxOnTimeMs: Double = 6.0
+        diMaxOnTimeMs: Double = 6.0,
+        portFuelPressureBar: Double = 4.0,
+        boostPressureBar: Double = 0.0
     ): List<RpmSweepRow> {
         require(rpmStep > 0) { "rpmStep must be positive" }
         require(portKrkte > 0) { "portKrkte must be positive" }
         require(directKrkte > 0) { "directKrkte must be positive" }
+
+        // FRLFSDP correction: PFI flow ∝ √(ΔP_actual / ΔP_reference)
+        // ΔP_reference = portFuelPressureBar (at atmospheric, boost = 0)
+        // ΔP_actual = portFuelPressureBar - boostPressureBar
+        val pfiPressureCorrection = if (portFuelPressureBar > 0.0 && boostPressureBar > 0.0) {
+            val deltaP = (portFuelPressureBar - boostPressureBar).coerceAtLeast(0.1)
+            sqrt(deltaP / portFuelPressureBar)
+        } else {
+            1.0
+        }
 
         val rows = mutableListOf<RpmSweepRow>()
         var rpm = rpmStart
@@ -306,7 +324,8 @@ object PfiShareCalculator {
             ).coerceIn(0.0, 100.0)
             val pfiShare = pfiPercent / 100.0
 
-            val portOnTime = loadPercent * pfiShare * portKrkte
+            // PFI on-time increases when ΔP drops (less flow per ms → need more ms)
+            val portOnTime = loadPercent * pfiShare * portKrkte / pfiPressureCorrection
             val directOnTime = loadPercent * (1.0 - pfiShare) * directKrkte
             val totalFuel = portOnTime + directOnTime
 
@@ -350,6 +369,9 @@ object PfiShareCalculator {
      * @param portKrkte        KRKTE for port injectors (ms/%)
      * @param directKrkte      KRKTE for GDI injectors (ms/%)
      * @param diMaxOnTimeMs    HPFP hard limit for DI on-time (default 6.0 ms)
+     * @param portFuelPressureBar  PFI fuel rail pressure in bar gauge (default 4.0)
+     * @param boostPressureBar     Boost pressure in bar gauge (default 0.0).
+     *                             Applied via FRLFSDP correction to PFI flow.
      * @return [ReversePfiResult] with suggested PFI shares and constraint flags
      */
     fun reverseCalculate(
@@ -358,11 +380,20 @@ object PfiShareCalculator {
         loadBins: DoubleArray,
         portKrkte: Double,
         directKrkte: Double,
-        diMaxOnTimeMs: Double = 6.0
+        diMaxOnTimeMs: Double = 6.0,
+        portFuelPressureBar: Double = 4.0,
+        boostPressureBar: Double = 0.0
     ): ReversePfiResult {
         require(portKrkte > 0) { "portKrkte must be positive" }
         require(directKrkte > 0) { "directKrkte must be positive" }
         require(targetDiOnTimeMs > 0) { "targetDiOnTimeMs must be positive" }
+
+        val pfiPressureCorrection = if (portFuelPressureBar > 0.0 && boostPressureBar > 0.0) {
+            val deltaP = (portFuelPressureBar - boostPressureBar).coerceAtLeast(0.1)
+            sqrt(deltaP / portFuelPressureBar)
+        } else {
+            1.0
+        }
 
         val shares = Array(rpmBins.size) { DoubleArray(loadBins.size) }
         val flags = Array(rpmBins.size) { Array(loadBins.size) { InjectorStatus.OK } }
@@ -383,7 +414,7 @@ object PfiShareCalculator {
                 shares[r][l] = (pfiShareFraction * 100.0)
 
                 val actualDiOnTime = load * (1.0 - pfiShareFraction) * directKrkte
-                val pfiOnTime = load * pfiShareFraction * portKrkte
+                val pfiOnTime = load * pfiShareFraction * portKrkte / pfiPressureCorrection
                 val availableWindow = if (rpmBins[r] > 0) 120_000.0 / rpmBins[r] else Double.MAX_VALUE
 
                 flags[r][l] = when {
