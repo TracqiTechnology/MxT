@@ -16,6 +16,9 @@ class NavigationState {
     var calibrationTab by mutableStateOf(CalibrationTab.FUELING)
         private set
 
+    var toolsTab by mutableStateOf(ToolsTab.LOGGER)
+        private set
+
     // Sub-tab state (used by screenshot harness; screens read for initial values)
     var closedLoopTab by mutableStateOf(0)
     var closedLoopCorrectionSubTab by mutableStateOf(0)
@@ -24,6 +27,15 @@ class NavigationState {
     var openLoopLogSubTab by mutableStateOf(0)
     var openLoopCorrectionSubTab by mutableStateOf(0)
     var plsolTab by mutableStateOf(0)
+    var dualInjectionTab by mutableStateOf(0)
+    var dualInjectionKrktePfi: String? = null
+    var dualInjectionKrkteGdi: String? = null
+
+    // Pre-loaded log data for screenshot harness (screens auto-load when non-null)
+    var ldrpidLogDir: java.io.File? = null
+    var fuelTrimLogFiles: List<java.io.File>? = null
+    var optimizerLogDir: java.io.File? = null
+    var axisRescalerPreloadMap: domain.math.map.Map3d? = null
 
     fun navigateTo(destination: RailDestination) {
         railDestination = destination
@@ -40,6 +52,15 @@ class NavigationState {
 
     fun selectCalibrationTab(tab: CalibrationTab) {
         calibrationTab = tab
+    }
+
+    fun navigateToTools(tab: ToolsTab = toolsTab) {
+        toolsTab = tab
+        railDestination = RailDestination.TOOLS
+    }
+
+    fun selectToolsTab(tab: ToolsTab) {
+        toolsTab = tab
     }
 
     fun selectPlatform(platform: EcuPlatform) {

@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.dp
 import data.contract.Me7LogFileContract
 import data.model.EcuPlatform
 import data.parser.bin.BinParser
+import data.parser.xdf.TableDefinition
 import data.parser.xdf.XdfParser
 import data.preferences.MapPreference
 import data.preferences.MapPreferenceManager
@@ -47,13 +48,14 @@ import data.preferences.krkte.KrktePfiPreferences
 import data.preferences.krkte.KrkteGdiPreferences
 import data.preferences.logheaderdefinition.LogHeaderPreference
 import data.preferences.mlhfm.MlhfmPreferences
-import data.preferences.platform.EcuPlatformPreference
 import data.preferences.rkw.RkwPreferences
 import data.preferences.tvub.TvubPfiPreferences
 import data.preferences.wdkugdn.WdkugdnPreferences
 import data.profile.ProfileManager
+import domain.model.fueltrim.FuelTrimAnalyzer
 import ui.components.MapPickerDialog
 import ui.components.InfoTooltip
+import ui.navigation.NavigationState
 import java.awt.FileDialog
 import java.awt.Frame
 import java.io.File
@@ -63,12 +65,13 @@ import javax.swing.SwingUtilities
 private data class MapDefinitionEntry(
     val title: String,
     val preference: MapPreference,
-    val platforms: Set<EcuPlatform> = setOf(EcuPlatform.ME7, EcuPlatform.MED17)
+    val platforms: Set<EcuPlatform> = EcuPlatform.entries.toSet(),
+    val recommendedPredicate: ((TableDefinition) -> Boolean)? = null
 )
 
 private val allMapDefinitions = listOf(
-    // ME7-only
-    MapDefinitionEntry("KRKTE", KrktePreferences, platforms = setOf(EcuPlatform.ME7)),
+    // ME7 + MED9 — single injector constant (MED9 uses KRKATE, resolved via profile)
+    MapDefinitionEntry("KRKTE", KrktePreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
     MapDefinitionEntry("MLHFM", MlhfmPreferences, platforms = setOf(EcuPlatform.ME7)),
     // MED17-only (dual injection)
     MapDefinitionEntry("KRKTE (Port)", KrktePfiPreferences, platforms = setOf(EcuPlatform.MED17)),
@@ -79,26 +82,34 @@ private val allMapDefinitions = listOf(
     MapDefinitionEntry("KFMIRL", KfmirlPreferences),
     MapDefinitionEntry("KFZWOP", KfzwopPreferences),
     MapDefinitionEntry("KFZW", KfzwPreferences),
-    // ME7-only — boost transition & throttle body (not in MED17 Funktionsrahmen)
-    MapDefinitionEntry("KFVPDKSD", KfvpdksdPreferences, platforms = setOf(EcuPlatform.ME7)),
-    MapDefinitionEntry("WDKUGDN", WdkugdnPreferences, platforms = setOf(EcuPlatform.ME7)),
-    MapDefinitionEntry("KFWDKMSN", KfwdkmsnPreferences, platforms = setOf(EcuPlatform.ME7)),
+    // ME7 + MED9 — boost transition & throttle body (not in MED17 Funktionsrahmen)
+    MapDefinitionEntry("KFVPDKSD", KfvpdksdPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
+    MapDefinitionEntry("WDKUGDN", WdkugdnPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
+    MapDefinitionEntry("KFWDKMSN", KfwdkmsnPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
     // Shared — boost PID linearization
     MapDefinitionEntry("KFLDRL", KfldrlPreferences),
     MapDefinitionEntry("KFLDIMX", KfldimxPreferences),
-    // ME7-only — VE model maps (MED17 uses adaptive fupsrl_w / pbrint_w)
-    MapDefinitionEntry("KFPBRK", KfpbrkPreferences, platforms = setOf(EcuPlatform.ME7)),
-    MapDefinitionEntry("KFPBRKNW", KfpbrknwPreferences, platforms = setOf(EcuPlatform.ME7)),
-    MapDefinitionEntry("KFPRG", KfprgPreferences, platforms = setOf(EcuPlatform.ME7)),
+    // ME7 + MED9 — VE model maps (MED17 uses adaptive fupsrl_w / pbrint_w)
+    MapDefinitionEntry("KFPBRK", KfpbrkPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
+    MapDefinitionEntry("KFPBRKNW", KfpbrknwPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
+    MapDefinitionEntry("KFPRG", KfprgPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
     // v4: Environmental correction maps
     MapDefinitionEntry("KFLDIOPU", KfldioPuPreferences),
-    MapDefinitionEntry("KFFWTBR", KffwtbrPreferences, platforms = setOf(EcuPlatform.ME7)),
+    MapDefinitionEntry("KFFWTBR", KffwtbrPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
     // v4: PID gain maps
     MapDefinitionEntry("KFLDRQ0", Kfldrq0Preferences),
     MapDefinitionEntry("KFLDRQ1", Kfldrq1Preferences),
     MapDefinitionEntry("KFLDRQ2", Kfldrq2Preferences),
-    // MED17-only — fuel trim correction map
-    MapDefinitionEntry("rk_w (Fuel Trim)", RkwPreferences, platforms = setOf(EcuPlatform.MED17)),
+    // MED17-only — fuel trim correction map (prefer map-switch variants on DS1 tunes)
+    MapDefinitionEntry(
+        title = "rk_w (Fuel Trim)",
+        preference = RkwPreferences,
+        platforms = setOf(EcuPlatform.MED17),
+        recommendedPredicate = { def ->
+            FuelTrimAnalyzer.isRkwTable(def.tableDescription) &&
+                FuelTrimAnalyzer.isMapSwitchTable(def.tableDescription)
+        }
+    ),
 )
 
 /** Returns map definitions filtered for the active platform. */
@@ -130,6 +141,7 @@ private val defaultHeaderValues = mapOf(
 
 @Composable
 fun ConfigurationScreen(
+    navState: NavigationState,
     trailingContent: (@Composable ColumnScope.() -> Unit)? = null
 ) {
     val scrollState = rememberScrollState()
@@ -174,9 +186,9 @@ fun ConfigurationScreen(
         } else {
             // Auto-apply the matching default profile when both files are loaded
             // and no map definitions have been configured yet.
-            AutoApplyProfile()
+            AutoApplyProfile(navState = navState)
 
-            QuickSetupSection()
+            QuickSetupSection(navState = navState)
 
             Spacer(modifier = Modifier.height(16.dp))
 
@@ -187,8 +199,8 @@ fun ConfigurationScreen(
             Row(
                 horizontalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                MapDefinitionsSection(modifier = Modifier.weight(1f))
-                LogHeadersSection(modifier = Modifier.weight(1f))
+                MapDefinitionsSection(navState = navState, modifier = Modifier.weight(1f))
+                LogHeadersSection(navState = navState, modifier = Modifier.weight(1f))
             }
 
             if (trailingContent != null) {
@@ -331,10 +343,10 @@ private fun FilesNotLoadedPlaceholder() {
  * resets the guard via the key parameters.
  */
 @Composable
-private fun AutoApplyProfile() {
+private fun AutoApplyProfile(navState: NavigationState) {
     val mapList by BinParser.mapList.collectAsState()
     val allDefaultProfiles by ProfileManager.defaultProfiles.collectAsState()
-    val platform = EcuPlatformPreference.platform
+    val platform = navState.ecuPlatform
 
     val matchingProfiles = remember(allDefaultProfiles, platform) {
         allDefaultProfiles.filter { it.ecuPlatform == platform.name }
@@ -354,18 +366,27 @@ private fun AutoApplyProfile() {
 }
 
 @Composable
-private fun QuickSetupSection() {
+private fun QuickSetupSection(navState: NavigationState) {
     val allDefaultProfiles by ProfileManager.defaultProfiles.collectAsState()
     val allUserProfiles by ProfileManager.userProfiles.collectAsState()
     var statusMessage by remember { mutableStateOf<String?>(null) }
 
-    val platform = EcuPlatformPreference.platform
-    val platformName = platform.name // "ME7" or "MED17"
-    val defaultProfiles = remember(allDefaultProfiles, platform) {
-        allDefaultProfiles.filter { it.ecuPlatform == platformName }
+    // Filter profiles to current platform only
+    val currentPlatform = navState.ecuPlatform.name
+    val defaultsForPlatform = remember(allDefaultProfiles, currentPlatform) {
+        allDefaultProfiles.filter { it.ecuPlatform == currentPlatform }
     }
-    val userProfiles = remember(allUserProfiles, platform) {
-        allUserProfiles.filter { it.ecuPlatform == platformName }
+    val usersForPlatform = remember(allUserProfiles, currentPlatform) {
+        allUserProfiles.filter { it.ecuPlatform == currentPlatform }
+    }
+
+    /** Switch platform to match the profile (if needed) then apply. */
+    fun applyWithPlatformSwitch(profile: data.profile.ConfigurationProfile) {
+        val profilePlatform = runCatching { EcuPlatform.valueOf(profile.ecuPlatform) }.getOrNull()
+        if (profilePlatform != null && profilePlatform != navState.ecuPlatform) {
+            navState.selectPlatform(profilePlatform)
+        }
+        ProfileManager.applyProfile(profile)
     }
 
     Column {
@@ -386,25 +407,27 @@ private fun QuickSetupSection() {
             modifier = Modifier.fillMaxWidth()
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                if (defaultProfiles.isNotEmpty()) {
-                    for (profile in defaultProfiles) {
-                        ProfileRow(profile = profile, onApply = {
-                            ProfileManager.applyProfile(profile)
-                            statusMessage = "Applied profile: ${profile.name}"
-                        })
-                    }
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                for (profile in defaultsForPlatform) {
+                    ProfileRow(profile = profile, onApply = {
+                        ProfileManager.applyProfile(profile)
+                        statusMessage = "Applied profile: ${profile.name}"
+                    })
+                }
+                for (profile in usersForPlatform) {
+                    ProfileRow(profile = profile, onApply = {
+                        ProfileManager.applyProfile(profile)
+                        statusMessage = "Applied profile: ${profile.name}"
+                    })
                 }
 
-                if (userProfiles.isNotEmpty()) {
-                    for (profile in userProfiles) {
-                        ProfileRow(profile = profile, onApply = {
-                            ProfileManager.applyProfile(profile)
-                            statusMessage = "Applied profile: ${profile.name}"
-                        })
-                    }
-
+                if (defaultsForPlatform.isEmpty() && usersForPlatform.isEmpty()) {
+                    Text(
+                        text = "No bundled profiles for ${currentPlatform}. Load a custom profile below.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(vertical = 8.dp)
+                    )
+                } else {
                     HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
                 }
 
@@ -413,14 +436,14 @@ private fun QuickSetupSection() {
                 ) {
                     OutlinedButton(onClick = {
                         val dialog = FileDialog(null as Frame?, "Load Profile", FileDialog.LOAD)
-                        dialog.setFilenameFilter { _, name -> name.endsWith(".me7profile.json", ignoreCase = true) }
+                        dialog.setFilenameFilter { _, name -> name.endsWith(".mxtprofile.json", ignoreCase = true) }
                         dialog.isVisible = true
                         val dir = dialog.directory
                         val file = dialog.file
                         if (dir != null && file != null) {
                             runCatching {
                                 val profile = ProfileManager.loadFromFile(File(dir, file))
-                                ProfileManager.applyProfile(profile)
+                                applyWithPlatformSwitch(profile)
                                 ProfileManager.addUserProfile(profile)
                                 statusMessage = "Loaded and applied profile: ${profile.name}"
                             }.onFailure {
@@ -441,7 +464,7 @@ private fun QuickSetupSection() {
                             )
                             if (name != null && name.isNotBlank()) {
                                 val dialog = FileDialog(null as Frame?, "Save Profile", FileDialog.SAVE)
-                                dialog.file = "${name.replace(Regex("[^a-zA-Z0-9_ -]"), "")}.me7profile.json"
+                                dialog.file = "${name.replace(Regex("[^a-zA-Z0-9_ -]"), "")}.mxtprofile.json"
                                 dialog.isVisible = true
                                 val dir = dialog.directory
                                 val fileName = dialog.file
@@ -530,10 +553,10 @@ private fun ProfileRow(profile: data.profile.ConfigurationProfile, onApply: () -
 }
 
 @Composable
-private fun MapDefinitionsSection(modifier: Modifier = Modifier) {
+private fun MapDefinitionsSection(navState: NavigationState, modifier: Modifier = Modifier) {
     val tableDefinitions by XdfParser.tableDefinitions.collectAsState()
     val mapList by BinParser.mapList.collectAsState()
-    val platform = EcuPlatformPreference.platform
+    val platform = navState.ecuPlatform
     val mapDefinitions = remember(platform) { mapDefinitionsForPlatform(platform) }
 
     var pickerDialogEntry by remember { mutableStateOf<MapDefinitionEntry?>(null) }
@@ -601,7 +624,8 @@ private fun MapDefinitionsSection(modifier: Modifier = Modifier) {
             onSelected = { tableDefinition ->
                 entry.preference.setSelectedMap(tableDefinition)
             },
-            onDismiss = { pickerDialogEntry = null }
+            onDismiss = { pickerDialogEntry = null },
+            recommendedPredicate = entry.recommendedPredicate
         )
     }
 }
@@ -656,8 +680,8 @@ private fun MapDefinitionRow(
 }
 
 @Composable
-private fun LogHeadersSection(modifier: Modifier = Modifier) {
-    val isMed17 = EcuPlatformPreference.platform == EcuPlatform.MED17
+private fun LogHeadersSection(navState: NavigationState, modifier: Modifier = Modifier) {
+    val isMed17 = navState.ecuPlatform == EcuPlatform.MED17
     var expanded by remember { mutableStateOf(false) }
     var headerVersion by remember { mutableStateOf(0) }
 
@@ -684,7 +708,7 @@ private fun LogHeadersSection(modifier: Modifier = Modifier) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    "ScorpionEFI / DS1 logs are auto-detected — signal names are matched " +
+                    "Dyno Spectrum (DS1) logs are auto-detected — signal names are matched " +
                         "automatically from CSV headers. No manual log header configuration is needed.",
                     modifier = Modifier.padding(16.dp),
                     style = MaterialTheme.typography.bodySmall,
@@ -762,6 +786,8 @@ private fun LogHeaderRow(header: Me7LogFileContract.Header, onChanged: () -> Uni
         Me7LogFileContract.Header.REQUESTED_LOAD_HEADER -> "Requested engine load column header (ldrxn_w). The ECU's load target — the primary setpoint for the Optimizer calibration loop."
         Me7LogFileContract.Header.ACTUAL_LOAD_HEADER -> "Actual measured engine load column header (rl_w). Compared against LDRXN target to assess calibration accuracy."
         Me7LogFileContract.Header.THROTTLE_MODEL_AIRFLOW_HEADER -> "Throttle model (alpha-n / speed-density) estimated airflow column header (msdk_w). Compared against mshfm_w to assess alpha-n calibration accuracy."
+        Me7LogFileContract.Header.INTAKE_TEMPERATURE_HEADER -> "Intake air temperature column header (tans). Used for IAT-aware boost simulation and KFTARX limit detection."
+        Me7LogFileContract.Header.REQUESTED_PRESSURE_MAX_HEADER -> "Max allowed boost pressure column header (pvdxs_w). Represents the KFLDHBN/BGRLMXS ceiling. Used to differentiate torque vs pressure limiting."
     }
 
     Row(

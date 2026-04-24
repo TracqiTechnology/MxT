@@ -1,6 +1,6 @@
 {
     "name": "Audi RS3 / TTRS 2.5T \u2014 MED17.1.62 (DS1)",
-    "description": "EA855 EVO 2.5 TFSI, 5-cylinder, MED17.1.62 ECU. Dual fuel: port + direct injection. Stock K16 turbo. DS1 flash via ScorpionEFI/DynoScorpion.",
+    "description": "EA855 EVO 2.5 TFSI, 5-cylinder, MED17.1.62 ECU. Dual fuel: port + direct injection. Stock K16 turbo. DS1 flash via Dyno Spectrum.",
     "ecuPlatform": "MED17",
     "ecuPartNumbers": [],
     "mapDefinitions": {
@@ -70,8 +70,8 @@
             "unit": "-"
         },
         "RKW": {
-            "tableName": "Rel fuel mass fac inj type corr HO1",
-            "tableDescription": "InjSys_RelMCorHom1_MAP rl_w(%) vs nmot_w(1/min) = --",
+            "tableName": "Rel fuel mass fac inj type corr HO1 Gasoline 0",
+            "tableDescription": "InjSys_RelMCorHom1_MAP Gasoline 0 rl_w(%) vs nmot_w(1/min) = --",
             "unit": "--"
         }
     },
@@ -80,7 +80,7 @@
         "displacement": 0.496,
         "numCylinders": 5,
         "stoichiometricAfr": 14.7,
-        "gasolineGramsPerCcm": 0.7,
+        "gasolineGramsPerCcm": 0.755,
         "fuelInjectorSize": 220.0
     },
     "plsol": {
@@ -112,14 +112,14 @@
         "minAfrPoints": 150,
         "maxAfr": 16.0,
         "fuelInjectorSize": 220.0,
-        "gasolineGramsPerCcm": 0.7,
+        "gasolineGramsPerCcm": 0.755,
         "numFuelInjectors": 5.0
     },
     "dualInjection": {
         "portInjectorFlowRateCcMin": 220.0,
         "portInjectorFuelPressureBar": 4.0,
-        "directInjectorFlowRateCcMin": 160.0,
-        "directInjectorFuelPressureBar": 200.0,
+        "directInjectorFlowRateCcMin": 380.0,
+        "directInjectorFuelPressureBar": 240.0,
         "portSharePercentDefault": 30.0,
         "numPortInjectors": 5,
         "numDirectInjectors": 5
@@ -131,6 +131,7 @@
         "RPM_COLUMN_HEADER": "nmot_w",
         "ENGINE_LOAD_HEADER": "rl_w",
         "REQUESTED_LOAD_HEADER": "rlsol_w",
+        "REQUESTED_LOAD_ALT_HEADER": "rlmds_w",
         "THROTTLE_PLATE_ANGLE_HEADER": "wdkba",
         "WASTEGATE_DUTY_CYCLE_HEADER": "tvldste_w",
         "LDR_DUTY_CYCLE_HEADER": "ldtvm_w",
@@ -163,7 +164,10 @@
         "FUEL_INJECTOR_ON_TIME_PORT_HEADER": "ti_b1_pfi",
         "FUEL_PRESSURE_DIRECT_HEADER": "pfuel_hde_w",
         "FUEL_PRESSURE_PORT_HEADER": "pfuel_pfi_w",
-        "PORT_FUEL_SHARE_HEADER": "tqfuel_pfi_w"
+        "PORT_FUEL_SHARE_HEADER": "tqfuel_pfi_w",
+        "INTAKE_TEMPERATURE_HEADER": "tans",
+        "STFT_BANK1_HEADER": "fr_w_b1",
+        "STFT_BANK2_HEADER": "fr_w_b2"
     },
     "multiMapDefinitions": {
         "KFZW_SWITCH": [
@@ -196,6 +200,38 @@
                 "tableName": "Ignition GDI ex cam control/std valve lift (MAIN) Ethanol 2",
                 "tableDescription": "IgCtl_agGDIout_GM_0_ Ethanol 2 rlzwgru_w(%) vs nmot_w(1/min) = Grad KW",
                 "unit": "Grad KW"
+            }
+        ],
+        "RKW_SWITCH": [
+            {
+                "tableName": "Rel fuel mass fac inj type corr HO1 Gasoline 0",
+                "tableDescription": "InjSys_RelMCorHom1_MAP Gasoline 0 rl_w(%) vs nmot_w(1/min) = --",
+                "unit": "--"
+            },
+            {
+                "tableName": "Rel fuel mass fac inj type corr HO1 Ethanol 0",
+                "tableDescription": "InjSys_RelMCorHom1_MAP Ethanol 0 rl_w(%) vs nmot_w(1/min) = --",
+                "unit": "--"
+            },
+            {
+                "tableName": "Rel fuel mass fac inj type corr HO1 Gasoline 1",
+                "tableDescription": "InjSys_RelMCorHom1_MAP Gasoline 1 rl_w(%) vs nmot_w(1/min) = --",
+                "unit": "--"
+            },
+            {
+                "tableName": "Rel fuel mass fac inj type corr HO1 Ethanol 1",
+                "tableDescription": "InjSys_RelMCorHom1_MAP Ethanol 1 rl_w(%) vs nmot_w(1/min) = --",
+                "unit": "--"
+            },
+            {
+                "tableName": "Rel fuel mass fac inj type corr HO1 Gasoline 2",
+                "tableDescription": "InjSys_RelMCorHom1_MAP Gasoline 2 rl_w(%) vs nmot_w(1/min) = --",
+                "unit": "--"
+            },
+            {
+                "tableName": "Rel fuel mass fac inj type corr HO1 Ethanol 2",
+                "tableDescription": "InjSys_RelMCorHom1_MAP Ethanol 2 rl_w(%) vs nmot_w(1/min) = --",
+                "unit": "--"
             }
         ]
     }

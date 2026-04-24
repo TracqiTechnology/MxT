@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import data.parser.csv.WinOlsCsvParser
 import data.parser.kp.KpHintParser
 import data.parser.xdf.TableDefinition
+import domain.model.fueltrim.RkwTableMetadata
 
 @Composable
 fun MapPickerDialog(
@@ -30,10 +31,15 @@ fun MapPickerDialog(
     initialFilter: String = title
         .removePrefix("Select ")
         .removeSuffix(" Map")
-        .trim()
+        .trim(),
+    // Optional: returns true for tables that should be sorted to the top and badged as recommended
+    recommendedPredicate: ((TableDefinition) -> Boolean)? = null,
+    // Optional: provides a subtitle string for a table (e.g. rk_w metadata display label)
+    subtitleProvider: ((TableDefinition) -> String?)? = null
 ) {
-    // Observe KP hints and CSV definitions.
+    // Observe KP hints, KP definitions, and CSV definitions.
     val kpHints by KpHintParser.hints.collectAsState()
+    val kpDefinitions by KpHintParser.definitions.collectAsState()
     val csvDefinitions by WinOlsCsvParser.definitions.collectAsState()
 
     // Find the KP hint (if any) that matches the map we're looking for.
@@ -44,6 +50,11 @@ fun MapPickerDialog(
     // Find a matching WinOLS CSV definition for richer hint metadata.
     val csvHint = remember(initialFilter, csvDefinitions) {
         csvDefinitions.firstOrNull { it.id.equals(initialFilter, ignoreCase = true) }
+    }
+
+    // Find a matching KP full definition (richer than hint — has dimensions/units/scaling).
+    val kpDef = remember(initialFilter, kpDefinitions) {
+        kpDefinitions.firstOrNull { it.name.equals(initialFilter, ignoreCase = true) }
     }
 
     // Use TextFieldValue so we can place the cursor at the end of the pre-populated text,
@@ -58,8 +69,8 @@ fun MapPickerDialog(
     }
     val filterText = filterField.text
 
-    val filteredDefinitions = remember(filterText, tableDefinitions) {
-        if (filterText.isBlank()) tableDefinitions
+    val filteredDefinitions = remember(filterText, tableDefinitions, recommendedPredicate) {
+        val base = if (filterText.isBlank()) tableDefinitions
         else {
             val filter = filterText.lowercase()
             tableDefinitions.filter {
@@ -67,27 +78,37 @@ fun MapPickerDialog(
                     it.tableDescription.lowercase().contains(filter)
             }
         }
+        if (recommendedPredicate != null) {
+            base.sortedByDescending { recommendedPredicate(it) }
+        } else base
     }
 
-    // When a KP hint with an address is available, prefer the XDF definition whose
-    // z-axis address matches the KP AR address.
-    val kpPreferredDefinition = remember(kpHint, csvHint, tableDefinitions) {
-        // Prefer CSV address (more reliable, explicit column) over KP parsed address
+    // When a KP hint/definition or CSV hint with an address is available,
+    // prefer the table definition whose z-axis address matches.
+    val kpPreferredDefinition = remember(kpHint, kpDef, csvHint, tableDefinitions) {
+        // Prefer CSV address (most reliable), then KP definition z-address, then KP hint AR address
         val preferredAddress = when {
-            csvHint != null && csvHint.hasAddress -> csvHint.address
-            kpHint != null && kpHint.hasAddress   -> kpHint.arAddress
-            else                                  -> -1
+            csvHint != null && csvHint.hasAddress   -> csvHint.address
+            kpDef != null && kpDef.hasAddress        -> kpDef.effectiveAddress
+            kpHint != null && kpHint.hasAddress      -> kpHint.arAddress
+            else                                     -> -1
         }
         if (preferredAddress > 0) {
             tableDefinitions.firstOrNull { def -> def.zAxis.address == preferredAddress }
         } else null
     }
 
-    // Start with: KP-address-matched definition > existing selection > first filtered result
-    var selectedItem by remember(filteredDefinitions, kpPreferredDefinition) {
+    // Start with: KP-address-matched definition > existing selection >
+    // first recommended item (if predicate provided) > first filtered result
+    val firstRecommended = remember(filteredDefinitions, recommendedPredicate) {
+        if (recommendedPredicate != null) filteredDefinitions.firstOrNull { recommendedPredicate(it) }
+        else null
+    }
+    var selectedItem by remember(filteredDefinitions, kpPreferredDefinition, firstRecommended) {
         mutableStateOf(
             kpPreferredDefinition
                 ?: initialValue
+                ?: firstRecommended
                 ?: if (initialFilter.isNotBlank()) filteredDefinitions.firstOrNull() else null
         )
     }
@@ -127,15 +148,37 @@ fun MapPickerDialog(
                     }
                 }
 
-                // KP hint badge — shown when a WinOLS KP file is loaded and has a match
+                // KP badge — shown when a WinOLS KP file is loaded and has a match
                 // (shown alongside CSV hint if both are available)
-                if (kpHint != null && csvHint == null) {
-                    val addrStr = if (kpHint.hasAddress) " @ 0x${kpHint.arAddress.toString(16).uppercase()}" else ""
-                    Text(
-                        text = "WinOLS KP: ${kpHint.name}$addrStr — ${kpHint.description.take(60)}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
+                if (csvHint == null && (kpDef != null || kpHint != null)) {
+                    if (kpDef != null) {
+                        // Rich badge with dimensions, units, scaling (from full KP parsing)
+                        val addrStr = if (kpDef.hasAddress) " @ 0x${kpDef.effectiveAddress.toString(16).uppercase()}" else ""
+                        val dimStr = if (kpDef.is2D) " [${kpDef.dimensionString}]"
+                                     else " [${maxOf(kpDef.columns, kpDef.rows)}]"
+                        val unitStr = if (kpDef.units.isNotBlank()) " — ${kpDef.units}" else ""
+                        val scaleStr = if (kpDef.scale != 1.0) " × ${kpDef.scale}" else ""
+                        Text(
+                            text = "WinOLS KP: ${kpDef.name}$addrStr$dimStr$unitStr$scaleStr",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    } else if (kpHint != null) {
+                        // Basic badge (name + address only)
+                        val addrStr = if (kpHint.hasAddress) " @ 0x${kpHint.arAddress.toString(16).uppercase()}" else ""
+                        Text(
+                            text = "WinOLS KP: ${kpHint.name}$addrStr — ${kpHint.description.take(60)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    if (kpDef != null && kpDef.description.isNotBlank()) {
+                        Text(
+                            text = kpDef.description.take(80),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         },
@@ -185,15 +228,29 @@ fun MapPickerDialog(
                         }
                     }
                     items(filteredDefinitions) { definition ->
-                        // Highlight KP-address-matched definitions with a subtle indicator
                         val isKpMatch = kpPreferredDefinition == definition
+                        val isRecommended = recommendedPredicate?.invoke(definition) == true
+                        val subtitle = subtitleProvider?.invoke(definition)
                         ListItem(
                             headlineContent = {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Text(definition.toString())
+                                    if (isRecommended) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Surface(
+                                            color = MaterialTheme.colorScheme.tertiaryContainer,
+                                            shape = MaterialTheme.shapes.extraSmall
+                                        ) {
+                                            Text(
+                                                text = "★ Recommended",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                modifier = Modifier.padding(horizontal = 4.dp, vertical = 1.dp)
+                                            )
+                                        }
+                                    }
                                     if (isKpMatch) {
                                         Spacer(Modifier.width(6.dp))
-                                        // Show "CSV" badge if matched via CSV, "KP" if via KP binary
                                         val badgeLabel = if (csvHint != null && csvHint.hasAddress) "CSV" else "KP"
                                         Surface(
                                             color = MaterialTheme.colorScheme.primaryContainer,
@@ -209,6 +266,15 @@ fun MapPickerDialog(
                                     }
                                 }
                             },
+                            supportingContent = if (subtitle != null) {
+                                {
+                                    Text(
+                                        text = subtitle,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            } else null,
                             modifier = Modifier.clickable { selectedItem = definition },
                             colors = if (selectedItem == definition) {
                                 ListItemDefaults.colors(

@@ -19,6 +19,9 @@ import data.writer.BinWriter
 import domain.math.map.Map3d
 import domain.model.fueltrim.FuelTrimAnalyzer
 import domain.model.ldrpid.LdrpidCalculator
+import domain.model.optimizer.OptimizerCalculator
+import data.preferences.kfmiop.KfmiopPreferences
+import data.preferences.kfmirl.KfmirlPreferences
 import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.FileInputStream
@@ -73,7 +76,7 @@ class Med17LogWorkflowTest {
         BIN_FILE.copyTo(stockBinCopy, overwrite = true)
 
         val stream = ProfileManager::class.java.getResourceAsStream(
-            "/profiles/MED17_162_RS3_TTRS_2_5T.me7profile.json"
+            "/profiles/MED17_162_RS3_TTRS_2_5T.mxtprofile.json"
         ) ?: error("MED17 profile not found")
         val profile = profileJson.decodeFromString(
             ConfigurationProfile.serializer(), stream.bufferedReader().readText()
@@ -237,5 +240,134 @@ class Med17LogWorkflowTest {
         BinaryDiffHelper.assertOnlyExpectedBytesChanged(
             stockBinCopy, tempBinFile, kfldimxPair.first
         )
+    }
+
+    // ── Optimizer: log → adapt → analyze → plausibility checks ───────
+
+    @Test
+    fun `log1 - optimizer parses and analyzes MED17 log`() =
+        verifyOptimizerWorkflow(LOG_FILES[0], expectWot = false)
+
+    @Test
+    fun `log2 - optimizer parses and analyzes MED17 log with WOT`() =
+        verifyOptimizerWorkflow(LOG_FILES[1], expectWot = true)
+
+    @Test
+    fun `log3 - optimizer parses and analyzes MED17 log with WOT`() =
+        verifyOptimizerWorkflow(LOG_FILES[2], expectWot = true)
+
+    private fun verifyOptimizerWorkflow(logName: String, expectWot: Boolean) {
+        val logFile = loadLog(logName)
+        val parser = Med17LogParser()
+        val med17Values = parser.parseLogFile(Med17LogParser.LogType.OPTIMIZER, logFile)
+
+        // Verify diagnostics — all required headers should be found
+        val diag = parser.lastDiagnostics
+        assertNotNull(diag, "Diagnostics should be populated after parse")
+        assertTrue(
+            diag.missingHeaders.isEmpty(),
+            "$logName OPTIMIZER missing headers: ${diag.missingHeaders}"
+        )
+
+        // Adapt to ME7 optimizer format
+        val me7Values = Med17LogAdapter.toMe7OptimizerFormat(med17Values)
+
+        // Resolve maps from preferences (may be null if profile doesn't map them)
+        val kfldrlMap = KfldrlPreferences.getSelectedMap()?.second
+        val kfldimxMap = KfldimxPreferences.getSelectedMap()?.second
+        val kfmiopMap = KfmiopPreferences.getSelectedMap()?.second
+        val kfmirlMap = KfmirlPreferences.getSelectedMap()?.second
+
+        val result = OptimizerCalculator.analyzeMed17(
+            me7Values, kfldrlMap, kfldimxMap, kfmiopMap, kfmirlMap
+        )
+
+        if (expectWot) {
+            assertTrue(
+                result.wotEntries.isNotEmpty(),
+                "$logName should contain WOT entries"
+            )
+            // Plausibility: RPM in [1000, 9000], boost (actualMap) in [500, 5000] hPa
+            for (entry in result.wotEntries) {
+                assertTrue(
+                    entry.rpm in 1000.0..9000.0,
+                    "WOT RPM ${entry.rpm} outside plausible range [1000, 9000]"
+                )
+                assertTrue(
+                    entry.actualMap in 500.0..5000.0,
+                    "WOT boost ${entry.actualMap} hPa outside plausible range [500, 5000]"
+                )
+            }
+        }
+        // Cruise-only log may have empty wotEntries — that's acceptable
+    }
+
+    // ── PLSOL: log → parse → WOT filter → plausibility ──────────────
+
+    @Test
+    fun `log1 - PLSOL parses cruise-only log`() =
+        verifyPlsolWorkflow(LOG_FILES[0], expectWot = false)
+
+    @Test
+    fun `log2 - PLSOL parses WOT log with boost data`() =
+        verifyPlsolWorkflow(LOG_FILES[1], expectWot = true)
+
+    @Test
+    fun `log3 - PLSOL parses WOT log with boost data`() =
+        verifyPlsolWorkflow(LOG_FILES[2], expectWot = true)
+
+    private fun verifyPlsolWorkflow(logName: String, expectWot: Boolean) {
+        val logFile = loadLog(logName)
+        val parser = Med17LogParser()
+        val logData = parser.parseLogFile(Med17LogParser.LogType.PLSOL, logFile)
+
+        val diag = parser.lastDiagnostics
+        assertNotNull(diag, "Diagnostics should be populated after parse")
+        assertTrue(
+            diag.missingHeaders.isEmpty(),
+            "$logName PLSOL missing headers: ${diag.missingHeaders}"
+        )
+
+        // Extract WOT-filtered points: throttle > 90%, collect (load, boost)
+        val throttle = logData[Med17LogFileContract.Header.THROTTLE_PLATE_ANGLE_HEADER] ?: emptyList()
+        val load = logData[Med17LogFileContract.Header.ENGINE_LOAD_HEADER] ?: emptyList()
+        val boost = logData[Med17LogFileContract.Header.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER] ?: emptyList()
+
+        val minSize = minOf(throttle.size, load.size, boost.size)
+        val wotPoints = (0 until minSize).filter { throttle[it] > 90.0 }
+
+        if (expectWot) {
+            assertTrue(wotPoints.isNotEmpty(), "$logName should have WOT points (throttle > 90%)")
+            for (i in wotPoints) {
+                assertTrue(
+                    boost[i] in 900.0..5000.0,
+                    "WOT boost ${boost[i]} hPa at index $i outside plausible range [900, 5000]"
+                )
+            }
+        }
+        // Cruise-only log: zero WOT points is acceptable
+
+        // Verify fupsrls_w is extracted (optional signal, may be empty for some logs)
+        val fupsrls = logData[Med17LogFileContract.Header.FUPSRLS_HEADER]
+        assertNotNull(fupsrls, "$logName PLSOL should initialize fupsrls_w list")
+    }
+
+    // ── Parser Diagnostics: all logs x all log types ─────────────────
+
+    @Test
+    fun `all logs parse successfully for all log types`() {
+        for (logName in LOG_FILES) {
+            for (logType in Med17LogParser.LogType.entries) {
+                val parser = Med17LogParser()
+                val logFile = loadLog(logName)
+                parser.parseLogFile(logType, logFile)
+                val diag = parser.lastDiagnostics
+                assertNotNull(diag, "$logName / $logType should produce diagnostics")
+                assertTrue(
+                    diag.missingHeaders.isEmpty(),
+                    "$logName / $logType missing headers: ${diag.missingHeaders}"
+                )
+            }
+        }
     }
 }

@@ -22,6 +22,8 @@ object Me7LogFileContract {
     const val REQUESTED_LOAD_LABEL = "rlsol_w"
     const val ACTUAL_LOAD_LABEL = "rl"
     const val THROTTLE_MODEL_AIRFLOW_LABEL = "msdk_w"
+    const val INTAKE_TEMPERATURE_LABEL = "tans"
+    const val REQUESTED_PRESSURE_MAX_LABEL = "pvdxs_w"
 
     enum class Header(var header: String, val title: String) {
         START_TIME_HEADER(START_TIME_LABEL, "Start Time"),
@@ -44,6 +46,8 @@ object Me7LogFileContract {
         REQUESTED_PRESSURE_HEADER(REQUESTED_PRESSURE_LABEL, "Requested Pressure"),
         REQUESTED_LOAD_HEADER(REQUESTED_LOAD_LABEL, "Requested Load"),
         ACTUAL_LOAD_HEADER(ACTUAL_LOAD_LABEL, "Actual Load"),
-        THROTTLE_MODEL_AIRFLOW_HEADER(THROTTLE_MODEL_AIRFLOW_LABEL, "Throttle Model Airflow")
+        THROTTLE_MODEL_AIRFLOW_HEADER(THROTTLE_MODEL_AIRFLOW_LABEL, "Throttle Model Airflow"),
+        INTAKE_TEMPERATURE_HEADER(INTAKE_TEMPERATURE_LABEL, "Intake Air Temperature"),
+        REQUESTED_PRESSURE_MAX_HEADER(REQUESTED_PRESSURE_MAX_LABEL, "Max Requested Pressure")
     }
 }

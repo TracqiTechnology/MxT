@@ -72,7 +72,7 @@ fun EulaDialog(
                         "binary layout. XDF definition files attempt to map human-readable names to byte offsets " +
                         "inside that binary — but XDF files are community-maintained, not OEM-verified. The number " +
                         "of possible combinations of ECU variant × XDF definition × bin revision × tuning " +
-                        "permutation is astronomically large. ME7Tuner has been tested against a tiny fraction " +
+                        "permutation is astronomically large. MxT has been tested against a tiny fraction " +
                         "of them. Your specific combination may not be one of them."
                     )
 
@@ -88,7 +88,7 @@ fun EulaDialog(
                         "  • Keep a known-good backup of your stock bin. Always."
                     )
 
-                    SectionHeader("ME7Tuner Helps You Tune — It Does Not Tune for You")
+                    SectionHeader("MxT Helps You Tune — It Does Not Tune for You")
                     BodyText(
                         "This application is a calculator and a visualizer. It shows you what the math says. " +
                         "It does not know your engine, your turbo, your injectors, your fuel system, or your " +

@@ -31,7 +31,7 @@ object LinearInterpolation {
 
         return Array(xi.size) { i ->
             if (xi[i] < x[0]) {
-                0.0
+                y[0]
             } else {
                 var loc = Arrays.binarySearch(x, xi[i])
                 if (loc < -1) {

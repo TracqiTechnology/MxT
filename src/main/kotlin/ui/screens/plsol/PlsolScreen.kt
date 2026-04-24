@@ -112,6 +112,7 @@ fun PlsolScreen(initialTab: Int = 0) {
                                 val baroValues: List<Double>
                                 val throttleValues: List<Double>
                                 var fupsrlsValues: List<Double> = emptyList()
+                                var intakeTempValues: List<Double> = emptyList()
 
                                 if (isMed17) {
                                     val parser = Med17LogParser()
@@ -127,6 +128,7 @@ fun PlsolScreen(initialTab: Int = 0) {
                                     baroValues = values[Med17LogFileContract.Header.BAROMETRIC_PRESSURE_HEADER] ?: emptyList()
                                     throttleValues = values[Med17LogFileContract.Header.THROTTLE_PLATE_ANGLE_HEADER] ?: emptyList()
                                     fupsrlsValues = values[Med17LogFileContract.Header.FUPSRLS_HEADER] ?: emptyList()
+                                    intakeTempValues = values[Med17LogFileContract.Header.INTAKE_TEMPERATURE_HEADER] ?: emptyList()
                                 } else {
                                     val parser = Me7LogParser()
                                     val values = parser.parseLogDirectory(
@@ -148,6 +150,7 @@ fun PlsolScreen(initialTab: Int = 0) {
                                 val wotPressures = mutableListOf<Double>()
                                 val wotBaros = mutableListOf<Double>()
                                 val wotFupsrls = mutableListOf<Double>()
+                                val wotIntakeTemps = mutableListOf<Double>()
                                 for (i in loadValues.indices) {
                                     if (i < throttleValues.size && throttleValues[i] > 90.0) {
                                         if (i < pressureValues.size) {
@@ -162,6 +165,9 @@ fun PlsolScreen(initialTab: Int = 0) {
                                         if (i < fupsrlsValues.size) {
                                             wotFupsrls.add(fupsrlsValues[i])
                                         }
+                                        if (i < intakeTempValues.size) {
+                                            wotIntakeTemps.add(intakeTempValues[i])
+                                        }
                                     }
                                 }
 
@@ -173,6 +179,12 @@ fun PlsolScreen(initialTab: Int = 0) {
                                     if (wotBaros.isNotEmpty()) {
                                         val meanBaro = wotBaros.average()
                                         barometricPressure = "%.1f".format(meanBaro)
+                                    }
+
+                                    // Auto-fill intake temp from log data
+                                    if (wotIntakeTemps.isNotEmpty()) {
+                                        val meanTemp = wotIntakeTemps.average()
+                                        intakeAirTemp = "%.1f".format(meanTemp)
                                     }
 
                                     // Auto-fill kfurl from log data
@@ -190,7 +202,7 @@ fun PlsolScreen(initialTab: Int = 0) {
                         }
                     }
                 }) {
-                    Text(if (isMed17) "Load ScorpionEFI Logs" else "Load ME7 Logs")
+                    Text(if (isMed17) "Load DS1 Logs" else "Load ME7 Logs")
                 }
                 if (showProgress) {
                     LinearProgressIndicator(

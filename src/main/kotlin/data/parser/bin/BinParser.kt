@@ -1,5 +1,11 @@
 package data.parser.bin
 
+import data.parser.csv.WinOlsCsvDefinitionAdapter
+import data.parser.csv.WinOlsCsvMapDefinition
+import data.parser.csv.WinOlsCsvParser
+import data.parser.kp.KpDefinitionAdapter
+import data.parser.kp.KpHintParser
+import data.parser.kp.KpMapDefinition
 import data.parser.xdf.AxisDefinition
 import data.parser.xdf.TableDefinition
 import data.parser.xdf.XdfParser
@@ -27,12 +33,23 @@ object BinParser {
 
     fun init() {
         scope.launch {
-            combine(BinFilePreferences.file, XdfParser.tableDefinitions) { file, defs ->
-                file to defs
-            }.collect { (file, defs) ->
+            combine(
+                BinFilePreferences.file,
+                XdfParser.tableDefinitions,
+                WinOlsCsvParser.definitions,
+                KpHintParser.definitions
+            ) { file, xdfDefs, csvDefs, kpDefs ->
+                arrayOf(file, xdfDefs, csvDefs, kpDefs)
+            }.collect { args ->
+                @Suppress("UNCHECKED_CAST")
+                val file = args[0] as File
+                val xdfDefs = args[1] as List<TableDefinition>
+                val csvDefs = args[2] as List<WinOlsCsvMapDefinition>
+                val kpDefs = args[3] as List<KpMapDefinition>
                 binaryFile = file
+                val merged = mergeDefinitions(xdfDefs, csvDefs, kpDefs)
                 if (file.exists() && file.isFile) {
-                    try { parseMutex.withLock { parse(FileInputStream(file), defs) } }
+                    try { parseMutex.withLock { parse(FileInputStream(file), merged) } }
                     catch (e: IOException) { e.printStackTrace() }
                 }
             }
@@ -40,11 +57,60 @@ object BinParser {
         scope.launch {
             BinWriter.writeEvents.collect {
                 if (binaryFile.exists() && binaryFile.isFile) {
-                    try { parseMutex.withLock { parse(FileInputStream(binaryFile), XdfParser.tableDefinitions.value) } }
+                    val merged = mergeDefinitions(
+                        XdfParser.tableDefinitions.value,
+                        WinOlsCsvParser.definitions.value,
+                        KpHintParser.definitions.value
+                    )
+                    try { parseMutex.withLock { parse(FileInputStream(binaryFile), merged) } }
                     catch (e: IOException) { e.printStackTrace() }
                 }
             }
         }
+    }
+
+    /**
+     * Merge XDF, CSV-derived, and KP-derived table definitions.
+     * Priority: XDF > CSV > KP — each source only fills gaps left by higher-priority sources.
+     */
+    internal fun mergeDefinitions(
+        xdfDefs: List<TableDefinition>,
+        csvDefs: List<WinOlsCsvMapDefinition>,
+        kpDefs: List<KpMapDefinition> = emptyList()
+    ): List<TableDefinition> {
+        val csvTableDefs = if (csvDefs.isNotEmpty()) WinOlsCsvDefinitionAdapter.toTableDefinitions(csvDefs) else emptyList()
+        val kpTableDefs = if (kpDefs.isNotEmpty()) KpDefinitionAdapter.toTableDefinitions(kpDefs) else emptyList()
+
+        if (csvTableDefs.isEmpty() && kpTableDefs.isEmpty()) return xdfDefs
+        if (xdfDefs.isEmpty() && csvTableDefs.isEmpty()) return kpTableDefs
+        if (xdfDefs.isEmpty() && kpTableDefs.isEmpty()) return csvTableDefs
+
+        val names = mutableSetOf<String>()
+        val result = mutableListOf<TableDefinition>()
+
+        // XDF first (highest priority)
+        for (def in xdfDefs) {
+            names.add(def.tableName.lowercase())
+            result.add(def)
+        }
+
+        // CSV fills gaps
+        for (def in csvTableDefs) {
+            if (def.tableName.lowercase() !in names) {
+                names.add(def.tableName.lowercase())
+                result.add(def)
+            }
+        }
+
+        // KP fills remaining gaps
+        for (def in kpTableDefs) {
+            if (def.tableName.lowercase() !in names) {
+                names.add(def.tableName.lowercase())
+                result.add(def)
+            }
+        }
+
+        return result
     }
 
     private fun parse(inputStream: InputStream, tableDefinitions: List<TableDefinition>) {

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate branded banner for README: pistons_0.png icon (gold tinted) + TracQi + ME7Tuner, transparent bg."""
+"""Generate branded banner for README: pistons_0.png icon (gold tinted) + TracQi + MxT, transparent bg."""
 
 from PIL import Image, ImageDraw, ImageFont
 from pathlib import Path
@@ -55,11 +55,11 @@ bbox = draw.textbbox((0, 0), "TracQi", font=font_tracqi)
 tw = bbox[2] - bbox[0]
 draw.text(((W - tw) // 2, text_y), "TracQi", font=font_tracqi, fill=GOLD)
 
-# "ME7Tuner"
+# "MxT"
 text_y2 = text_y + (bbox[3] - bbox[1]) + 10
-bbox2 = draw.textbbox((0, 0), "ME7Tuner", font=font_me7)
+bbox2 = draw.textbbox((0, 0), "MxT", font=font_me7)
 tw2 = bbox2[2] - bbox2[0]
-draw.text(((W - tw2) // 2, text_y2), "ME7Tuner", font=font_me7, fill=GOLD_DIM)
+draw.text(((W - tw2) // 2, text_y2), "MxT", font=font_me7, fill=GOLD_DIM)
 
 # ── Crop to content ──────────────────────────────────────────────────────
 bbox_all = img.getbbox()

@@ -1,16 +1,16 @@
 # ME7 Calibration Guide
 
-Complete calibration reference for Bosch ME7 ECUs (B5 S4 2.7T, 1.8T platforms). For MED17 (RS3/TTRS 2.5T), see the [MED17 Calibration Guide](med17-calibration-guide.md).
+Complete calibration reference for Bosch ME7 ECUs (B5 S4 2.7T, 1.8T platforms). For MED17 (RS3/TTRS 2.5T), see the [MED17 Calibration Guide](med17-calibration-guide.md). For Motronic or MED9, see the [Motronic](../technical/motronic/motronic-tuning-workflow.md) and [MED9](../technical/med9/med9-tuning-workflow.md) tuning workflows.
 
 This guide tells you *how* to calibrate — step by step, with screenshots, algorithms, and the kind of detail that only matters when you're actually doing the work. It's organized in calibration order. Start at the top and work down. Skip sections that don't apply to your hardware.
 
-*It is critical that you calibrate primary fueling first.* This is not a suggestion. If you skip this, everything downstream is built on a lie. Once fueling is calibrated, you can take logs and have ME7Tuner suggest a MAF scaling. Once both fueling and MAF are calibrated, load request, ignition advance, and pressure (boost) can be calibrated.
+*It is critical that you calibrate primary fueling first.* This is not a suggestion. If you skip this, everything downstream is built on a lie. Once fueling is calibrated, you can take logs and have MxT suggest a MAF scaling. Once both fueling and MAF are calibrated, load request, ignition advance, and pressure (boost) can be calibrated.
 
 ---
 
 ## Do I Need Calibration? (ME7 Hardware Reference)
 
-ME7Tuner has two major workflows — **Calibration** and **Optimization** — and who needs each is different.
+MxT has two major workflows — **Calibration** and **Optimization** — and who needs each is different.
 
 **Optimizer: Yes, you probably need it.** The Optimizer analyzes WOT logs and corrects your boost control (KFLDRL/KFLDIMX) and volumetric efficiency model (KFPBRK) so that actual pressure tracks requested pressure and actual load tracks requested load. This is useful at **any power level** — even a completely stock K03 car benefits from having an accurate VE model and properly linearized wastegate duty cycle. If your car runs ME7 and you datalog, the Optimizer can improve your tune.
 
@@ -93,9 +93,15 @@ The Fueling tab consolidates all fuel-injector-related calibration into one plac
 
 The first step is to calculate a reasonable value for KRKTE (primary fueling). This is the value that allows the ECU to determine how much fuel is required to achieve a given AFR (air fuel ratio) based on a requested load/cylinder filling. It is critical that KRKTE is close to the calculated value. If your KRKTE deviates significantly from the calculated value, your MAF is likely over/under scaled.
 
-Pay attention to the density of gasoline (Gasoline Grams per Cubic Centimeter). The stock M-box assumes a value of 0.71 g/cc^3, although the [generally accepted density of gasoline](https://www.aqua-calc.com/page/density-table) is 0.75 g/cc^3. Also consider that ethanol has a density of 0.7893 g/cc^3 so high ethanol blends can be even denser.
+Pay attention to the density of gasoline (Gasoline Grams per Cubic Centimeter). The Funktionsrahmen contains contradictory references:
 
-Note that the decision to use a fuel density of 0.71 g/cc^3 (versus ~0.75 g/cc^3) will have the effect of under-scaling the MAF (more fuel will be injected per duty cycle so less airflow will need to be reported from the MAF to compensate). As a result, the measured engine load (rl_w) will be under-scaled which is key to keeping estimated manifold pressure (ps_w) slightly below actual pressure (pvdks_w) without making irrational changes to the VE model (KFURL) which converts pressure to load and load to pressure.
+- **BGKV section** (MED17.1.62 page 8419): explicitly states ρ₀ₖₛ = 755 g/dm³ (0.755 g/cc) with LST = 14.7
+- **KRKATE section** (MED17.1.62 page 8765): uses a valve correction factor of 1.05, which was originally derived from 0.7135 g/cc (petrol density at 15°C, per the ME7.5 guide: 0.7135 / 0.6795 ≈ 1.05)
+- **ME7.5 guide**: explicitly uses 0.7135 g/cc with the 1.05 correction factor
+
+The default value of 0.755 g/cc matches the FR BGKV section. Using 0.7135 g/cc instead will produce a richer calibration (the ECU injects more fuel per load percent), which is safer for modified injector setups that tend to run lean. The field is editable — enter whichever value matches your fuel or tuning preference. Also consider that ethanol has a density of 0.789 g/cc, so high ethanol blends can be even denser.
+
+Note that the decision to use a fuel density of 0.7135 g/cc (versus 0.755 g/cc) will have the effect of under-scaling the MAF (more fuel will be injected per duty cycle so less airflow will need to be reported from the MAF to compensate). As a result, the measured engine load (rl_w) will be under-scaled which is key to keeping estimated manifold pressure (ps_w) slightly below actual pressure (pvdks_w) without making irrational changes to the VE model (KFURL) which converts pressure to load and load to pressure.
 
 The KRKTE tab will help you calculate a value for KRKTE. Fill in the constants with the appropriate values and let it do the math.
 
@@ -197,11 +203,11 @@ Log the following parameters:
 
 * **Parking lot (15+ minutes):** Drive slowly in 1st and 2nd gear. Stop and start often. This fills in the low-voltage bins that highway driving misses. Yes, you will look strange driving in circles around a parking lot for 15 minutes. Your MAF calibration doesn't care about your dignity.
 
-* You don't have to stop and start logging between driving styles — ME7Tuner filters the data for you. But you still want as much steady-state data as possible. The more consistent your throttle position at any given moment, the better.
+* You don't have to stop and start logging between driving styles — MxT filters the data for you. But you still want as much steady-state data as possible. The more consistent your throttle position at any given moment, the better.
 
 Save your log and put it into a directory (along with other closed-loop logs from the same tune if desired).
 
-#### In ME7Tuner
+#### In MxT
 
 Navigate to the **Closed Loop** calibration tab.
 
@@ -232,7 +238,7 @@ The **AFR Correction %** sub-tab shows the raw point cloud of Correction Errors 
 
 Load the corrected MLHFM into your tune, drive another set of logs, and repeat until your STFT/LTFT look clean at idle and part throttle.
 
-If you notice MLHFM getting "bumpy" after several iterations — peaks and valleys that don't correspond to real airflow non-linearities — that's accumulated noise. ME7Tuner has a polynomial fit option for exactly this. On the **MLHFM** sub-tab, click **Fit MLHFM** with a reasonable degree (6th degree works well in practice) to smooth the curve while preserving the overall shape.
+If you notice MLHFM getting "bumpy" after several iterations — peaks and valleys that don't correspond to real airflow non-linearities — that's accumulated noise. MxT has a polynomial fit option for exactly this. On the **MLHFM** sub-tab, click **Fit MLHFM** with a reasonable degree (6th degree works well in practice) to smooth the curve while preserving the overall shape.
 
 <img src="/documentation/images/closed_loop_mlhfm_corrected_best_fit.png" width="800">
 
@@ -246,7 +252,7 @@ Before attempting open loop correction, you **need** KRKTE (primary fueling) and
 
 You also need a wideband O2 sensor that is pre-cat. A tail sniffer is not sufficient — the catalytic converter changes the AFR reading.
 
-ME7Tuner is designed to work with Zeitronix logs, but logs from any wideband can be modified to use the expected headers. Open an issue with an example log file if you'd like other formats supported.
+MxT is designed to work with Zeitronix logs, but logs from any wideband can be modified to use the expected headers. Open an issue with an example log file if you'd like other formats supported.
 
 ### Algorithm
 
@@ -262,7 +268,7 @@ The corrected kg/hr transformation for MLHFM is calculated as current_kg/hr * ((
 
 ### Usage
 
-Unlike closed loop, open loop requires precise synchronization between two loggers. Each WOT pull in the ME7Logger file must correspond 1:1 with a pull in the Zeitronix file — same order, same count. Both loggers need to be running before the first pull and stopped after the last pull. ME7Tuner detects pull boundaries using throttle position, matches pulls by order, and correlates data points within each pull by RPM.
+Unlike closed loop, open loop requires precise synchronization between two loggers. Each WOT pull in the ME7Logger file must correspond 1:1 with a pull in the Zeitronix file — same order, same count. Both loggers need to be running before the first pull and stopped after the last pull. MxT detects pull boundaries using throttle position, matches pulls by order, and correlates data points within each pull by RPM.
 
 This means: start both loggers, do your pulls, stop both loggers. Don't start one logger, do a pull, start the other logger, and wonder why the pull counts don't match.
 
@@ -287,7 +293,7 @@ Start both ME7Logger and the Zeitronix Logger. Do as many WOT pulls as possible 
 
 Save your logs and put them into a directory.
 
-#### In ME7Tuner
+#### In MxT
 
 Navigate to the **Open Loop** calibration tab.
 
@@ -339,19 +345,19 @@ Note that for 2.7L of displacement to approach 900 horsepower, the pressure requ
 
 PLSOL now supports loading a directory of ME7Logger logs to overlay actual WOT data points on the pressure/load chart. The logged points appear in green alongside the theoretical curves — so you can see exactly where your hardware is operating relative to the model.
 
-When WOT log data is loaded, ME7Tuner uses `KfurlSolver.solveFromActuals()` to back-solve an optimal KFURL value from the logged load, pressure, and barometric data. This auto-fills the KFURL field so you don't have to guess. If sufficient per-RPM data exists, the solver also reports per-RPM KFURL variation (typical range: 0.105–0.142 %/hPa) — useful for diagnosing whether your VE model needs a flat correction or an RPM-dependent one.
+When WOT log data is loaded, MxT uses `KfurlSolver.solveFromActuals()` to back-solve an optimal KFURL value from the logged load, pressure, and barometric data. This auto-fills the KFURL field so you don't have to guess. If sufficient per-RPM data exists, the solver also reports per-RPM KFURL variation (typical range: 0.105–0.142 %/hPa) — useful for diagnosing whether your VE model needs a flat correction or an RPM-dependent one.
 
 <img src="/documentation/images/plsol.png" width="800">
 
 ### PLSOL -> Airflow (Pressure to Airflow)
 
-ME7Tuner calculates estimated airflow for a given load based on engine displacement (in liters) and RPM. This tells you whether your MAF housing can support the load you're requesting — because if the MAF can't measure the airflow, the ECU can't control it.
+MxT calculates estimated airflow for a given load based on engine displacement (in liters) and RPM. This tells you whether your MAF housing can support the load you're requesting — because if the MAF can't measure the airflow, the ECU can't control it.
 
 <img src="/documentation/images/plsol_airflow.png" width="800">
 
 ### PLSOL -> Power (Pressure to Horsepower)
 
-ME7Tuner calculates estimated horsepower for a given load based on engine displacement (in liters) and RPM.
+MxT calculates estimated horsepower for a given load based on engine displacement (in liters) and RPM.
 
 <img src="/documentation/images/plsol_power.png" width="800">
 
@@ -377,9 +383,9 @@ The maximum pressure a K03 can efficiently produce is about 1.0 bar (15 psi) rel
 
 This is the part that breaks when you change hardware. If you upgrade to bigger turbos that can produce more than 2.5 bar absolute, you need a bigger MAP sensor — and the moment you change the MAP sensor limit, *the denominator changes for every cell in the table*. KFMIOP needs to be rescaled, not extrapolated.
 
-ME7Tuner handles this by taking your new maximum MAP pressure, rescaling the load axis via PLSOL, and then renormalizing the torque values. For example, going from ~215% max load (2.5 bar) to ~400% max load (4 bar) means the torque request at the old 9.75% load column gets reduced from ~4% to ~2% — because with the wider MAP range, 9.75% load represents a proportionally smaller fraction of the maximum.
+MxT handles this by taking your new maximum MAP pressure, rescaling the load axis via PLSOL, and then renormalizing the torque values. For example, going from ~215% max load (2.5 bar) to ~400% max load (4 bar) means the torque request at the old 9.75% load column gets reduced from ~4% to ~2% — because with the wider MAP range, 9.75% load represents a proportionally smaller fraction of the maximum.
 
-KFMIOP can also be converted to a boost table via the PLSOL calculation after you've derived peak load. Looking at the resulting boost table, the stock values appear to have been created empirically on an engine dyno and tuned specifically for stock hardware (K03 turbos). Unless you have access to a dyno, there's no way to derive OEM-quality KFMIOP for your specific hardware. ME7Tuner's rescaling is a principled approximation — better than extrapolating or just widening the axis and hoping for the best.
+KFMIOP can also be converted to a boost table via the PLSOL calculation after you've derived peak load. Looking at the resulting boost table, the stock values appear to have been created empirically on an engine dyno and tuned specifically for stock hardware (K03 turbos). Unless you have access to a dyno, there's no way to derive OEM-quality KFMIOP for your specific hardware. MxT's rescaling is a principled approximation — better than extrapolating or just widening the axis and hoping for the best.
 
 * Read [Torque Monitoring](https://s4wiki.com/wiki/Tuning#Torque_monitoring)
 
@@ -402,7 +408,7 @@ For the 2.7T twin-turbo V6, each compressor feeds 3 cylinders of 2.7L total disp
 
 The turbo that came on every B5 S4. Peak efficiency of ~73% at modest pressure ratios. The efficiency island extends to about PR 2.0 (1.0 bar relative / 2.0 bar absolute) before falling off rapidly. The K03 was designed for the stock power target (~265 hp from the pair) and runs out of breath quickly above 1.0 bar relative. At the 2.7T's flow rates, you can push slightly past PR 2.0, but you're falling off the efficiency cliff — compressor outlet temperatures rise, you lose intercooler margin, and the turbo shaft speed approaches its limit.
 
-**ME7Tuner implications:** Stock MAP sensor (2.5 bar) is more than adequate. Maximum efficient load is ~191%, well within the stock KFMIOP range. The **Optimizer alone** is sufficient for this turbo — no KFMIOP/KFMIRL recalibration needed.
+**MxT implications:** Stock MAP sensor (2.5 bar) is more than adequate. Maximum efficient load is ~191%, well within the stock KFMIOP range. The **Optimizer alone** is sufficient for this turbo — no KFMIOP/KFMIRL recalibration needed.
 
 #### K04-2078 EYE (Common Upgrade)
 
@@ -410,7 +416,7 @@ The turbo that came on every B5 S4. Peak efficiency of ~73% at modest pressure r
 
 The bolt-on upgrade that launched a thousand forum builds. Same bearing housing and turbine as the K03 with a larger compressor wheel. The efficiency island is wider in both flow and pressure ratio, extending to about PR 2.5 (1.5 bar relative / 2.5 bar absolute) at 2.7T flow rates. Peak efficiency is ~73% over a broader range than the K03.
 
-**ME7Tuner implications:** The stock 2.5 bar MAP sensor is *exactly* at the limit — 2.5 bar absolute is the sensor ceiling and the K04-2078's efficient limit simultaneously. This is no coincidence — the K04 was designed as a factory upgrade (RS4 used a variant). At 2.5 bar you're at ~215% load, which is the top of the stock KFMIOP axis. You can get away with **Optimizer only** for most K04-2078 builds, but if you're pushing maximum boost on warm days, you may want to rescale KFMIOP to give yourself headroom. Borderline — your call.
+**MxT implications:** The stock 2.5 bar MAP sensor is *exactly* at the limit — 2.5 bar absolute is the sensor ceiling and the K04-2078's efficient limit simultaneously. This is no coincidence — the K04 was designed as a factory upgrade (RS4 used a variant). At 2.5 bar you're at ~215% load, which is the top of the stock KFMIOP axis. You can get away with **Optimizer only** for most K04-2078 builds, but if you're pushing maximum boost on warm days, you may want to rescale KFMIOP to give yourself headroom. Borderline — your call.
 
 #### K04-0025
 
@@ -418,7 +424,7 @@ The bolt-on upgrade that launched a thousand forum builds. Same bearing housing 
 
 A larger variant in the K04 family — same speed lines as the K04-2078 but with the efficiency island extending further. Usable pressure ratios approach PR 2.8 (1.8 bar relative / 2.8 bar absolute) at 2.7T flow rates before efficiency drops below 65%. This is the turbo that forces you past the stock MAP sensor.
 
-**ME7Tuner implications:** The stock 2.5 bar MAP sensor **cannot see** what this turbo can produce. You need a 3 bar sensor minimum. Load range extends to ~240%, which means the stock KFMIOP table with its 191% load ceiling is completely inadequate. **Full calibration required** — KFMIOP rescale, KFMIRL inversion, KFZWOP/KFZW axis extension, and probably a MAP sensor upgrade.
+**MxT implications:** The stock 2.5 bar MAP sensor **cannot see** what this turbo can produce. You need a 3 bar sensor minimum. Load range extends to ~240%, which means the stock KFMIOP table with its 191% load ceiling is completely inadequate. **Full calibration required** — KFMIOP rescale, KFMIRL inversion, KFZWOP/KFZW axis extension, and probably a MAP sensor upgrade.
 
 #### K14 — KKK 2464
 
@@ -426,7 +432,7 @@ A larger variant in the K04 family — same speed lines as the K04-2078 but with
 
 Moving into the physically larger turbo frames. The K14 is a genuine step up from the K04 — larger compressor and turbine wheels in a larger housing. The compressor map shows a wider flow range with peak efficiency around 76%. On the 2.7T twin-turbo application, this compressor can produce pressure ratios around 2.5–3.0 (roughly 1.5–2.0 bar relative / 2.5–3.0 bar absolute) while staying within the efficiency island. The turbine side spools slower than a K04, but once it's lit, there's significantly more airflow available.
 
-**ME7Tuner implications:** 3 bar MAP sensor minimum — and you'll be using most of that range. Load range around ~270%. **Full calibration required.** At this level you're also running into MAF housing limits on the stock 70mm housing — consider logging mshfm_w to verify you haven't maxed it.
+**MxT implications:** 3 bar MAP sensor minimum — and you'll be using most of that range. Load range around ~270%. **Full calibration required.** At this level you're also running into MAF housing limits on the stock 70mm housing — consider logging mshfm_w to verify you haven't maxed it.
 
 #### K16 — KKK 2467
 
@@ -434,7 +440,7 @@ Moving into the physically larger turbo frames. The K14 is a genuine step up fro
 
 The K16 is where "upgrade" becomes "project car." This is a substantially larger compressor than the K14 with efficiency contours extending to pressure ratios above 2.5 on the 2.7T flow range. At the 2.7T's half-engine flow rates, you can push to approximately PR 3.2 (2.2 bar relative / 3.2 bar absolute) before running out of efficiency. The surge line is also further right, meaning you need more flow at low RPM to keep the compressor happy — expect more turbo lag than a K04 or K14.
 
-**ME7Tuner implications:** 4 bar MAP sensor required — you'll exceed 3 bar absolute. Load range approaches ~300%. **Full calibration required**, and you're now in territory where injector size, fuel pump capacity, and MAF housing all become limiting factors in addition to the ECU calibration. The ME7Tuner Calibration workflow earns its keep at this level.
+**MxT implications:** 4 bar MAP sensor required — you'll exceed 3 bar absolute. Load range approaches ~300%. **Full calibration required**, and you're now in territory where injector size, fuel pump capacity, and MAF housing all become limiting factors in addition to the ECU calibration. The MxT Calibration workflow earns its keep at this level.
 
 #### K24 — KKK 2470
 
@@ -442,7 +448,7 @@ The K16 is where "upgrade" becomes "project car." This is a substantially larger
 
 The K24 (Verdichterkennfeld 2470) is a large-frame compressor originally used on industrial and commercial vehicle applications. The compressor map shows pressure ratios extending well past 3.0 with peak efficiency around 76%. At 2.7T flow rates, you can push to approximately PR 3.5 (2.5+ bar relative / 3.5 bar absolute) within the efficiency island. This is serious hardware — the turbine spool time is significant and the compressor needs substantial exhaust energy to reach its operating range.
 
-**ME7Tuner implications:** 4 bar MAP sensor required. Load range around ~340%. **Full calibration required.** At this power level (~500+ hp from a 2.7T), the ECU calibration is just one piece of a much larger puzzle that includes fuel system, cooling, drivetrain, and the structural limits of the engine block itself. ME7Tuner handles the ECU side; the rest is between you and your engine builder.
+**MxT implications:** 4 bar MAP sensor required. Load range around ~340%. **Full calibration required.** At this power level (~500+ hp from a 2.7T), the ECU calibration is just one piece of a much larger puzzle that includes fuel system, cooling, drivetrain, and the structural limits of the engine block itself. MxT handles the ECU side; the rest is between you and your engine builder.
 
 #### K26 — KKK 2664
 
@@ -460,7 +466,7 @@ The K26 is the turbo that powered the Audi 200 Turbo and the UrS4/UrS6 — a pro
 
 A different K26 variant (2470 R) used on the Porsche 924 Turbo. Similar overall characteristics to the 2664 — wide efficiency island, pressure ratios up to 3.0+, peak efficiency in the 68–72% range. The fullload line for the Porsche 4-cylinder application peaks around PR 2.2–2.4. The 2.7T twin-turbo application would operate at lower flow rates per turbo, placing the operating line further left on the map.
 
-**ME7Tuner implications (both K26 variants):** 4 bar+ MAP sensor required. Load range can exceed ~400%. **Full calibration required.** The K26 on a 2.7T is a big turbo build — expect significant spool time, require supporting mods (fuel system, intercooler, exhaust manifold), and plan for extensive dyno tuning beyond what any calculator can provide. ME7Tuner gets you a principled starting point for the ECU calibration.
+**MxT implications (both K26 variants):** 4 bar+ MAP sensor required. Load range can exceed ~400%. **Full calibration required.** The K26 on a 2.7T is a big turbo build — expect significant spool time, require supporting mods (fuel system, intercooler, exhaust manifold), and plan for extensive dyno tuning beyond what any calculator can provide. MxT gets you a principled starting point for the ECU calibration.
 
 #### RS2 — KKK 2672
 
@@ -468,7 +474,7 @@ A different K26 variant (2470 R) used on the Porsche 924 Turbo. Similar overall 
 
 The RS2 turbo (Verdichterkennfeld 2672 GGCAA) — the compressor from the legendary Audi RS2 Avant. This is a high-flow, high-pressure-ratio design with the efficiency island extending past PR 3.0. At 2.7T flow rates, you can push to approximately PR 3.5 (2.5+ bar relative / 3.5 bar absolute) before running out of map. The surge line is moderate, meaning reasonable spool for the size, and peak efficiency sits around 71%.
 
-**ME7Tuner implications:** 4 bar MAP sensor required. Load range around ~340%. **Full calibration required.** Similar territory to the K24 in terms of calibration complexity, but the RS2's historically available aftermarket support means more reference tunes to compare against.
+**MxT implications:** 4 bar MAP sensor required. Load range around ~340%. **Full calibration required.** Similar territory to the K24 in terms of calibration complexity, but the RS2's historically available aftermarket support means more reference tunes to compare against.
 
 #### Turbo → Calibration Decision Matrix
 
@@ -489,10 +495,10 @@ The pattern is clear: once you exceed what the stock 2.5 bar MAP sensor can meas
 
 ### Usage
 
-* On the left side, ME7Tuner analyzes the current KFMIOP and estimates the MAP sensor upper limit and the real-world pressure limit (usually turbo-limited) of the existing calibration
+* On the left side, MxT analyzes the current KFMIOP and estimates the MAP sensor upper limit and the real-world pressure limit (usually turbo-limited) of the existing calibration
 * Based on the analysis, a boost table is derived and viewable under the "Boost" tab
 * On the right side, input your new MAP sensor upper limit and desired pressure limit
-* ME7Tuner outputs a rescaled KFMIOP table and axis
+* MxT outputs a rescaled KFMIOP table and axis
 * Copy the KFMIOP table and axis to other tables (KFMIRL/KFZWOP/KFZW) to generate corresponding maps
 
 <img src="/documentation/images/kfmiop.png" width="800">
@@ -574,7 +580,7 @@ The Z-axis of KFVPDKSD is a pressure ratio — effectively the transition zone i
 
 ### Algorithm
 
-ME7Tuner parses a directory of logs and determines at what RPM points a given boost level can be achieved.
+MxT parses a directory of logs and determines at what RPM points a given boost level can be achieved.
 
 ### Usage
 
@@ -587,10 +593,10 @@ Required Logged Parameters:
 * Barometric Pressure - 'pus_w'
 * Absolute Pressure - 'pvdks_w'
 
-In ME7Tuner:
+In MxT:
 
 * Load a directory of logs using the **Load Logs** button
-* Wait for ME7Tuner to finish the parse and calculations
+* Wait for MxT to finish the parse and calculations
 * KFVPDKSD will be produced on the right side
 
 ---
@@ -721,7 +727,7 @@ where:
 
 #### The 6 Calibratable Components
 
-| Component | What It Calibrates | In ME7Tuner? | Hardcoded? |
+| Component | What It Calibrates | In MxT? | Hardcoded? |
 |-----------|-------------------|:------------:|:----------:|
 | **KFURL** | VE slope (%/hPa per RPM) — how much load each hPa of pressure produces | Yes | No — read from BIN |
 | **KFPBRK** | Combustion chamber correction (RPM × load → factor) — accounts for chamber shape, valve timing, flow losses | Yes | Previously used constant `1.016`, now parameterized |
@@ -792,7 +798,7 @@ The stock ME7 boost controller is a PID loop that fights the wastegate. It works
 
 This is one of the highest-value calibrations you can do. Highly recommended for any setup — stock or modified.
 
-The linearization process is tedious to do by hand — you need WOT pulls at various fixed duty cycles, manual duty cycle vs. boost pressure plotting, and careful interpolation. ME7Tuner automates most of this. You provide the logs; it provides the linearization table.
+The linearization process is tedious to do by hand — you need WOT pulls at various fixed duty cycles, manual duty cycle vs. boost pressure plotting, and careful interpolation. MxT automates most of this. You provide the logs; it provides the linearization table.
 
 Read [Actual pre-control in LDRPID](http://nefariousmotorsports.com/forum/index.php?topic=12352.0title=)
 
@@ -800,7 +806,7 @@ Read [Actual pre-control in LDRPID](http://nefariousmotorsports.com/forum/index.
 
 ### Algorithm
 
-The algorithm is mostly based on [elRey's algorithm](http://nefariousmotorsports.com/forum/index.php?;topic=517.0) from the Nefarious Motorsports forums — one of the best-documented boost control linearization methods for ME7. The key difference: instead of using manual increments to build the linearization table (the way you'd do it by hand with a handful of data points), ME7Tuner fits a one-dimensional polynomial to the duty cycle vs. boost relationship. This produces a smoother result from far more data — ME7Tuner can parse millions of data points across dozens of log files, versus the handful of points you'd get from doing it manually.
+The algorithm is mostly based on [elRey's algorithm](http://nefariousmotorsports.com/forum/index.php?;topic=517.0) from the Nefarious Motorsports forums — one of the best-documented boost control linearization methods for ME7. The key difference: instead of using manual increments to build the linearization table (the way you'd do it by hand with a handful of data points), MxT fits a one-dimensional polynomial to the duty cycle vs. boost relationship. This produces a smoother result from far more data — MxT can parse millions of data points across dozens of log files, versus the handful of points you'd get from doing it manually.
 
 ### Usage
 
@@ -814,13 +820,13 @@ Log the following parameters:
 
 Do as many WOT pulls as possible, starting from the lowest RPM you can manage to the highest. You want a mix of pulls at fixed N75 duty cycles (for building the base linearization curve) and "real world" duty cycles (for validating the result). Different gears, different conditions — more data, better fit.
 
-Put all of your logs in a single directory and select it in ME7Tuner with "Load ME7 Logs."
+Put all of your logs in a single directory and select it in MxT with "Load ME7 Logs."
 
 Then wait. Parsing thousands of WOT data points and fitting the polynomial takes time — especially if you've been thorough about logging. Go make coffee. Come back. If you logged 40+ files, make a second cup.
 
 The linearized duty cycle will be output in KFLDRL. It may not be perfect out of the box — boost control linearization is sensitive to exhaust housing characteristics, wastegate spring rates, and turbo-to-turbo variation. Some manual adjustment is usually needed to get the final result dialed in.
 
-For feed-forward pre-control, ME7Tuner will also output a new KFLDIMX and x-axis based on estimations from the linearized boost table. This is a ballpark — a starting point for the feed-forward map, not a finished product. Expect to iterate.
+For feed-forward pre-control, MxT will also output a new KFLDIMX and x-axis based on estimations from the linearized boost table. This is a ballpark — a starting point for the feed-forward map, not a finished product. Expect to iterate.
 
 One practical tip: at RPM ranges where the turbo can't produce enough boost to crack the wastegates, request 95% duty cycle. There's no reason to be conservative when you're below the wastegate cracking pressure — you want the turbo spooling as hard as possible.
 
@@ -828,7 +834,7 @@ One practical tip: at RPM ranges where the turbo can't produce enough boost to c
 
 ## Optimizer
 
-The Optimizer is where ME7Tuner goes from "useful calculator" to "how did we live without this."
+The Optimizer is where MxT goes from "useful calculator" to "how did we live without this."
 
 It's a suggestion engine that analyzes WOT (Wide Open Throttle) logs and recommends corrections to the boost control and volumetric efficiency maps so that **actual pressure tracks pssol** (requested pressure) and **actual load tracks LDRXN** (maximum specified load).
 
@@ -1022,4 +1028,4 @@ For optimal sensor saturation detection, include `uhfm_w` (MAF voltage) in your 
 
 ---
 
-*ME7Tuner is free software. It comes with no warranty. If you send 25 psi into a motor that can handle 15 psi because you didn't read the output, that's between you and your engine builder.*
+*MxT is free software. It comes with no warranty. If you send 25 psi into a motor that can handle 15 psi because you didn't read the output, that's between you and your engine builder.*

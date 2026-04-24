@@ -43,9 +43,9 @@ class Me7ProfileTest {
 
         /** All ME7 profiles compatible with 551M ECU. */
         val PROFILES = listOf(
-            "/profiles/MBox.me7profile.json" to "MBox",
-            "/profiles/ABox.me7profile.json" to "ABox",
-            "/profiles/ME7_27T_A4_A6.me7profile.json" to "ME7_27T"
+            "/profiles/MBox.mxtprofile.json" to "MBox",
+            "/profiles/ABox.mxtprofile.json" to "ABox",
+            "/profiles/ME7_27T_A4_A6.mxtprofile.json" to "ME7_27T"
         )
 
         /** Common map keys all 551M profiles should define. */
@@ -105,7 +105,7 @@ class Me7ProfileTest {
 
     @Test
     fun `MBox - profile has all required map definition keys`() {
-        val profile = loadProfile("/profiles/MBox.me7profile.json")
+        val profile = loadProfile("/profiles/MBox.mxtprofile.json")
         for (key in REQUIRED_MAP_KEYS) {
             assertTrue(
                 profile.mapDefinitions.containsKey(key),
@@ -116,7 +116,7 @@ class Me7ProfileTest {
 
     @Test
     fun `MBox - all map preferences resolve against stock XDF`() {
-        val profile = loadProfile("/profiles/MBox.me7profile.json")
+        val profile = loadProfile("/profiles/MBox.mxtprofile.json")
         ProfileManager.applyProfile(profile)
         for (key in REQUIRED_MAP_KEYS) {
             val getter = PREFERENCE_GETTERS[key] ?: continue
@@ -128,7 +128,7 @@ class Me7ProfileTest {
 
     @Test
     fun `MBox - primary fueling config has sane values`() {
-        val profile = loadProfile("/profiles/MBox.me7profile.json")
+        val profile = loadProfile("/profiles/MBox.mxtprofile.json")
         assertTrue(profile.primaryFueling.displacement > 0, "Displacement should be > 0")
         assertTrue(profile.primaryFueling.numCylinders > 0, "Cylinders should be > 0")
         assertTrue(profile.primaryFueling.fuelInjectorSize > 0, "Injector size should be > 0")
@@ -139,7 +139,7 @@ class Me7ProfileTest {
 
     @Test
     fun `ABox - profile has all required map definition keys`() {
-        val profile = loadProfile("/profiles/ABox.me7profile.json")
+        val profile = loadProfile("/profiles/ABox.mxtprofile.json")
         for (key in REQUIRED_MAP_KEYS) {
             assertTrue(
                 profile.mapDefinitions.containsKey(key),
@@ -150,7 +150,7 @@ class Me7ProfileTest {
 
     @Test
     fun `ABox - all map preferences resolve against stock XDF`() {
-        val profile = loadProfile("/profiles/ABox.me7profile.json")
+        val profile = loadProfile("/profiles/ABox.mxtprofile.json")
         ProfileManager.applyProfile(profile)
         for (key in REQUIRED_MAP_KEYS) {
             val getter = PREFERENCE_GETTERS[key] ?: continue
@@ -161,7 +161,7 @@ class Me7ProfileTest {
 
     @Test
     fun `ABox - primary fueling config has sane values`() {
-        val profile = loadProfile("/profiles/ABox.me7profile.json")
+        val profile = loadProfile("/profiles/ABox.mxtprofile.json")
         assertTrue(profile.primaryFueling.displacement > 0, "Displacement should be > 0")
         assertTrue(profile.primaryFueling.numCylinders > 0, "Cylinders should be > 0")
         assertTrue(profile.primaryFueling.fuelInjectorSize > 0, "Injector size should be > 0")
@@ -171,7 +171,7 @@ class Me7ProfileTest {
 
     @Test
     fun `ME7_27T - profile has all required map definition keys`() {
-        val profile = loadProfile("/profiles/ME7_27T_A4_A6.me7profile.json")
+        val profile = loadProfile("/profiles/ME7_27T_A4_A6.mxtprofile.json")
         for (key in REQUIRED_MAP_KEYS) {
             assertTrue(
                 profile.mapDefinitions.containsKey(key),
@@ -182,7 +182,7 @@ class Me7ProfileTest {
 
     @Test
     fun `ME7_27T - all map preferences resolve against stock XDF`() {
-        val profile = loadProfile("/profiles/ME7_27T_A4_A6.me7profile.json")
+        val profile = loadProfile("/profiles/ME7_27T_A4_A6.mxtprofile.json")
         ProfileManager.applyProfile(profile)
         for (key in REQUIRED_MAP_KEYS) {
             val getter = PREFERENCE_GETTERS[key] ?: continue
@@ -193,7 +193,7 @@ class Me7ProfileTest {
 
     @Test
     fun `ME7_27T - primary fueling config has sane values`() {
-        val profile = loadProfile("/profiles/ME7_27T_A4_A6.me7profile.json")
+        val profile = loadProfile("/profiles/ME7_27T_A4_A6.mxtprofile.json")
         assertTrue(profile.primaryFueling.displacement > 0, "Displacement should be > 0")
         assertTrue(profile.primaryFueling.numCylinders > 0, "Cylinders should be > 0")
         assertTrue(profile.primaryFueling.fuelInjectorSize > 0, "Injector size should be > 0")

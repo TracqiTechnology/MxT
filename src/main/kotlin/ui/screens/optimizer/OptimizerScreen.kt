@@ -13,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.compositeOver
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
@@ -39,6 +40,7 @@ import data.writer.BinWriter
 import domain.math.map.Map3d
 import domain.model.optimizer.*
 import domain.model.simulator.Me7Simulator
+import domain.model.ldrpid.LdrpidOptimizerBridge
 import data.writer.XdfPatchWriter
 import data.writer.ReportExporter
 import kotlinx.coroutines.Dispatchers
@@ -196,7 +198,7 @@ private fun TaggedMessageRow(
 }
 
 @Composable
-fun OptimizerScreen() {
+fun OptimizerScreen(preloadedLogDir: java.io.File? = null) {
     val mapList by BinParser.mapList.collectAsState()
     val scope = rememberCoroutineScope()
     val scrollState = rememberScrollState()
@@ -236,10 +238,111 @@ fun OptimizerScreen() {
     // Result state
     var result by remember { mutableStateOf<OptimizerCalculator.OptimizerResult?>(null) }
     var logFileName by remember { mutableStateOf("No Log Selected") }
+
+    // Auto-load log data when preloadedLogDir is provided (screenshot harness)
+    LaunchedEffect(preloadedLogDir, kfldrlPair, kfldimxPair, kfmiopPair, kfmirlPair) {
+        if (preloadedLogDir != null && kfldrlPair != null && kfldimxPair != null) {
+            withContext(Dispatchers.IO) {
+                val isMed17 = EcuPlatformPreference.platform == EcuPlatform.MED17
+                val minAngle = minThrottleAngle.toDoubleOrNull() ?: 80.0
+
+                val logFiles = preloadedLogDir.listFiles()
+                    ?.filter { it.isFile && it.name.endsWith(".csv", ignoreCase = true) }
+                    ?: emptyList()
+                val summaries = mutableListOf<LogSummary>()
+
+                var rawMed17Values: Map<data.contract.Med17LogFileContract.Header, List<Double>>? = null
+                val mergedValues = if (isMed17) {
+                    val med17Parser = Med17LogParser()
+                    val med17Values = med17Parser.parseLogDirectory(
+                        Med17LogParser.LogType.OPTIMIZER, preloadedLogDir
+                    ) { _, _ -> }
+                    rawMed17Values = med17Values
+                    Med17LogAdapter.toMe7OptimizerFormat(med17Values)
+                } else {
+                    val parser = Me7LogParser()
+                    parser.parseLogDirectory(
+                        Me7LogParser.LogType.OPTIMIZER, preloadedLogDir
+                    ) { _, _ -> }
+                }
+
+                for (logFile in logFiles) {
+                    try {
+                        val fileValues = if (isMed17) {
+                            val fileParser = Med17LogParser()
+                            val med17Values = fileParser.parseLogFile(Med17LogParser.LogType.OPTIMIZER, logFile)
+                            Med17LogAdapter.toMe7OptimizerFormat(med17Values)
+                        } else {
+                            val fileParser = Me7LogParser()
+                            fileParser.parseLogFile(Me7LogParser.LogType.OPTIMIZER, logFile)
+                        }
+                        val wotEntries = OptimizerCalculator.filterWotEntries(fileValues, minAngle)
+                        if (wotEntries.isNotEmpty()) {
+                            summaries.add(LogSummary(
+                                fileName = logFile.name,
+                                wotSampleCount = wotEntries.size,
+                                rpmRange = "${wotEntries.minOf { it.rpm }.toInt()} – ${wotEntries.maxOf { it.rpm }.toInt()}",
+                                avgPressureError = wotEntries.map { it.requestedMap - it.actualMap }.average()
+                            ))
+                        }
+                    } catch (_: Exception) { }
+                }
+
+                val analysisResult = if (isMed17) {
+                    OptimizerCalculator.analyzeMed17(
+                        values = mergedValues,
+                        kfldrlMap = kfldrlPair.second,
+                        kfldimxMap = kfldimxPair.second,
+                        kfmiopMap = kfmiopPair?.second,
+                        kfmirlMap = kfmirlPair?.second,
+                        ldrxnTarget = ldrxnTarget.toDoubleOrNull() ?: 191.0,
+                        toleranceMbar = toleranceMbar.toDoubleOrNull() ?: 30.0,
+                        minThrottleAngle = minAngle,
+                        kfldimxOverheadPercent = kfldimxOverhead.toDoubleOrNull() ?: 8.0,
+                        logSummaries = summaries,
+                        kfldrq0Map = kfldrq0Pair?.second,
+                        kfldrq1Map = kfldrq1Pair?.second,
+                        kfldrq2Map = kfldrq2Pair?.second,
+                        fupsrlsValues = rawMed17Values?.get(data.contract.Med17LogFileContract.Header.FUPSRLS_HEADER)
+                    )
+                } else {
+                    OptimizerCalculator.analyze(
+                        values = mergedValues,
+                        kfldrlMap = kfldrlPair.second,
+                        kfldimxMap = kfldimxPair.second,
+                        kfpbrkMap = kfpbrkPair?.second,
+                        kfmiopMap = kfmiopPair?.second,
+                        kfmirlMap = kfmirlPair?.second,
+                        ldrxnTarget = ldrxnTarget.toDoubleOrNull() ?: 191.0,
+                        toleranceMbar = toleranceMbar.toDoubleOrNull() ?: 30.0,
+                        minThrottleAngle = minAngle,
+                        kfldimxOverheadPercent = kfldimxOverhead.toDoubleOrNull() ?: 8.0,
+                        kfurl = kfurl.toDoubleOrNull() ?: 0.106,
+                        kfurlMap = autoKfurlMap,
+                        logSummaries = summaries,
+                        kfldrq0Map = kfldrq0Pair?.second,
+                        kfldrq1Map = kfldrq1Pair?.second,
+                        kfldrq2Map = kfldrq2Pair?.second
+                    )
+                }
+
+                withContext(Dispatchers.Main) {
+                    result = analysisResult
+                    logFileName = preloadedLogDir.name
+                }
+            }
+        }
+    }
     var showProgress by remember { mutableStateOf(false) }
     var selectedTab by remember { mutableStateOf(0) }
 
-    val tabTitles = listOf("Overview", "Per-Link", "Boost Control", "VE Model", "Calibration", "Prediction", "Pulls", "Export")
+    val isMed17 = EcuPlatformPreference.platform == EcuPlatform.MED17
+    val hasKfpbrk = kfpbrkPair != null
+    val tabTitles = if (hasKfpbrk) {
+        listOf("Overview", "Per-Link", "Boost Control", "VE Model", "Calibration", "Prediction", "Pulls", "Export")
+    } else {
+        listOf("Overview", "Per-Link", "Boost Control", "Calibration", "Prediction", "Pulls", "Export")
+    }
 
     Column(
         modifier = Modifier
@@ -485,7 +588,7 @@ fun OptimizerScreen() {
                     }
                 }
             }) {
-                val buttonLabel = if (EcuPlatformPreference.platform == EcuPlatform.MED17) "Load ScorpionEFI Log Directory" else "Load ME7 Log Directory"
+                val buttonLabel = if (EcuPlatformPreference.platform == EcuPlatform.MED17) "Load DS1 Log Directory" else "Load ME7 Log Directory"
                 Text(buttonLabel)
             }
 
@@ -505,9 +608,15 @@ fun OptimizerScreen() {
                         style = MaterialTheme.typography.titleSmall
                     )
                     if (r.wotEntries.isEmpty()) {
+                        val isMed17 = EcuPlatformPreference.platform == EcuPlatform.MED17
+                        val headerList = if (isMed17) {
+                            "nmot_w, rl_w, rlsol_w (or rlmds_w), psrg_w, pvds_w, pu_w, tvldste_w (or ldtvm_w), wdkba"
+                        } else {
+                            "nmot, rl_w, rlsol_w, pvdks_w, pssol_w, pus_w, ldtvm, wdkba"
+                        }
                         Text(
                             "No WOT data found. Ensure your log contains the required headers " +
-                                "(pssol_w, rlsol_w, rl_w, pvdks_w, ldtvm, wdkba, nmot, pus_w) " +
+                                "($headerList) " +
                                 "and that throttle angle exceeds the minimum threshold.",
                             color = MaterialTheme.colorScheme.error
                         )
@@ -534,14 +643,14 @@ fun OptimizerScreen() {
             Spacer(Modifier.height(8.dp))
 
             when (selectedTab) {
-                0 -> OverviewTab(result!!)
-                1 -> PerLinkTab(result!!)
+                0 -> OverviewTab(result!!, isMed17)
+                1 -> PerLinkTab(result!!, isMed17)
                 2 -> BoostControlTab(result!!, kfldrlPair, kfldimxPair)
-                3 -> VeModelTab(result!!, kfpbrkPair, kfpbrknwPair)
-                4 -> CalibrationTab(result!!)
-                5 -> PredictionTab(result!!)
-                6 -> PullsTab(result!!)
-                7 -> ExportTab(result!!, kfldrlPair, kfldimxPair, kfpbrkPair, kfmiopPair, kfmirlPair)
+                3 -> if (hasKfpbrk) VeModelTab(result!!, kfpbrkPair, kfpbrknwPair) else CalibrationTab(result!!, kfpbrkPair, kfmirlPair)
+                4 -> if (hasKfpbrk) CalibrationTab(result!!, kfpbrkPair, kfmirlPair) else PredictionTab(result!!, isMed17)
+                5 -> if (hasKfpbrk) PredictionTab(result!!, isMed17) else PullsTab(result!!)
+                6 -> if (hasKfpbrk) PullsTab(result!!) else ExportTab(result!!, kfldrlPair, kfldimxPair, kfpbrkPair, kfmiopPair, kfmirlPair)
+                7 -> if (hasKfpbrk) ExportTab(result!!, kfldrlPair, kfldimxPair, kfpbrkPair, kfmiopPair, kfmirlPair)
             }
         }
     }
@@ -549,12 +658,71 @@ fun OptimizerScreen() {
 
 // ── Tab: Boost Control ────────────────────────────────────────────────
 
+/**
+ * Returns a cellColorProvider lambda that maps [MapDelta.Confidence] to a tinted background color.
+ */
+private fun confidenceColorProvider(mapDelta: MapDelta?): ((Int, Int) -> Color?)? {
+    if (mapDelta == null) return null
+    return { rowIdx, colIdx ->
+        when (mapDelta.cellConfidence(rowIdx, colIdx)) {
+            MapDelta.Confidence.HIGH -> Color(0x2000C853)
+            MapDelta.Confidence.MEDIUM -> Color(0x202196F3)
+            MapDelta.Confidence.LOW -> Color(0x20FFD600)
+            MapDelta.Confidence.NONE -> null
+        }
+    }
+}
+
+/**
+ * Formats a coverage summary string for a [MapDelta].
+ */
+private fun coverageSummary(mapDelta: MapDelta): String {
+    val pct = "%.0f".format(mapDelta.coverage * 100)
+    val avg = "%.1f".format(mapDelta.avgSamplesPerModifiedCell)
+    return "Coverage: $pct% (${mapDelta.cellsWithData}/${mapDelta.totalCells} cells) | Avg samples: $avg/cell"
+}
+
+@Composable
+private fun ConfidenceLegend() {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(top = 8.dp)
+    ) {
+        LegendItem(color = Color(0x2000C853).compositeOver(Color.Black), label = "High (>20)")
+        LegendItem(color = Color(0x202196F3).compositeOver(Color.Black), label = "Medium (5–20)")
+        LegendItem(color = Color(0x20FFD600).compositeOver(Color.Black), label = "Low (1–4)")
+        LegendItem(color = Color(0xFF303030), label = "Interpolated (0)")
+    }
+}
+
+@Composable
+private fun LegendItem(color: Color, label: String) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            modifier = Modifier
+                .size(12.dp)
+                .background(color, RoundedCornerShape(2.dp))
+        )
+        Text(label, style = MaterialTheme.typography.labelSmall)
+    }
+}
+
 @Composable
 private fun BoostControlTab(
     result: OptimizerCalculator.OptimizerResult,
     kfldrlPair: Pair<TableDefinition, Map3d>?,
     kfldimxPair: Pair<TableDefinition, Map3d>?
 ) {
+    val kfldrlDelta = result.suggestedMaps.kfldrl
+    val kfldimxDelta = result.suggestedMaps.kfldimx
+
+    // LDRPID import state
+    var importedKfldrl by remember { mutableStateOf<Map3d?>(null) }
+
     Column(
         modifier = Modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally
@@ -586,22 +754,64 @@ private fun BoostControlTab(
                 Text("Suggested KFLDRL", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(bottom = 8.dp))
                 if (result.suggestedKfldrl != null) {
                     Box(modifier = Modifier.heightIn(max = 400.dp)) {
-                        MapTable(map = result.suggestedKfldrl, editable = false)
+                        MapTable(
+                            map = result.suggestedKfldrl,
+                            editable = false,
+                            cellColorProvider = confidenceColorProvider(kfldrlDelta)
+                        )
+                    }
+                    if (kfldrlDelta != null) {
+                        Text(
+                            coverageSummary(kfldrlDelta),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
                     }
                     Spacer(Modifier.height(8.dp))
-                    Button(onClick = {
-                        val kfldrlDef = KfldrlPreferences.getSelectedMap()
-                        if (kfldrlDef != null) {
-                            val binFile = BinFilePreferences.getStoredFile()
-                            if (binFile.exists()) {
-                                BinWriter.write(binFile, kfldrlDef.first, result.suggestedKfldrl)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = {
+                            val kfldrlDef = KfldrlPreferences.getSelectedMap()
+                            if (kfldrlDef != null) {
+                                val binFile = BinFilePreferences.getStoredFile()
+                                if (binFile.exists()) {
+                                    BinWriter.write(binFile, kfldrlDef.first, result.suggestedKfldrl)
+                                }
                             }
+                        }) {
+                            Text("Write KFLDRL")
                         }
-                    }) {
-                        Text("Write KFLDRL")
+                        OutlinedButton(onClick = {
+                            importedKfldrl = LdrpidOptimizerBridge.importKfldrl()
+                        }) {
+                            Text("Import from LDRPID")
+                        }
                     }
                 } else {
                     Text("No suggestion (KFLDRL not configured)", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
+        // Imported LDRPID comparison
+        if (importedKfldrl != null) {
+            Spacer(Modifier.height(8.dp))
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                tonalElevation = 1.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        "LDRPID-Computed KFLDRL (comparison baseline)",
+                        style = MaterialTheme.typography.titleSmall,
+                        modifier = Modifier.padding(bottom = 8.dp)
+                    )
+                    Box(modifier = Modifier.heightIn(max = 300.dp)) {
+                        MapTable(map = importedKfldrl!!, editable = false)
+                    }
                 }
             }
         }
@@ -635,7 +845,18 @@ private fun BoostControlTab(
                 Text("Suggested KFLDIMX", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(bottom = 8.dp))
                 if (result.suggestedKfldimx != null) {
                     Box(modifier = Modifier.heightIn(max = 400.dp)) {
-                        MapTable(map = result.suggestedKfldimx, editable = false)
+                        MapTable(
+                            map = result.suggestedKfldimx,
+                            editable = false,
+                            cellColorProvider = confidenceColorProvider(kfldimxDelta)
+                        )
+                    }
+                    if (kfldimxDelta != null) {
+                        Text(
+                            coverageSummary(kfldimxDelta),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.padding(top = 4.dp)
+                        )
                     }
                     Spacer(Modifier.height(8.dp))
                     Button(onClick = {
@@ -654,6 +875,9 @@ private fun BoostControlTab(
                 }
             }
         }
+
+        // Confidence legend
+        ConfidenceLegend()
     }
 }
 
@@ -760,7 +984,7 @@ private fun VeModelTab(
 // ── Tab: Overview (Dashboard) ──────────────────────────────────────────
 
 @Composable
-private fun OverviewTab(result: OptimizerCalculator.OptimizerResult) {
+private fun OverviewTab(result: OptimizerCalculator.OptimizerResult, isMed17: Boolean = false) {
     Column(modifier = Modifier.fillMaxWidth()) {
         val diag = result.chainDiagnosis
         val entries = result.wotEntries
@@ -808,9 +1032,13 @@ private fun OverviewTab(result: OptimizerCalculator.OptimizerResult) {
                     "Link 1: LDRXN → rlsol (Torque — no high-RPM data)"
                 }
                 ChainLinkBar(link1Label, 100.0 - diag.torqueCappedPercent)
-                ChainLinkBar("Link 2: rlsol → pssol (VE Model)", 100.0 - diag.pssolErrorPercent)
+                if (!isMed17) {
+                    ChainLinkBar("Link 2: rlsol → pssol (VE Model)", 100.0 - diag.pssolErrorPercent)
+                }
                 ChainLinkBar("Link 3: pssol → pvdks (Boost Control)", 100.0 - diag.boostShortfallPercent)
-                ChainLinkBar("Link 4: pvdks → rl_w (VE Readback)", 100.0 - diag.veMismatchPercent)
+                if (!isMed17) {
+                    ChainLinkBar("Link 4: pvdks → rl_w (VE Readback)", 100.0 - diag.veMismatchPercent)
+                }
 
                 Spacer(Modifier.height(8.dp))
                 val (dominantIcon, dominantTint, dominantLabel) = when (diag.dominantError) {
@@ -831,6 +1059,26 @@ private fun OverviewTab(result: OptimizerCalculator.OptimizerResult) {
                     Spacer(Modifier.width(4.dp))
                     Text("Dominant Issue: $dominantLabel",
                         style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                }
+
+                // DS1 torque bypass info note for MED17
+                if (isMed17 && diag.torqueCappedPercent < 5.0) {
+                    Spacer(Modifier.height(8.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Filled.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(14.dp)
+                        )
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            "DS1 typically reduces KFMIOP/KFMIRL to scalar values, bypassing the torque model. " +
+                                "Low torque capping is expected when using DS1.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
         }
@@ -1130,13 +1378,19 @@ private fun PidIndicator(label: String, triggered: Boolean, detail: String) {
 // ── Tab: Per-Link Analysis ────────────────────────────────────────────
 
 @Composable
-private fun PerLinkTab(result: OptimizerCalculator.OptimizerResult) {
+private fun PerLinkTab(result: OptimizerCalculator.OptimizerResult, isMed17: Boolean = false) {
     var selectedLink by remember { mutableStateOf(0) }
-    val linkNames = listOf("Link 3: Boost", "Link 4: VE", "Link 1: Torque", "Link 2: PLSOL")
+    // MED17 only has meaningful Boost (Link 3) and Torque (Link 1) diagnostics.
+    // Links 2 (PLSOL) and 4 (VE) use adaptive fupsrl_w, not static maps.
+    val linkEntries = if (isMed17) {
+        listOf("Link 3: Boost" to 0, "Link 1: Torque" to 2)
+    } else {
+        listOf("Link 3: Boost" to 0, "Link 4: VE" to 1, "Link 1: Torque" to 2, "Link 2: PLSOL" to 3)
+    }
 
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(bottom = 8.dp)) {
-            linkNames.forEachIndexed { index, name ->
+            linkEntries.forEachIndexed { index, (name, _) ->
                 FilterChip(
                     selected = selectedLink == index,
                     onClick = { selectedLink = index },
@@ -1145,7 +1399,8 @@ private fun PerLinkTab(result: OptimizerCalculator.OptimizerResult) {
             }
         }
 
-        when (selectedLink) {
+        val contentIndex = linkEntries.getOrNull(selectedLink)?.second ?: 0
+        when (contentIndex) {
             0 -> PerLinkBoostContent(result)
             1 -> PerLinkVeContent(result)
             2 -> PerLinkTorqueContent(result)
@@ -1402,7 +1657,11 @@ private fun PerRpmTable(
 // ── Tab: Calibration (Before / After / Delta) ─────────────────────────
 
 @Composable
-private fun CalibrationTab(result: OptimizerCalculator.OptimizerResult) {
+private fun CalibrationTab(
+    result: OptimizerCalculator.OptimizerResult,
+    kfpbrkPair: Pair<data.parser.xdf.TableDefinition, domain.math.map.Map3d>? = null,
+    kfmirlPair: Pair<data.parser.xdf.TableDefinition, domain.math.map.Map3d>? = null
+) {
     Column(modifier = Modifier.fillMaxWidth()) {
         val sm = result.suggestedMaps
 
@@ -1410,7 +1669,7 @@ private fun CalibrationTab(result: OptimizerCalculator.OptimizerResult) {
             Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("No map corrections available.", style = MaterialTheme.typography.titleMedium)
-                    Text("Ensure KFLDRL and KFPBRK are configured in the Configuration tab.", style = MaterialTheme.typography.bodyMedium)
+                    Text("Ensure KFLDRL is configured in the Configuration tab.", style = MaterialTheme.typography.bodyMedium)
                 }
             }
             return
@@ -1471,7 +1730,7 @@ private fun MapDeltaCard(delta: MapDelta, chainLink: String) {
 // ── Tab: Prediction ───────────────────────────────────────────────────
 
 @Composable
-private fun PredictionTab(result: OptimizerCalculator.OptimizerResult) {
+private fun PredictionTab(result: OptimizerCalculator.OptimizerResult, isMed17: Boolean = false) {
     Column(modifier = Modifier.fillMaxWidth()) {
         val pred = result.prediction
 
@@ -1479,7 +1738,11 @@ private fun PredictionTab(result: OptimizerCalculator.OptimizerResult) {
             Card(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                 Column(modifier = Modifier.padding(16.dp)) {
                     Text("No prediction data available.", style = MaterialTheme.typography.titleMedium)
-                    Text("Ensure map corrections have been computed (KFLDRL and/or KFPBRK configured).", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (isMed17) "Ensure KFLDRL is configured and WOT log data has been loaded."
+                        else "Ensure map corrections have been computed (KFLDRL and/or KFPBRK configured).",
+                        style = MaterialTheme.typography.bodyMedium
+                    )
                 }
             }
             return
@@ -1504,7 +1767,9 @@ private fun PredictionTab(result: OptimizerCalculator.OptimizerResult) {
                     Text("Change", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
                 }
                 HorizontalDivider()
-                PredictionRow("Avg Load Deficit", pred.currentAvgLoadDeficit, pred.predictedAvgLoadDeficit, "%")
+                if (!isMed17) {
+                    PredictionRow("Avg Load Deficit", pred.currentAvgLoadDeficit, pred.predictedAvgLoadDeficit, "%")
+                }
                 PredictionRow("Avg Pressure Error", pred.currentAvgPressureError, pred.predictedAvgPressureError, " mbar")
             }
         }
@@ -1516,9 +1781,13 @@ private fun PredictionTab(result: OptimizerCalculator.OptimizerResult) {
                 Spacer(Modifier.height(8.dp))
                 val predDiag = pred.predictedChainHealth
                 ChainLinkBar("Link 1: LDRXN → rlsol", 100.0 - predDiag.torqueCappedPercent)
-                ChainLinkBar("Link 2: rlsol → pssol", 100.0 - predDiag.pssolErrorPercent)
+                if (!isMed17) {
+                    ChainLinkBar("Link 2: rlsol → pssol", 100.0 - predDiag.pssolErrorPercent)
+                }
                 ChainLinkBar("Link 3: pssol → pvdks", 100.0 - predDiag.boostShortfallPercent)
-                ChainLinkBar("Link 4: pvdks → rl_w", 100.0 - predDiag.veMismatchPercent)
+                if (!isMed17) {
+                    ChainLinkBar("Link 4: pvdks → rl_w", 100.0 - predDiag.veMismatchPercent)
+                }
             }
         }
 
@@ -1943,7 +2212,7 @@ private fun ExportTab(
                     // XDF Patch Export
                     Button(onClick = {
                         val dialog = FileDialog(Frame(), "Save XDF Patch", FileDialog.SAVE)
-                        dialog.file = "ME7Tuner_corrections.xdf"
+                        dialog.file = "MxT_corrections.xdf"
                         dialog.isVisible = true
                         val dir = dialog.directory
                         val file = dialog.file
@@ -1968,7 +2237,7 @@ private fun ExportTab(
                     // HTML Report Export
                     Button(onClick = {
                         val dialog = FileDialog(Frame(), "Save HTML Report", FileDialog.SAVE)
-                        dialog.file = "ME7Tuner_report.html"
+                        dialog.file = "MxT_report.html"
                         dialog.isVisible = true
                         val dir = dialog.directory
                         val file = dialog.file

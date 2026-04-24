@@ -56,6 +56,10 @@ object Med17LogAdapter {
         // MED17 doesn't have a separate "rl" vs "rl_w" — use rl_w for both
         mapSignal(med17Values, Med17LogFileContract.Header.ENGINE_LOAD_HEADER, result, Me7LogFileContract.Header.ACTUAL_LOAD_HEADER)
 
+        // Enhanced signals for optimizer diagnostics (H1: KFLDHBN, H2: IAT)
+        mapSignal(med17Values, Med17LogFileContract.Header.INTAKE_TEMPERATURE_HEADER, result, Me7LogFileContract.Header.INTAKE_TEMPERATURE_HEADER)
+        mapSignal(med17Values, Med17LogFileContract.Header.REQUESTED_PRESSURE_MAX_HEADER, result, Me7LogFileContract.Header.REQUESTED_PRESSURE_MAX_HEADER)
+
         return result
     }
 

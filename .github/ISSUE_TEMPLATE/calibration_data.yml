@@ -1,0 +1,63 @@
+name: Calibration Data Contribution
+description: Contribute ECU profiles, DAMOS files, test logs, or other calibration data
+title: "[Data]: "
+labels: ["calibration-data"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for contributing calibration data! Community-sourced profiles and data help everyone tune more safely.
+
+  - type: input
+    id: platform-variant
+    attributes:
+      label: Platform and ECU variant
+      description: "e.g., ME7.1 (8D0 907 558 S), MED17.1.1 (8S0 907 404 A)"
+      placeholder: "ME7.x (part number)"
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: data-type
+    attributes:
+      label: Data type
+      description: What kind of data are you contributing?
+      options:
+        - label: BIN / ROM dump
+        - label: XDF definition
+        - label: A2L file
+        - label: DAMOS file
+        - label: Log files (ME7Logger / MED17 / AFR)
+        - label: ".ecu / .cfg files"
+        - label: Profile (.mxtprofile.json)
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What's included, how it was obtained, and any relevant context
+      placeholder: |
+        Stock BIN from 2001 Audi S4 B5 (APB engine code).
+        XDF adapted from community base with corrected MLHFM addresses.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: validation
+    attributes:
+      label: Validation status
+      description: Have you verified this data works in MxT?
+      options:
+        - Verified — tested in MxT
+        - Partially verified — some features tested
+        - Not verified — untested
+    validations:
+      required: true
+
+  - type: textarea
+    id: files
+    attributes:
+      label: Files
+      description: Attach files or link to them
+    validations:
+      required: false

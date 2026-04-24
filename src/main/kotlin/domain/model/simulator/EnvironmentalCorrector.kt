@@ -65,31 +65,61 @@ object EnvironmentalCorrector {
                 "KFLDRL suggestions may need KFLDIOPU altitude correction.")
         }
 
-        // Finding 4: KFTARX intake air temperature correction warning
-        // ME7 Reference: LDRLMX 3.100 (line 142587)
-        // KFTARX reduces effective LDRXN above tans ≈ 75°C.
-        // We check for high ambient conditions using barometric pressure as a rough
-        // indicator (low baro + high altitude = higher density altitude).
-        // Since we can't read tans directly from most logs, we warn conservatively
-        // when conditions suggest hot intake air.
-        val kftarxWarning = false  // Will be set when tans is available from logs
+        // H2/M3: Real intake air temperature analysis
+        // FR reference: KFTARX (me7-raw.txt line 142472, 142587-142589)
+        // KFTARX = 1.0 until 75°C, then multiplicatively reduces LDRXN
+        val hasIat = wotEntries.any { it.intakeAirTemp != STANDARD_INTAKE_TEMP_C }
+        val avgIat = if (hasIat) wotEntries.map { it.intakeAirTemp }.average() else null
+        val iatRange = if (hasIat) {
+            Pair(wotEntries.minOf { it.intakeAirTemp }, wotEntries.maxOf { it.intakeAirTemp })
+        } else null
 
-        // Check for potential intake temp issues from very low barometric pressure
-        // (high altitude + heat = especially bad for charge air temps)
-        if (altitudeDeviation && avgBaro < 950) {
-            warnings.add("🌡️ High altitude (${String.format("%.0f", altitudeM)}m) with low baro pressure — " +
-                "charge air temperatures may be elevated. KFTARX (me7-raw.txt line 142587) " +
-                "reduces effective LDRXN above tans > 75°C. Monitor intake air temps.")
+        var kftarxWarning = false
+        val tempDeviation: Boolean
+
+        if (hasIat && avgIat != null) {
+            tempDeviation = abs(avgIat - STANDARD_INTAKE_TEMP_C) > 15.0
+
+            if (tempDeviation) {
+                // Quantify ftbr impact: ftbr ≈ √(273/(evtmod+273)), evtmod ≈ tans for turbo (KFFWTBR≈0)
+                val ftbrStandard = kotlin.math.sqrt(273.0 / (STANDARD_INTAKE_TEMP_C + 273.0))
+                val ftbrActual = kotlin.math.sqrt(273.0 / (avgIat + 273.0))
+                val pssolShiftPct = ((ftbrStandard / ftbrActual) - 1.0) * 100.0
+                warnings.add("🌡️ IAT deviation: avg charge air temp ${String.format("%.0f", avgIat)}°C " +
+                    "(range ${String.format("%.0f", iatRange!!.first)}–${String.format("%.0f", iatRange.second)}°C). " +
+                    "pssol shifts ${String.format("%+.1f", pssolShiftPct)}% vs 20°C reference. " +
+                    "KFLDRL/KFPBRK suggestions account for this via ftbr correction.")
+            }
+
+            val maxIat = wotEntries.maxOf { it.intakeAirTemp }
+            if (maxIat > 75.0) {
+                kftarxWarning = true
+                warnings.add("⚠️ CRITICAL: Peak IAT ${String.format("%.0f", maxIat)}°C exceeds KFTARX threshold (75°C). " +
+                    "ECU is reducing max load (rlmx) via KFTARX (me7-raw.txt line 142587). " +
+                    "rlsol may not reach LDRXN even with correct KFMIOP/KFMIRL. " +
+                    "Improve intercooling or adjust KFTARX calibration.")
+            } else if (maxIat > 60.0) {
+                warnings.add("🌡️ Elevated IAT: peak ${String.format("%.0f", maxIat)}°C approaching KFTARX " +
+                    "threshold (75°C). Consider intercooler capacity at sustained WOT.")
+            }
+        } else {
+            tempDeviation = false
+            // Fall back to barometric inference (original behavior)
+            if (altitudeDeviation && avgBaro < 950) {
+                warnings.add("🌡️ High altitude (${String.format("%.0f", altitudeM)}m) with low baro pressure — " +
+                    "charge air temperatures may be elevated. KFTARX (me7-raw.txt line 142587) " +
+                    "reduces effective LDRXN above tans > 75°C. Monitor intake air temps.")
+            }
         }
 
         return EnvironmentalSummary(
             avgBaroPressure = avgBaro,
             estimatedAltitudeM = altitudeM,
-            avgIntakeTemp = null,  // Not yet available from standard log headers
+            avgIntakeTemp = avgIat,
             avgCoolantTemp = null,
-            intakeTempRange = null,
+            intakeTempRange = iatRange,
             altitudeDeviation = altitudeDeviation,
-            tempDeviation = false,
+            tempDeviation = tempDeviation,
             kftarxWarning = kftarxWarning,
             warnings = warnings
         )

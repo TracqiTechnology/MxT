@@ -123,7 +123,7 @@ object IterativeConvergence {
             } else null
 
             val kfldimxDelta = if (kfldrlDelta != null && currentKfldimx != null) {
-                OptimizerCalculator.suggestKfldimxDelta(kfldrlDelta, currentKfldimx, kfldimxOverheadPercent)
+                OptimizerCalculator.suggestKfldimxDelta(wotEntries, kfldrlDelta, currentKfldimx, kfldimxOverheadPercent)
             } else null
 
             val kfpbrkDelta = if (currentKfpbrk != null) {

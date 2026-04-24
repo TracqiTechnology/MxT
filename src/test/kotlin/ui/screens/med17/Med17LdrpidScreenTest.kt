@@ -119,7 +119,7 @@ class Med17LdrpidScreenTest : Med17ScreenTestBase() {
             ui.screens.ldrpid.LdrpidScreen()
         }
 
-        onNodeWithText("Load ScorpionEFI Logs").assertExists()
+        onNodeWithText("Load DS1 Logs").assertExists()
     }
 
     @Test

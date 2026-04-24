@@ -16,7 +16,7 @@ OUT.mkdir(parents=True, exist_ok=True)
 FONT_DISPLAY = str(ROOT / "src" / "main" / "resources" / "fonts" / "Orbitron-Bold.ttf")
 FONT_BODY = str(ROOT / "src" / "main" / "resources" / "fonts" / "JetBrainsMono-Regular.ttf")
 
-# ── Brand Colors (from ME7TunerTheme.kt) ──────────────────────────────────
+# ── Brand Colors (from MxTTheme.kt) ──────────────────────────────────
 BACKGROUND = "#18130A"
 SURFACE_HIGH = "#2F291F"
 ON_SURFACE = "#EDE1D1"

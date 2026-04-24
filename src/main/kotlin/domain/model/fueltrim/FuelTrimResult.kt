@@ -56,3 +56,66 @@ data class FuelTrimResult(
         return result
     }
 }
+
+/**
+ * Per-cell diagnostic information from fuel trim analysis.
+ *
+ * Each cell in the RPM × Load grid has a diagnostic that reports sample count,
+ * mean trim, standard deviation, and whether the cell was rejected.
+ */
+data class FuelTrimCellDiagnostic(
+    val rpmBin: Double,
+    val loadBin: Double,
+    val sampleCount: Int,
+    val meanTrimPercent: Double,
+    val stdDevPercent: Double,
+    /** The correction applied to rk_w — 0.0 if the bin was rejected or within threshold. */
+    val correctionApplied: Double,
+    val rejected: Boolean,
+    val rejectReason: String?
+)
+
+/**
+ * Extended fuel trim analysis result with per-cell diagnostics and
+ * closed-loop stability filtering statistics.
+ *
+ * @param corrections Per-bin correction (%) — `[rpmIdx][loadIdx]`
+ * @param diagnostics Per-cell diagnostic detail — `[rpmIdx][loadIdx]`
+ * @param rpmBins RPM axis values for the correction grid
+ * @param loadBins Engine load (%) axis values for the correction grid
+ * @param totalSamplesProcessed Total log rows examined (before filtering)
+ * @param samplesFilteredOut Rows rejected by closed-loop / lambda filters
+ * @param binsWithData Bins that received at least one post-filter sample
+ * @param binsRejected Bins rejected (high std_dev or insufficient samples)
+ * @param warnings Diagnostic messages
+ */
+data class FuelTrimDiagnosticResult(
+    val corrections: Array<DoubleArray>,
+    val diagnostics: Array<Array<FuelTrimCellDiagnostic>>,
+    val rpmBins: DoubleArray,
+    val loadBins: DoubleArray,
+    val totalSamplesProcessed: Int,
+    val samplesFilteredOut: Int,
+    val binsWithData: Int,
+    val binsRejected: Int,
+    val warnings: List<String>
+) {
+    /** True when every correction bin is zero. */
+    val isEmpty: Boolean
+        get() = corrections.all { row -> row.all { it == 0.0 } }
+
+    /** Corrections as a Map3d (xAxis=load, yAxis=RPM). */
+    fun toCorrectionsMap3d(): Map3d = Map3d(
+        loadBins.toTypedArray(),
+        rpmBins.toTypedArray(),
+        corrections.map { it.toTypedArray() }.toTypedArray()
+    )
+
+    /** Convert to a basic [FuelTrimResult] for backward-compatible consumption. */
+    fun toFuelTrimResult(): FuelTrimResult {
+        val avgTrims = Array(rpmBins.size) { r ->
+            DoubleArray(loadBins.size) { l -> diagnostics[r][l].meanTrimPercent }
+        }
+        return FuelTrimResult(rpmBins, loadBins, avgTrims, corrections, warnings)
+    }
+}

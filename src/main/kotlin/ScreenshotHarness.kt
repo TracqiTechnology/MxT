@@ -42,10 +42,11 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.jetbrains.skia.EncodedImageFormat
 import ui.navigation.CalibrationTab
-import ui.navigation.ME7TunerApp
+import ui.navigation.MxTApp
 import ui.navigation.NavigationState
 import ui.navigation.RailDestination
-import ui.theme.ME7TunerTheme
+import ui.navigation.ToolsTab
+import ui.theme.MxTTheme
 import java.io.File
 import java.util.Locale
 
@@ -110,7 +111,7 @@ fun main() {
                         color = MaterialTheme.colorScheme.primaryContainer
                     )
                     Text(
-                        text = "ME7Tuner",
+                        text = "MxT",
                         style = MaterialTheme.typography.labelMedium.copy(fontSize = 16.sp),
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -125,69 +126,69 @@ fun main() {
     captureScreen("me7Tuner.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.FUELING)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreen("krkte.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.FUELING)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // Configuration
     captureScreen("configuration.png") {
         val navState = NavigationState()
         navState.navigateTo(RailDestination.CONFIGURATION)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // PLSOL
     captureScreen("plsol.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.PLSOL)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFMIOP
     captureScreen("kfmiop.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFMIOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFMIRL
     captureScreen("kfmirl.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFMIRL)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFZWOP
     captureScreen("kfzwop.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFZWOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFZW
     captureScreen("kfzw.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFZW)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // WDKUGDN
     captureScreen("wdkugdn.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.WDKUGDN)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // LDRPID (no log data — renders in ready state)
     captureScreen("ldrpid.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.LDRPID)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // --- Log-dependent screens ---
@@ -196,14 +197,14 @@ fun main() {
     captureScreen("closed_loop_mlhfm.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.CLOSED_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // Open Loop: empty state (no log data)
     captureScreen("open_loop_mlhfm.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.OPEN_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFVPDKSD: load logs
@@ -215,7 +216,7 @@ fun main() {
     ) {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFVPDKSD)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // --- Closed Loop sub-tab screenshots (all need log data) ---
@@ -227,7 +228,7 @@ fun main() {
         val navState = NavigationState()
         navState.closedLoopTab = 0
         navState.navigateToCalibration(CalibrationTab.CLOSED_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithLogData(
@@ -238,7 +239,7 @@ fun main() {
         navState.closedLoopTab = 2
         navState.closedLoopCorrectionSubTab = 0
         navState.navigateToCalibration(CalibrationTab.CLOSED_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithLogData(
@@ -249,7 +250,7 @@ fun main() {
         navState.closedLoopTab = 2
         navState.closedLoopCorrectionSubTab = 1
         navState.navigateToCalibration(CalibrationTab.CLOSED_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithLogData(
@@ -260,7 +261,7 @@ fun main() {
         navState.closedLoopTab = 2
         navState.closedLoopCorrectionSubTab = 2
         navState.navigateToCalibration(CalibrationTab.CLOSED_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithLogData(
@@ -272,7 +273,7 @@ fun main() {
         navState.closedLoopCorrectionSubTab = 2
         navState.autoFitDegree = 6
         navState.navigateToCalibration(CalibrationTab.CLOSED_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // --- Open Loop sub-tab screenshots (all need log data) ---
@@ -288,7 +289,7 @@ fun main() {
         navState.openLoopTab = 0
         navState.openLoopLogSubTab = 0
         navState.navigateToCalibration(CalibrationTab.OPEN_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithLogData(
@@ -302,7 +303,7 @@ fun main() {
         navState.openLoopTab = 0
         navState.openLoopLogSubTab = 1
         navState.navigateToCalibration(CalibrationTab.OPEN_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithTwoPhaseLogData(
@@ -314,7 +315,7 @@ fun main() {
         navState.openLoopTab = 2
         navState.openLoopCorrectionSubTab = 0
         navState.navigateToCalibration(CalibrationTab.OPEN_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithTwoPhaseLogData(
@@ -326,7 +327,7 @@ fun main() {
         navState.openLoopTab = 2
         navState.openLoopCorrectionSubTab = 1
         navState.navigateToCalibration(CalibrationTab.OPEN_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreenWithTwoPhaseLogData(
@@ -339,7 +340,7 @@ fun main() {
         navState.openLoopCorrectionSubTab = 0
         navState.autoFitDegree = 6
         navState.navigateToCalibration(CalibrationTab.OPEN_LOOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // --- PLSOL sub-tab screenshots (no log data needed) ---
@@ -348,126 +349,185 @@ fun main() {
         val navState = NavigationState()
         navState.plsolTab = 1
         navState.navigateToCalibration(CalibrationTab.PLSOL)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     captureScreen("plsol_power.png") {
         val navState = NavigationState()
         navState.plsolTab = 2
         navState.navigateToCalibration(CalibrationTab.PLSOL)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     println("All ME7 screenshots generated.\n")
+
+    // --- Tools Screenshots (platform-independent) ---
+    println("\n--- Tools Screenshots ---")
+
+    // A2L → ECU Generator (empty state — shows UI layout)
+    captureScreen("tools/a2l_generator.png") {
+        val navState = NavigationState()
+        navState.navigateToTools(ToolsTab.A2L_GENERATOR)
+        MxTApp(navState)
+    }
+
+    // Data Logger — Connection tab (empty state)
+    captureScreen("tools/logger_connection.png") {
+        val navState = NavigationState()
+        navState.navigateToTools(ToolsTab.LOGGER)
+        MxTApp(navState)
+    }
+
+    // Axis Rescaler — preload with KFLDRL map data from BIN (2D with proper axes)
+    val rescalerMap = BinParser.mapList.value.firstOrNull {
+        it.first.tableName.contains("KFLDRL", ignoreCase = true) ||
+            it.first.tableDescription.contains("KFLDRL", ignoreCase = true)
+    }?.second
+    captureScreen("tools/axis_rescaler.png", height = 1400) {
+        val navState = NavigationState()
+        navState.axisRescalerPreloadMap = rescalerMap
+        navState.navigateToTools(ToolsTab.AXIS_RESCALER)
+        MxTApp(navState)
+    }
+
+    println("All Tools screenshots generated.\n")
 
     // --- MED17 Screenshots ---
     println("\n--- MED17 Screenshots ---")
     EcuPlatformPreference.platform = EcuPlatform.MED17
 
-    // Load MED17 XDF+BIN
-    XdfFilePreferences.setFile(File("technical/med17/Audi_RS3vlmspec_Gv004.xdf"))
-    BinFilePreferences.setFile(File("technical/med17/OTS tunes/404J/MED17_1_62_STOCK.bin"))
+    // Load MED17 XDF+BIN (404E has proper map descriptions for auto-select)
+    XdfFilePreferences.setFile(File("example/med17/404E/404E_normal.xdf"))
+    BinFilePreferences.setFile(File("example/med17/404E/MED17_1_62_STOCK.bin"))
 
-    // Wait for re-parse
+    // Wait for 404E XDF to parse and BIN to re-parse (look for a 404E-specific table title)
     println("Waiting for MED17 BIN parsing...")
-    runBlocking { BinParser.mapList.first { it.isNotEmpty() } }
+    runBlocking {
+        BinParser.mapList.first { maps ->
+            maps.any { it.first.tableName == "Opt eng tq" }
+        }
+    }
     println("MED17 BIN parsed: ${BinParser.mapList.value.size} maps loaded")
 
-    // Auto-select MED17 maps
+    // Auto-select MED17 maps (searches tableName + tableDescription)
     autoSelectMap(KrktePreferences, "KRKTE")
     autoSelectMap(KfmiopPreferences, "KFMIOP")
     autoSelectMap(KfmirlPreferences, "KFMIRL")
     autoSelectMap(KfzwopPreferences, "KFZWOP")
     autoSelectMap(KfzwPreferences, "KFZW")
     autoSelectMap(KfldrlPreferences, "KFLDRL")
-    autoSelectMap(KfldimxPreferences, "KFLDIMX")
-    autoSelectMap(RkwPreferences, "rk_w")
+    autoSelectMap(KfldimxPreferences, "KFLDIMX plsolr")
+    autoSelectMap(RkwPreferences, "InjSys_RelMCorHom1_MAP Gasoline 0")
 
     val med17OutputDir = File("documentation/images/med17")
     med17OutputDir.mkdirs()
+
+    val med17LogDir = File("example/med17/logs/aggressive-tune")
 
     // MED17 hero shot / overview
     captureScreen("med17/me7Tuner_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.FUELING)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // MED17 Configuration
     captureScreen("med17/configuration_med17.png") {
         val navState = NavigationState()
         navState.navigateTo(RailDestination.CONFIGURATION)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
-    // Dual Injection (MED17-only tab)
-    captureScreen("med17/dual_injection.png") {
+    // Dual Injection — Split Calculator tab with RPM sweep computed
+    captureScreen("med17/dual_injection.png", height = 1400) {
         val navState = NavigationState()
+        navState.dualInjectionTab = 2
+        navState.dualInjectionKrktePfi = "0.066"
+        navState.dualInjectionKrkteGdi = "0.045"
         navState.navigateToCalibration(CalibrationTab.DUAL_INJECTION)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFMIOP in MED17 mode
     captureScreen("med17/kfmiop_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFMIOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFMIRL in MED17 mode
     captureScreen("med17/kfmirl_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFMIRL)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
-    // LDRPID in MED17 mode
-    captureScreen("med17/ldrpid_med17.png") {
+    // LDRPID in MED17 mode — with WOT log data loaded
+    captureScreenWithLogData(
+        filename = "med17/ldrpid_med17.png",
+        height = 1200,
+        loadData = { Thread.sleep(500) }
+    ) {
         val navState = NavigationState()
+        navState.ldrpidLogDir = med17LogDir
         navState.navigateToCalibration(CalibrationTab.LDRPID)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // PLSOL in MED17 mode
     captureScreen("med17/plsol_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.PLSOL)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
-    // Optimizer in MED17 mode
-    captureScreen("med17/optimizer_med17.png") {
+    // Optimizer in MED17 mode — with WOT log data loaded
+    captureScreenWithLogData(
+        filename = "med17/optimizer_med17.png",
+        height = 1400,
+        loadData = { Thread.sleep(100) }
+    ) {
         val navState = NavigationState()
+        navState.optimizerLogDir = med17LogDir
         navState.navigateToOptimizer()
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
-    // Fuel Trim (MED17-only)
-    captureScreen("med17/fuel_trim_med17.png") {
+    // Fuel Trim (MED17-only) — with fuel trim log data loaded
+    val fuelTrimLogs = File("example/med17/logs").listFiles()
+        ?.filter { it.isFile && it.name.endsWith(".csv", ignoreCase = true) }
+        ?.take(3)
+        ?: emptyList()
+    captureScreenWithLogData(
+        filename = "med17/fuel_trim_med17.png",
+        height = 1800,
+        loadData = { Thread.sleep(100) }
+    ) {
         val navState = NavigationState()
+        navState.fuelTrimLogFiles = fuelTrimLogs
         navState.navigateToCalibration(CalibrationTab.FUEL_TRIM)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFZWOP in MED17 mode
     captureScreen("med17/kfzwop_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFZWOP)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // KFZW in MED17 mode
     captureScreen("med17/kfzw_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.KFZW)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // Fueling in MED17 mode (KRKTE with dual presets)
     captureScreen("med17/fueling_med17.png") {
         val navState = NavigationState()
         navState.navigateToCalibration(CalibrationTab.FUELING)
-        ME7TunerApp(navState)
+        MxTApp(navState)
     }
 
     // Restore ME7 platform
@@ -478,7 +538,10 @@ fun main() {
 
 private fun autoSelectMap(preference: MapPreference, keyword: String) {
     val match = BinParser.mapList.value.firstOrNull {
-        it.first.tableName.contains(keyword, ignoreCase = true)
+        val name = it.first.tableName
+        val desc = it.first.tableDescription
+        !name.startsWith("Axis:", ignoreCase = true) &&
+            (name.contains(keyword, ignoreCase = true) || desc.contains(keyword, ignoreCase = true))
     }
     if (match != null) {
         preference.setSelectedMap(match.first)
@@ -496,7 +559,7 @@ private fun captureScreen(
 ) {
     print("Capturing $filename...")
     val scene = ImageComposeScene(width, height, density = Density(1f)) {
-        ME7TunerTheme { content() }
+        MxTTheme { content() }
     }
     // Render multiple frames to settle LaunchedEffects and collectAsState
     repeat(20) { scene.render(it * 16_000_000L) }
@@ -517,20 +580,20 @@ private fun captureScreenWithLogData(
 ) {
     print("Capturing $filename (with log data)...")
     val scene = ImageComposeScene(width, height, density = Density(1f)) {
-        ME7TunerTheme { content() }
+        MxTTheme { content() }
     }
     // Initial render to start LaunchedEffect collectors
-    repeat(5) { scene.render(it * 16_000_000L) }
+    repeat(10) { scene.render(it * 16_000_000L) }
 
     // Trigger log parsing (emits to SharedFlow)
     loadData()
 
     // Allow time for async parsing and state propagation
-    Thread.sleep(2000)
+    Thread.sleep(4000)
 
     // Render many frames to let state propagate through compose tree
-    repeat(30) { scene.render((it + 5) * 16_000_000L) }
-    val image = scene.render(560_000_000L)
+    repeat(40) { scene.render((it + 10) * 16_000_000L) }
+    val image = scene.render(800_000_000L)
     val data = image.encodeToData(EncodedImageFormat.PNG)
         ?: error("Failed to encode $filename to PNG")
     File("documentation/images/$filename").writeBytes(data.bytes)
@@ -552,7 +615,7 @@ private fun captureScreenWithTwoPhaseLogData(
 ) {
     print("Capturing $filename (with log data)...")
     val scene = ImageComposeScene(width, height, density = Density(1f)) {
-        ME7TunerTheme { content() }
+        MxTTheme { content() }
     }
     // Initial render to start LaunchedEffect collectors
     repeat(5) { scene.render(it * 16_000_000L) }

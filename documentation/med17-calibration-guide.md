@@ -1,6 +1,6 @@
 # MED17 Calibration Guide
 
-This guide covers calibration workflows for Bosch MED17 ECUs — Audi RS3/TTRS 2.5T TFSI (EA855 EVO), 4.0T TFSI, 5.2 V10, and related platforms. For ME7 (B5 S4 2.7T, 1.8T), see the [ME7 Calibration Guide](me7-calibration-guide.md).
+This guide covers calibration workflows for Bosch MED17 ECUs — Audi RS3/TTRS 2.5T TFSI (EA855 EVO), 4.0T TFSI, 5.2 V10, and related platforms. For ME7 (B5 S4 2.7T, 1.8T), see the [ME7 Calibration Guide](me7-calibration-guide.md). For Motronic or MED9, see the [Motronic](../technical/motronic/motronic-tuning-workflow.md) and [MED9](../technical/med9/med9-tuning-workflow.md) tuning workflows.
 
 Calibration order matters. Start with fueling (both port and direct injectors), then torque/load tables, then boost PID. MED17's adaptive VE model eliminates the need for manual MAF scaling, and the throttle control architecture is handled internally — so the tools that apply to ME7 (MLHFM, KFVPDKSD, WDKUGDN, Alpha-N) are not covered here. One less thing to calibrate, one less thing to get wrong.
 
@@ -22,11 +22,11 @@ MED17 follows the same torque-based architecture as ME7 — torque request, load
 | Torque Tables | KFMIOP / KFMIRL | KFLMIOP / KFLMIRL (same math, different names) |
 | Fuel Trim | Closed/Open Loop (MAF correction via O2) | rk_w STFT/LTFT analysis (Fuel Trim tab) |
 | Boost PID | KFLDRL / KFLDIMX | Same maps, same PID — but non-linear response with aftermarket hardware |
-| Log Format | ME7Logger CSV | ScorpionEFI CSV |
+| Log Format | ME7Logger CSV | DS1 CSV |
 
 The most significant architectural difference is the adaptive VE model. ME7 uses static maps (KFURL, KFPBRK) to convert between pressure and load — if you change hardware, you have to recalibrate those maps manually. MED17 replaces this with an adaptive volumetric efficiency value (`fupsrls_w`, approximately 0.091 for the 2.5T at standard conditions) that the ECU adjusts continuously. This means you never have to manually scale the MAF or fiddle with VE correction factors. The ECU handles it. When the adaptive model drifts (hardware changes, altitude, aging), the ECU compensates through fuel trims — and the Fuel Trim tool corrects those.
 
-ME7Tuner automatically shows only the tabs relevant to your platform. Switch between ME7 and MED17 in the Configuration tab.
+MxT automatically shows only the tabs relevant to your platform. Select your platform (ME7, MED17, Motronic, or MED9) in the Configuration tab.
 
 ---
 
@@ -127,13 +127,13 @@ The Fuel Trim tab is the MED17 equivalent of the ME7 Closed Loop MLHFM workflow.
 
 The FuelTrimAnalyzer works as follows:
 
-1. **Parse logs:** Load one or more ScorpionEFI CSV files containing fuel trim data
+1. **Parse logs:** Load one or more DS1 CSV files containing fuel trim data
 2. **Bin samples:** Each sample's RPM (`nmot_w`) and load (`rl_w`) are snapped to the nearest `rk_w` grid cell. The combined trim `(STFT - 1.0) + (LTFT - 1.0)` is accumulated per cell as a percentage
 3. **Average:** Cells with at least 3 samples get an average correction. Cells below the sample threshold are left uncorrected
 4. **Apply:** The corrected `rk_w` value is `original_value * (1 + correction% / 100)` — positive correction adds fuel, negative removes it
 5. **Flag outliers:** Cells where the average trim exceeds +/-3% are flagged with warnings and sample counts
 
-### What to Log (ScorpionEFI)
+### What to Log (DS1)
 
 | Signal | Purpose |
 |--------|---------|
@@ -148,7 +148,7 @@ Log at a variety of RPM and load conditions — idle, cruise, part-throttle, lig
 
 1. Select the `rk_w` map definition in the Configuration tab
 2. Open the **Fuel Trim** tab (visible only in MED17 mode)
-3. Load one or more ScorpionEFI CSV logs using the file picker
+3. Load one or more DS1 CSV logs using the file picker
 4. Review the per-bin average trims — look for systematic patterns (e.g., consistently rich at high RPM, lean at low load)
 5. Review the corrected `rk_w` output map
 6. Write the corrected `rk_w` to your BIN
@@ -177,19 +177,19 @@ MED17's live VE value (`fupsrls_w`) is approximately 0.091 for the 2.5T TFSI at 
 
 ### Log Overlay
 
-PLSOL supports loading a directory of ScorpionEFI logs to overlay actual WOT data points on the pressure/load chart. The logged points appear in green alongside the theoretical curves — so you can see exactly where your hardware is operating relative to the model. On MED17, the overlay extracts the mean `fupsrls_w` (≈ KFURL) directly from the logs and auto-fills it into the calculator. No guessing, no manual entry.
+PLSOL supports loading a directory of DS1 logs to overlay actual WOT data points on the pressure/load chart. The logged points appear in green alongside the theoretical curves — so you can see exactly where your hardware is operating relative to the model. On MED17, the overlay extracts the mean `fupsrls_w` (≈ KFURL) directly from the logs and auto-fills it into the calculator. No guessing, no manual entry.
 
 <img src="/documentation/images/med17/plsol_med17.png" width="800">
 
 ### PLSOL -> Airflow (Pressure to Airflow)
 
-ME7Tuner calculates estimated airflow for a given load based on engine displacement (in liters) and RPM. This tells you whether your intake system can support the load you're requesting.
+MxT calculates estimated airflow for a given load based on engine displacement (in liters) and RPM. This tells you whether your intake system can support the load you're requesting.
 
 <img src="/documentation/images/plsol_airflow.png" width="800">
 
 ### PLSOL -> Power (Pressure to Horsepower)
 
-ME7Tuner calculates estimated horsepower for a given load based on engine displacement (in liters) and RPM.
+MxT calculates estimated horsepower for a given load based on engine displacement (in liters) and RPM.
 
 <img src="/documentation/images/plsol_power.png" width="800">
 
@@ -201,7 +201,7 @@ KFLMIOP is the optimum torque table — and it's the map that confuses more peop
 
 ### DS1 Scalar Mode
 
-On MED17 with DS1 aftermarket calibrations, KFLMIOP is often reduced to a **scalar constant** (a 1x1 map with no axes). DS1 bypasses the native torque-demand architecture entirely — it uses only the boost pressure target as the output regulator, so the full torque normalization table is unnecessary. ME7Tuner auto-detects this condition and switches to scalar rescaling mode. Instead of the full table rescale workflow, you just enter a target max load percentage and ME7Tuner handles the rest. The KFLMIOP scalar is typically set to 400% on stock DS1 setups.
+On MED17 with DS1 aftermarket calibrations, KFLMIOP is often reduced to a **scalar constant** (a 1x1 map with no axes). DS1 bypasses the native torque-demand architecture entirely — it uses only the boost pressure target as the output regulator, so the full torque normalization table is unnecessary. MxT auto-detects this condition and switches to scalar rescaling mode. Instead of the full table rescale workflow, you just enter a target max load percentage and MxT handles the rest. The KFLMIOP scalar is typically set to 400% on stock DS1 setups.
 
 Understanding this normalization is the key to everything that follows. Get it right and the rest of the calibration tables fall into place. Get it wrong and you'll spend weeks chasing torque monitoring interventions that make no sense.
 
@@ -215,7 +215,7 @@ KFLMIOP describes the optimum engine torque at each load/RPM point, but it does 
 
 This is the part that breaks when you change hardware. If you upgrade to bigger turbos that can produce more pressure than the MAP sensor can measure, you need a bigger MAP sensor — and the moment you change the MAP sensor limit, *the denominator changes for every cell in the table*. KFLMIOP needs to be rescaled, not extrapolated.
 
-ME7Tuner handles this by taking your new maximum MAP pressure, rescaling the load axis via PLSOL, and then renormalizing the torque values. KFLMIOP can also be converted to a boost table via the PLSOL calculation after you've derived peak load. Unless you have access to a dyno, there's no way to derive OEM-quality KFLMIOP for your specific hardware. ME7Tuner's rescaling is a principled approximation — better than extrapolating or just widening the axis and hoping for the best.
+MxT handles this by taking your new maximum MAP pressure, rescaling the load axis via PLSOL, and then renormalizing the torque values. KFLMIOP can also be converted to a boost table via the PLSOL calculation after you've derived peak load. Unless you have access to a dyno, there's no way to derive OEM-quality KFLMIOP for your specific hardware. MxT's rescaling is a principled approximation — better than extrapolating or just widening the axis and hoping for the best.
 
 Additional empirical tuning points:
 
@@ -224,10 +224,10 @@ Additional empirical tuning points:
 
 ### Usage
 
-* On the left side, ME7Tuner analyzes the current KFLMIOP and estimates the MAP sensor upper limit and the real-world pressure limit of the existing calibration
+* On the left side, MxT analyzes the current KFLMIOP and estimates the MAP sensor upper limit and the real-world pressure limit of the existing calibration
 * Based on the analysis, a boost table is derived and viewable under the "Boost" tab
 * On the right side, input your new MAP sensor upper limit and desired pressure limit
-* ME7Tuner outputs a rescaled KFLMIOP table and axis
+* MxT outputs a rescaled KFLMIOP table and axis
 * Copy the KFLMIOP table and axis to other tables (KFLMIRL/KFZWOP/KFZW) to generate corresponding maps
 
 <img src="/documentation/images/med17/kfmiop_med17.png" width="800">
@@ -244,7 +244,7 @@ This means KFLMIRL is mechanically derived from KFLMIOP. If you change KFLMIOP, 
 
 ### DS1 Scalar Mode
 
-When KFLMIOP is a DS1 scalar, KFLMIRL is rescaled along its own load axis to the target max load ceiling. ME7Tuner detects the scalar condition automatically and presents a simplified interface — enter the target max load (defaults to the KFLMIOP scalar value) and the rescaled KFLMIRL is generated. No table inversion needed when the input is a single number.
+When KFLMIOP is a DS1 scalar, KFLMIRL is rescaled along its own load axis to the target max load ceiling. MxT detects the scalar condition automatically and presents a simplified interface — enter the target max load (defaults to the KFLMIOP scalar value) and the rescaled KFLMIRL is generated. No table inversion needed when the input is a single number.
 
 <img src="/documentation/images/med17/kfmirl_med17.png" width="800">
 
@@ -307,7 +307,7 @@ On MED17 with DS1 aftermarket calibrations, KFZW uses a map-switch architecture.
 | Map 4 | Ethanol 1 |
 | Map 5 | Ethanol 2 |
 
-ME7Tuner detects the DS1 scalar condition (KFLMIOP is a 1x1 map) and automatically enables multi-switch mode. You can add each switch map from your XDF, rescale them all to a new max load ceiling simultaneously, compare them side-by-side in tabs, and write all of them back to the binary in one operation.
+MxT detects the DS1 scalar condition (KFLMIOP is a 1x1 map) and automatically enables multi-switch mode. You can add each switch map from your XDF, rescale them all to a new max load ceiling simultaneously, compare them side-by-side in tabs, and write all of them back to the binary in one operation.
 
 This matters because when you rescale the load axis, *every* ignition map needs to match — not just the one you're looking at. Having all six maps visible and rescalable at once prevents the "I rescaled Gasoline 0 but forgot about Ethanol 2" class of mistakes. Those mistakes end with knock.
 
@@ -325,15 +325,15 @@ The stock boost controller is a PID loop that fights the wastegate. It works, bu
 
 This is one of the highest-value calibrations you can do. Highly recommended for any setup — stock or modified.
 
-The linearization process is tedious to do by hand — you need WOT pulls at various fixed duty cycles, manual duty cycle vs. boost pressure plotting, and careful interpolation. ME7Tuner automates most of this. You provide the logs; it provides the linearization table.
+The linearization process is tedious to do by hand — you need WOT pulls at various fixed duty cycles, manual duty cycle vs. boost pressure plotting, and careful interpolation. MxT automates most of this. You provide the logs; it provides the linearization table.
 
 <img src="/documentation/images/med17/ldrpid_med17.png" width="800">
 
 ### Algorithm
 
-The algorithm fits a one-dimensional polynomial to the duty cycle vs. boost relationship from logged data. This produces a smoother result from far more data — ME7Tuner can parse millions of data points across dozens of log files, versus the handful of points you'd get from doing it manually.
+The algorithm fits a one-dimensional polynomial to the duty cycle vs. boost relationship from logged data. This produces a smoother result from far more data — MxT can parse millions of data points across dozens of log files, versus the handful of points you'd get from doing it manually.
 
-### What to Log (ScorpionEFI)
+### What to Log (DS1)
 
 | Signal | Description |
 |--------|-------------|
@@ -344,19 +344,19 @@ The algorithm fits a one-dimensional polynomial to the duty cycle vs. boost rela
 | `tvldste_w` | Final wastegate duty cycle (%) |
 | `gangi` | Selected gear |
 
-ME7Tuner's adapter layer handles the translation from ScorpionEFI signal names to the internal equivalents automatically — configure the MED17 headers in the Configuration tab and load your ScorpionEFI logs.
+MxT's adapter layer handles the translation from DS1 signal names to the internal equivalents automatically — configure the MED17 headers in the Configuration tab and load your DS1 logs.
 
 ### Usage
 
 Do as many WOT pulls as possible, starting from the lowest RPM you can manage to the highest. You want a mix of pulls at fixed N75 duty cycles (for building the base linearization curve) and "real world" duty cycles (for validating the result). Different gears, different conditions — more data, better fit.
 
-Put all of your logs in a single directory and select it in ME7Tuner with "Load MED17 Logs."
+Put all of your logs in a single directory and select it in MxT with "Load MED17 Logs."
 
 Then wait. Parsing thousands of WOT data points and fitting the polynomial takes time — especially if you've been thorough about logging.
 
 The linearized duty cycle will be output in KFLDRL. It may not be perfect out of the box — boost control linearization is sensitive to exhaust housing characteristics, wastegate spring rates, and turbo-to-turbo variation. Some manual adjustment is usually needed to get the final result dialed in.
 
-For feed-forward pre-control, ME7Tuner will also output a new KFLDIMX and x-axis based on estimations from the linearized boost table. This is a ballpark — a starting point for the feed-forward map, not a finished product. Expect to iterate.
+For feed-forward pre-control, MxT will also output a new KFLDIMX and x-axis based on estimations from the linearized boost table. This is a ballpark — a starting point for the feed-forward map, not a finished product. Expect to iterate.
 
 One practical tip: at RPM ranges where the turbo can't produce enough boost to crack the wastegates, request 95% duty cycle. There's no reason to be conservative when you're below the wastegate cracking pressure — you want the turbo spooling as hard as possible.
 
@@ -368,7 +368,7 @@ The 2.5T with aftermarket turbos is where LDRPID really earns its keep. The stoc
 
 ## Optimizer (MED17)
 
-The Optimizer is where ME7Tuner goes from "useful calculator" to "how did we live without this."
+The Optimizer is where MxT goes from "useful calculator" to "how did we live without this."
 
 It's a suggestion engine that analyzes WOT (Wide Open Throttle) logs and recommends corrections to the boost control maps so that **actual pressure tracks requested pressure** and **actual load tracks the maximum specified load target**.
 
@@ -423,7 +423,7 @@ Sometimes the maximum load target won't be reached because a torque monitor or i
 2. If `rlsol_w < LDRXN * 0.95` during WOT, flag a **Torque Intervention Warning**
 3. If `psrg_w` consistently falls more than 50 mbar below `pvds_w`, flag a **Boost Target Not Reached** warning
 
-### What to Log (ScorpionEFI)
+### What to Log (DS1)
 
 | Signal | Description |
 |--------|-------------|
@@ -436,7 +436,7 @@ Sometimes the maximum load target won't be reached because a torque monitor or i
 | `rlsol_w` | Requested load (%) |
 | `rl_w` | Actual engine load (%) |
 
-Get WOT pulls across the full RPM range. More data points produce better suggestions. ScorpionEFI logs work identically to ME7Logger logs — load a single file or a directory.
+Get WOT pulls across the full RPM range. More data points produce better suggestions. DS1 logs work identically to ME7Logger logs — load a single file or a directory.
 
 ### Usage
 
@@ -444,11 +444,11 @@ Get WOT pulls across the full RPM range. More data points produce better suggest
 
 1. Go to the **Configuration** tab
 2. Select map definitions for KFLDRL and KFLDIMX
-3. Ensure the log header definitions are configured for ScorpionEFI signals
+3. Ensure the log header definitions are configured for DS1 signals
 
 #### Step 2: Collect WOT Logs
 
-Log the signals listed above during WOT pulls with ScorpionEFI. Get pulls across the full RPM range — more data points produce better suggestions.
+Log the signals listed above during WOT pulls with DS1. Get pulls across the full RPM range — more data points produce better suggestions.
 
 #### Step 3: Load and Analyze
 
@@ -496,6 +496,6 @@ If the maps are calibrated correctly, requested pressure should match actual pre
 
 ---
 
-*ME7Tuner is free software. It comes with no warranty. If you send 25 psi into a motor that can handle 15 psi because you didn't read the output, that's between you and your engine builder.*
+*MxT is free software. It comes with no warranty. If you send 25 psi into a motor that can handle 15 psi because you didn't read the output, that's between you and your engine builder.*
 
 *Built with mass quantities of coffee by [TracQi Technology](https://github.com/TracqiTechnology).*

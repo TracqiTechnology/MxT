@@ -34,9 +34,16 @@ private val decimalFormat = DecimalFormat("#.####")
 
 private enum class WriteStatus { Idle, Success, Error }
 
+/** Platform-aware label: KRKATE on MED17/MED9, KRKTE elsewhere */
+private fun krkteLabel(): String {
+    val platform = EcuPlatformPreference.platform
+    return if (platform == EcuPlatform.MED17 || platform == EcuPlatform.MED9) "KRKATE" else "KRKTE"
+}
+
 @Composable
 fun KrkteScreen() {
     val scrollState = rememberScrollState()
+    val label = krkteLabel()
 
     var airDensity by remember { mutableStateOf(PrimaryFuelingPreferences.airDensity.toString()) }
     var displacement by remember { mutableStateOf(PrimaryFuelingPreferences.displacement.toString()) }
@@ -99,7 +106,7 @@ fun KrkteScreen() {
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         // Result card at top
-        KrkteResultCard(krkteResult)
+        KrkteResultCard(krkteResult, label)
 
         // Two-column layout for inputs
         Row(
@@ -157,15 +164,16 @@ fun KrkteScreen() {
             krkteMapName = krkteMapName,
             canWrite = canWrite,
             writeStatus = writeStatus,
-            onWriteClick = { showWriteConfirmation = true }
+            onWriteClick = { showWriteConfirmation = true },
+            label = label
         )
     }
 
     if (showWriteConfirmation) {
         AlertDialog(
             onDismissRequest = { showWriteConfirmation = false },
-            title = { Text("Write KRKTE") },
-            text = { Text("Are you sure you want to write KRKTE to the binary?") },
+            title = { Text("Write $label") },
+            text = { Text("Are you sure you want to write $label to the binary?") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -197,7 +205,7 @@ fun KrkteScreen() {
 }
 
 @Composable
-private fun KrkteResultCard(krkteResult: Double) {
+private fun KrkteResultCard(krkteResult: Double, label: String = "KRKTE") {
     Surface(
         shape = MaterialTheme.shapes.medium,
         tonalElevation = 2.dp,
@@ -205,7 +213,7 @@ private fun KrkteResultCard(krkteResult: Double) {
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
-                text = "Calculated KRKTE",
+                text = "Calculated $label",
                 style = MaterialTheme.typography.titleMedium
             )
             Text(
@@ -434,7 +442,8 @@ private fun FuelPropertiesSection(
                         label = "Gasoline Density",
                         value = e0Density,
                         unit = "g/cc",
-                        tooltip = "E0 (pure gasoline) density for flex fuel blending.",
+                        tooltip = "E0 (pure gasoline) density for flex fuel blending. Default 0.755 g/cc per FR BGKV; " +
+                            "some references use 0.7135 g/cc (see gasoline density tooltip for details).",
                         onValueChange = {
                             e0Density = it
                             it.toDoubleOrNull()?.let { v -> PrimaryFuelingPreferences.e0Density = v }
@@ -501,7 +510,11 @@ private fun FuelPropertiesSection(
                     label = "Gasoline Density",
                     value = gasolineDensity,
                     unit = "g/cc\u00B3",
-                    tooltip = "Mass of gasoline per cubic centimetre (g/cc). Used in KRKTE fuel-mass calculation. Standard pump gasoline ≈ 0.745 g/cc at 20°C.",
+                    tooltip = "Mass of gasoline per cubic centimetre (g/cc). Default: 0.755 g/cc per the Funktionsrahmen " +
+                        "BGKV section (ρ₀ₖₛ = 755 g/dm³). Note: the ME7.5 guide and the FR KRKATE section derive " +
+                        "the 1.05 valve correction factor from 0.7135 g/cc, creating a contradiction. " +
+                        "Using 0.7135 produces a richer calibration (safer for modified injectors). " +
+                        "Editable — enter any value to match your fuel or preference.",
                     onValueChange = onGasolineDensityChange
                 )
 
@@ -558,7 +571,8 @@ private fun WriteToBinarySection(
     krkteMapName: String?,
     canWrite: Boolean,
     writeStatus: WriteStatus,
-    onWriteClick: () -> Unit
+    onWriteClick: () -> Unit,
+    label: String = "KRKTE"
 ) {
     Surface(
         shape = MaterialTheme.shapes.medium,
@@ -579,7 +593,7 @@ private fun WriteToBinarySection(
             )
 
             PrerequisiteRow(
-                label = "KRKTE map",
+                label = "$label map",
                 detail = if (krkteMapConfigured) krkteMapName!! else "Not configured",
                 met = krkteMapConfigured
             )
@@ -591,7 +605,7 @@ private fun WriteToBinarySection(
                     onClick = onWriteClick,
                     enabled = canWrite
                 ) {
-                    Text("Write KRKTE")
+                    Text("Write $label")
                 }
 
                 Spacer(modifier = Modifier.width(12.dp))
@@ -618,9 +632,9 @@ private fun WriteToBinarySection(
 
             if (!canWrite) {
                 val message = when {
-                    !binLoaded && !krkteMapConfigured -> "Load a BIN file and configure the KRKTE map in the Configuration screen."
+                    !binLoaded && !krkteMapConfigured -> "Load a BIN file and configure the $label map in the Configuration screen."
                     !binLoaded -> "Load a BIN file to write."
-                    else -> "Configure the KRKTE map definition in the Configuration screen."
+                    else -> "Configure the $label map definition in the Configuration screen."
                 }
                 Text(
                     text = message,

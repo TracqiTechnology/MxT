@@ -7,7 +7,7 @@ package data.contract
  * dual-injection signals (port + direct injector on-times and fuel share) and does
  * NOT have MAF-based signals (uhfm_w, mshfm_w).
  *
- * Defaults use ScorpionEFI / DynoScorpion signal names. Users can remap
+ * Defaults use Dyno Spectrum (DS1) signal names. Users can remap
  * headers in the Configuration screen via LogHeaderPreference.
  */
 object Med17LogFileContract {
@@ -30,6 +30,7 @@ object Med17LogFileContract {
     const val WIDE_BAND_O2_LABEL = "lamsoni_w"
     const val REQUESTED_PRESSURE_LABEL = "pvds_w"
     const val REQUESTED_LOAD_LABEL = "rlsol_w"
+    const val REQUESTED_LOAD_ALT_LABEL = "rlmds_w"
     const val ACTUAL_LOAD_LABEL = "rl"
     const val PORT_FUEL_SHARE_LABEL = "tqfuel_pfi_w"
     const val DIRECT_FUEL_SHARE_LABEL = "tqfuel_gdi_w"
@@ -49,6 +50,9 @@ object Med17LogFileContract {
     const val PFI_SPLIT_FACTOR_LABEL = "InjSys_facPrtnPfiTar"
     const val PFI_SPLIT_FACTOR_UNLIM_LABEL = "InjSys_facPrtnPfiSpUnlimModNew"
     const val REQUESTED_PRESSURE_MAX_LABEL = "pvdxs_w"
+    const val INTAKE_TEMPERATURE_LABEL = "tans"
+    const val STFT_BANK1_LABEL = "fr_w_b1"
+    const val STFT_BANK2_LABEL = "fr_w_b2"
 
     enum class Header(var header: String, val title: String) {
         START_TIME_HEADER(START_TIME_LABEL, "Start Time"),
@@ -70,6 +74,7 @@ object Med17LogFileContract {
         WIDE_BAND_O2_HEADER(WIDE_BAND_O2_LABEL, "Wide Band O2"),
         REQUESTED_PRESSURE_HEADER(REQUESTED_PRESSURE_LABEL, "Requested Pressure"),
         REQUESTED_LOAD_HEADER(REQUESTED_LOAD_LABEL, "Requested Load"),
+        REQUESTED_LOAD_ALT_HEADER(REQUESTED_LOAD_ALT_LABEL, "Requested Load (Alt)"),
         ACTUAL_LOAD_HEADER(ACTUAL_LOAD_LABEL, "Actual Load"),
         PORT_FUEL_SHARE_HEADER(PORT_FUEL_SHARE_LABEL, "Port Fuel Share"),
         DIRECT_FUEL_SHARE_HEADER(DIRECT_FUEL_SHARE_LABEL, "Direct Fuel Share"),
@@ -88,6 +93,9 @@ object Med17LogFileContract {
         PFI_INJECTION_TIME_HEADER(PFI_INJECTION_TIME_LABEL, "PFI Injection Time"),
         PFI_SPLIT_FACTOR_HEADER(PFI_SPLIT_FACTOR_LABEL, "PFI Split Factor"),
         PFI_SPLIT_FACTOR_UNLIM_HEADER(PFI_SPLIT_FACTOR_UNLIM_LABEL, "PFI Split Factor (Unlimited)"),
-        REQUESTED_PRESSURE_MAX_HEADER(REQUESTED_PRESSURE_MAX_LABEL, "Max Requested Pressure")
+        REQUESTED_PRESSURE_MAX_HEADER(REQUESTED_PRESSURE_MAX_LABEL, "Max Requested Pressure"),
+        INTAKE_TEMPERATURE_HEADER(INTAKE_TEMPERATURE_LABEL, "Charge Air Temperature"),
+        STFT_BANK1_HEADER(STFT_BANK1_LABEL, "Short Term Fuel Trim Bank 1"),
+        STFT_BANK2_HEADER(STFT_BANK2_LABEL, "Short Term Fuel Trim Bank 2")
     }
 }

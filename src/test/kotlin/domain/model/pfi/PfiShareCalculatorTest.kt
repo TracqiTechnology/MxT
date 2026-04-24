@@ -355,10 +355,10 @@ class PfiShareCalculatorTest {
         assertContentEquals(PfiShareCalculator.DEFAULT_RPM_AXIS, result.rpmAxis)
     }
 
-    // ── Helper: minimal ScorpionEFI CSV parser for tests ────────────────
+    // ── Helper: minimal Dyno Spectrum CSV parser for tests ──────────────
 
     /**
-     * Parses a ScorpionEFI log CSV into a map keyed by [Header].
+     * Parses a Dyno Spectrum (DS1) log CSV into a map keyed by [Header].
      *
      * The log format is:
      *   Line 1 — metadata (firmware, VIN, ECU type)

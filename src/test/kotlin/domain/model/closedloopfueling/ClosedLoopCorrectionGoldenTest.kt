@@ -70,7 +70,7 @@ class ClosedLoopCorrectionGoldenTest {
         stockBinCopy = File.createTempFile("me7_golden_cl_stock_", ".bin")
         BIN_FILE.copyTo(stockBinCopy, overwrite = true)
 
-        val stream = ProfileManager::class.java.getResourceAsStream("/profiles/MBox.me7profile.json")
+        val stream = ProfileManager::class.java.getResourceAsStream("/profiles/MBox.mxtprofile.json")
             ?: error("MBox profile not found")
         profile = profileJson.decodeFromString(
             ConfigurationProfile.serializer(), stream.bufferedReader().readText()
