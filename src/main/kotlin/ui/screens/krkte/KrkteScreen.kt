@@ -73,6 +73,41 @@ fun KrkteScreen() {
         }
     }
 
+    // #78: Injector size offset — quick KRKATE adjustment for measured injector variance
+    var offsetPercent by remember { mutableStateOf(0f) }
+    val adjustedKrkte by remember(krkteResult, offsetPercent) {
+        derivedStateOf {
+            if (offsetPercent == 0f) krkteResult
+            else krkteResult * (1.0 + offsetPercent / 100.0)
+        }
+    }
+
+    // #70: Dual-fuel mode — E0 + E100 KRKATE side-by-side (MED17 DS1 flex-fuel)
+    val isMed17 = EcuPlatformPreference.platform == EcuPlatform.MED17
+    var dualFuelMode by remember { mutableStateOf(false) }
+    val e0Krkte by remember(displacement, numCylinders, airDensity, fuelInjectorSize, offsetPercent) {
+        derivedStateOf {
+            val airDensityVal = airDensity.toDoubleOrNull() ?: 0.0
+            val dispVal = displacement.toDoubleOrNull() ?: 0.0
+            val cylVal = numCylinders.toIntOrNull() ?: 1
+            val injectorVal = fuelInjectorSize.toDoubleOrNull() ?: 0.0
+            val cylDisp = if (cylVal > 0) dispVal / cylVal else 0.0
+            val base = KrkteCalculator.calculateKrkte(airDensityVal, cylDisp, injectorVal, FuelPresets.E0.densityGPerCc, FuelPresets.E0.stoichAfr)
+            if (offsetPercent == 0f) base else base * (1.0 + offsetPercent / 100.0)
+        }
+    }
+    val e100Krkte by remember(displacement, numCylinders, airDensity, fuelInjectorSize, offsetPercent) {
+        derivedStateOf {
+            val airDensityVal = airDensity.toDoubleOrNull() ?: 0.0
+            val dispVal = displacement.toDoubleOrNull() ?: 0.0
+            val cylVal = numCylinders.toIntOrNull() ?: 1
+            val injectorVal = fuelInjectorSize.toDoubleOrNull() ?: 0.0
+            val cylDisp = if (cylVal > 0) dispVal / cylVal else 0.0
+            val base = KrkteCalculator.calculateKrkte(airDensityVal, cylDisp, injectorVal, FuelPresets.E100.densityGPerCc, FuelPresets.E100.stoichAfr)
+            if (offsetPercent == 0f) base else base * (1.0 + offsetPercent / 100.0)
+        }
+    }
+
     // Write prerequisites
     val binFile by BinFilePreferences.file.collectAsState()
     val binLoaded = binFile.exists() && binFile.isFile
@@ -105,8 +140,24 @@ fun KrkteScreen() {
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // Result card at top
-        KrkteResultCard(krkteResult, label)
+        // Result card(s)
+        if (isMed17 && dualFuelMode) {
+            Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
+                KrkteResultCard(e0Krkte, "$label (E0 Gasoline)", modifier = Modifier.weight(1f))
+                KrkteResultCard(e100Krkte, "$label (E100 Ethanol)", modifier = Modifier.weight(1f))
+            }
+        } else {
+            KrkteResultCard(adjustedKrkte, label)
+        }
+
+        // Injector offset slider
+        InjectorOffsetSection(
+            offsetPercent = offsetPercent,
+            onOffsetChange = { offsetPercent = it },
+            dualFuelMode = dualFuelMode,
+            isMed17 = isMed17,
+            onDualFuelToggle = { dualFuelMode = it }
+        )
 
         // Two-column layout for inputs
         Row(
@@ -183,7 +234,7 @@ fun KrkteScreen() {
                             try {
                                 val tableDefinition = krkteTable.first
                                 val map = Map3d()
-                                map.zAxis = arrayOf(arrayOf(krkteResult))
+                                map.zAxis = arrayOf(arrayOf(adjustedKrkte))
                                 BinWriter.write(BinFilePreferences.file.value, tableDefinition, map)
                                 writeStatus = WriteStatus.Success
                             } catch (e: Exception) {
@@ -205,11 +256,11 @@ fun KrkteScreen() {
 }
 
 @Composable
-private fun KrkteResultCard(krkteResult: Double, label: String = "KRKTE") {
+private fun KrkteResultCard(krkteResult: Double, label: String = "KRKTE", modifier: Modifier = Modifier) {
     Surface(
         shape = MaterialTheme.shapes.medium,
         tonalElevation = 2.dp,
-        modifier = Modifier.fillMaxWidth()
+        modifier = modifier.fillMaxWidth()
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text(
@@ -239,6 +290,59 @@ private fun KrkteResultCard(krkteResult: Double, label: String = "KRKTE") {
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(bottom = 4.dp)
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun InjectorOffsetSection(
+    offsetPercent: Float,
+    onOffsetChange: (Float) -> Unit,
+    dualFuelMode: Boolean,
+    isMed17: Boolean,
+    onDualFuelToggle: (Boolean) -> Unit
+) {
+    Surface(
+        shape = MaterialTheme.shapes.medium,
+        tonalElevation = 1.dp,
+        modifier = Modifier.fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text("Injector Offset: ${if (offsetPercent >= 0) "+" else ""}${offsetPercent.toInt()}%",
+                        style = MaterialTheme.typography.labelMedium)
+                    Text(
+                        "Quick-adjust for measured injector variance",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                if (offsetPercent != 0f) {
+                    TextButton(onClick = { onOffsetChange(0f) }) { Text("Reset") }
+                }
+            }
+            Slider(
+                value = offsetPercent,
+                onValueChange = onOffsetChange,
+                valueRange = -25f..25f,
+                steps = 49
+            )
+
+            if (isMed17) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(top = 4.dp)
+                ) {
+                    Checkbox(checked = dualFuelMode, onCheckedChange = onDualFuelToggle)
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Dual Fuel Mode (E0 + E100 side-by-side)", style = MaterialTheme.typography.labelMedium)
+                }
             }
         }
     }

@@ -238,6 +238,7 @@ fun OptimizerScreen(preloadedLogDir: java.io.File? = null) {
     // Result state
     var result by remember { mutableStateOf<OptimizerCalculator.OptimizerResult?>(null) }
     var logFileName by remember { mutableStateOf("No Log Selected") }
+    var parseDiagnostics by remember { mutableStateOf<Med17LogParser.ParseDiagnostics?>(null) }
 
     // Auto-load log data when preloadedLogDir is provided (screenshot harness)
     LaunchedEffect(preloadedLogDir, kfldrlPair, kfldimxPair, kfmiopPair, kfmirlPair) {
@@ -508,6 +509,7 @@ fun OptimizerScreen(preloadedLogDir: java.io.File? = null) {
                                 val med17Values = med17Parser.parseLogDirectory(
                                     Med17LogParser.LogType.OPTIMIZER, selectedDir
                                 ) { _, _ -> }
+                                parseDiagnostics = med17Parser.lastDiagnostics
                                 rawMed17Values = med17Values
                                 Med17LogAdapter.toMe7OptimizerFormat(med17Values)
                             } else {
@@ -594,8 +596,40 @@ fun OptimizerScreen(preloadedLogDir: java.io.File? = null) {
 
             Text(logFileName, style = MaterialTheme.typography.bodySmall)
 
+            parseDiagnostics?.let { diag ->
+                if (diag.missingHeaders.isNotEmpty()) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        "⚠ ${diag.missingHeaders.size} missing header(s)",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                }
+            }
+
             if (showProgress) {
                 CircularProgressIndicator(modifier = Modifier.size(24.dp))
+            }
+        }
+
+        // ── Log header diagnostics (MED17 only) ──────────────────────
+        parseDiagnostics?.let { diag ->
+            if (diag.missingHeaders.isNotEmpty()) {
+                Card(modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("Log Header Diagnostics", style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            "Matched: ${diag.matchedHeaders.size} | Missing: ${diag.missingHeaders.size} | Rows: ${diag.totalRows}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Missing: ${diag.missingHeaders.joinToString(", ")}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
             }
         }
 

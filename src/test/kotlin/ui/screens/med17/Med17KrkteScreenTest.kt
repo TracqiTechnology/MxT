@@ -66,7 +66,7 @@ class Med17KrkteScreenTest : Med17ScreenTestBase() {
         val krktePair = KrktePfiPreferences.getSelectedMap()!!
 
         // Click Write KRKATE button
-        onNodeWithText("Write KRKATE").performClick()
+        onNodeWithText("Write KRKATE").performScrollTo().performClick()
         onNodeWithText("Are you sure you want to write KRKATE to the binary?").assertExists()
         onNodeWithText("Yes").performClick()
         waitForIdle()
