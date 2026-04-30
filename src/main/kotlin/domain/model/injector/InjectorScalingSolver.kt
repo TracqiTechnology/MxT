@@ -20,8 +20,8 @@ import kotlin.math.sqrt
  * There is no "KFLFW" injector linearization curve either — ME7 handles
  * minimum pulse width via the TEMIN constant.
  *
- * Note: KFLF exists but is "Lambda map at partial load" (Kennfeld Lambda
- * Teillast) — a partial-load AFR target map, NOT injector linearization.
+ * Note: KFLF ("Lambdakennfeld bei Teillast") is misnamed — it is actually
+ * a multiplicative injection correction factor (1.0 = neutral), NOT a lambda target.
  *
  * ## Scaling When Changing Injectors
  *

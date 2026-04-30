@@ -450,7 +450,7 @@ private fun InjectorScalingTab() {
                             "ME7 computes injection time as: te = rk_w × KRKTE + TVUB(ubat)\n" +
                                 "• KRKTE — scalar injector constant [ms/%] (me7-raw.txt line 222175)\n" +
                                 "• TVUB — dead time vs battery voltage (me7-raw.txt line 183466)\n" +
-                                "• KFLF — NOT injector-related; it is 'Lambda map at partial load' (AFR target)\n" +
+                                "• KFLF — misnamed 'Lambda map at partial load'; actually an injection correction factor (1.0=neutral)\n" +
                                 "• There is no KFTI (2D injection time map) or KFLFW (linearization) in ME7"
                     },
                     style = MaterialTheme.typography.bodySmall,
