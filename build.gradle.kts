@@ -80,6 +80,20 @@ tasks.register<JavaExec>("screenshots") {
     workingDir = projectDir
 }
 
+tasks.register<JavaExec>("cli") {
+    mainClass.set("cli.MxTCliKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    workingDir = projectDir
+    standardInput = System.`in`
+    // GraalVM Truffle needs module opens for XDF formula evaluation
+    jvmArgs = listOf(
+        "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+        "--add-opens", "java.base/java.nio=ALL-UNNAMED",
+        "--add-opens", "java.base/java.io=ALL-UNNAMED",
+        "--add-opens", "java.base/java.util=ALL-UNNAMED"
+    )
+}
+
 tasks.register("generateVersionFile") {
     val outputFile = file("src/main/resources/version.txt")
     inputs.property("appVersion", appVersion)

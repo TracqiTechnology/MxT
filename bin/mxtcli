@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# MxT CLI — headless analysis harness for ME7Tuner
+# Usage:
+#   bin/mxtcli                    # REPL mode
+#   bin/mxtcli help               # one-shot
+#   bin/mxtcli load-ecu x.xdf x.bin  # one-shot with args
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+cd "$PROJECT_DIR"
+
+if [ $# -eq 0 ]; then
+    # REPL mode — pass stdin through
+    ./gradlew -q cli
+else
+    # One-shot mode — pass args
+    ./gradlew -q cli --args="$(printf '%q ' "$@")"
+fi
