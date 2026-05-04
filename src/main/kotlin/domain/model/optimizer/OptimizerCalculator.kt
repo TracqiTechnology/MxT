@@ -683,12 +683,13 @@ object OptimizerCalculator {
             ))
 
             // Link 2: pssol error
+            val finiteErrors = nearBy.map { it.pssolError }.filter { it.isFinite() }
             link2.add(RpmBreakpointAnalysis(
                 rpm = bp,
                 sampleCount = count,
-                avgError = nearBy.map { it.pssolError }.average(),
-                maxError = nearBy.maxOf { abs(it.pssolError) },
-                correction = nearBy.map { it.pssolError }.average(),
+                avgError = if (finiteErrors.isNotEmpty()) finiteErrors.average() else 0.0,
+                maxError = if (finiteErrors.isNotEmpty()) finiteErrors.maxOf { abs(it) } else 0.0,
+                correction = if (finiteErrors.isNotEmpty()) finiteErrors.average() else 0.0,
                 confidence = confidence
             ))
 
@@ -1003,7 +1004,10 @@ object OptimizerCalculator {
         }
 
         if (pssolPct > 10) {
-            val avgPssolError = simulationResults.filter { abs(it.pssolError) > 10 }.map { it.pssolError }.average()
+            val validErrors = simulationResults
+                .map { it.pssolError }
+                .filter { it.isFinite() && abs(it) > 10 }
+            val avgPssolError = if (validErrors.isNotEmpty()) validErrors.average() else 0.0
             recs.add(
                 "ERROR: PLSOL model predicts wrong pressure in ${String.format("%.0f", pssolPct)}% of WOT samples. " +
                     "Simulated pssol deviates from logged pssol by avg ${String.format("%+.0f", avgPssolError)} mbar. " +
