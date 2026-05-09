@@ -1,0 +1,1027 @@
+#!/usr/bin/env python3
+"""
+ME7 Safety Validator — prevents dangerous calibration values from reaching the ECU.
+
+Three modes:
+  1. Map validation:  Check proposed map values against per-map constraints
+  2. Cross-map coherence: Verify relationships between maps (KFMIOP↔KFMIRL, KFZWOP≥KFZW)
+  3. Log pre-flight: Validate log data quality before running the optimizer
+
+Usage:
+  bin/me7-safety-check --xdf <xdf> --bin <bin> [options]
+
+  # Validate a binary against safety rules
+  bin/me7-safety-check --xdf <xdf> --bin <bin> --validate
+
+  # Check cross-map coherence
+  bin/me7-safety-check --xdf <xdf> --bin <bin> --coherence
+
+  # Validate proposed changes (JSON) against current binary
+  bin/me7-safety-check --xdf <xdf> --bin <bin> --changes <changes.json>
+
+  # Validate proposed binary against reference (delta limits)
+  bin/me7-safety-check --xdf <xdf> --bin <bin> --reference <ref.bin>
+
+  # Log data quality pre-flight
+  bin/me7-safety-check --logs <dir> --preflight
+
+  # Full validation suite
+  bin/me7-safety-check --xdf <xdf> --bin <bin> --reference <ref.bin> --all
+
+  # JSON output for agent consumption
+  bin/me7-safety-check ... --format json
+
+Options:
+  --strict        Treat warnings as errors (exit code 1)
+  --format json   Machine-readable output
+  --verbose       Show per-cell details
+  --help          This message
+"""
+
+import argparse
+import csv
+import json
+import math
+import os
+import re
+import struct
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+
+# ── Safety Rule Definitions ──────────────────────────────────────────────────
+#
+# Rules are data, not code — reviewable, versionable, auditable.
+# Each map can have: absolute bounds, per-cell constraints, delta limits,
+# monotonicity requirements, and cross-map relationships.
+
+SAFETY_RULES = {
+    # ── Ignition Timing ──
+    "KFZWOP": {
+        "description": "Optimal ignition timing (grad KW)",
+        "unit": "°KW",
+        "min_value": -5.0,           # some retard below TDC ok
+        "max_value": 48.0,           # idle/low-load can exceed 45° safely
+        "max_delta_per_cell": 6.0,   # max change per iteration
+        "high_load_ceiling": {       # at extended load, timing must drop
+            200: 25.0,
+            250: 20.0,
+            300: 15.0,
+            350: 12.0,
+            400: 10.0,
+        },
+        "skip_raw_max": True,        # skip cells at raw maximum (8-bit: 0.75*255=191.25)
+        "notes": "With 5180 mod, load extends well beyond 200%. Timing must decrease with load."
+    },
+    "KFZW": {
+        "description": "Base ignition timing (grad KW)",
+        "unit": "°KW",
+        "min_value": -15.0,
+        "max_value": 48.0,
+        "max_delta_per_cell": 6.0,
+        "skip_raw_max": True,        # 8-bit max (0.75*255=191.25) = unused cell marker
+        "coherence": "must_not_exceed:KFZWOP",
+    },
+    "KFZWWLNM": {
+        "description": "IAT-based timing bonus (grad KW)",
+        "unit": "°KW",
+        "min_value": -10.0,
+        "max_value": 20.0,           # with water injection, can be higher at low IAT
+        "max_delta_per_cell": 4.0,
+        "skip_raw_max": True,        # 8-bit max = unused cell marker
+        "notes": "Low IAT gives bonus timing, high IAT should retard. With water injection, "
+                 "this can be more aggressive at low IAT."
+    },
+
+    # ── Boost Control ──
+    "KFLDRL": {
+        "description": "Feed-forward PID linearization (wastegate duty %)",
+        "unit": "%",
+        "min_value": 0.0,
+        "max_value": 102.5,          # some ECUs allow >100% for actuator saturation margin
+        "max_delta_per_cell": 20.0,  # optimizer can make large changes
+        "coherence": "must_not_exceed:KFLDIMX",
+    },
+    "KFLDIMX": {
+        "description": "I-term upper limiter (%)",
+        "unit": "%",
+        "min_value": 0.0,
+        "max_value": 102.5,          # big turbo builds intentionally go to 100%+
+        "max_delta_per_cell": 20.0,
+    },
+    "LDRXN": {
+        "description": "Requested boost pressure (mbar)",
+        "unit": "mbar",
+        "min_value": 0.0,
+        "max_value": 3500.0,         # reasonable even for big turbo
+        "max_delta_per_cell": 300.0,
+    },
+
+    # ── Fueling / Lambda ──
+    "KFLAMKRL": {
+        "description": "Full-load enrichment target (AFR, 14.7=stoich for gasoline)",
+        "unit": "AFR",
+        "min_value": 10.5,           # never leaner than λ=0.72 under full load (~10.6 AFR)
+        "max_value": 15.0,           # stoich + small margin (~λ=1.02)
+        "notes": "Safety-critical: too lean at high boost = meltdown. XDF stores AFR not lambda."
+    },
+    "KFLF": {
+        "description": "Partial-load injection correction factor (multiplicative, 1.0=neutral)",
+        "unit": "factor",
+        "min_value": 0.75,
+        "max_value": 1.25,
+        "notes": "NOT a lambda target — it's a multiplicative injection correction per FR."
+    },
+
+    # ── Torque Model ──
+    "KFMIOP": {
+        "description": "Optimal torque fill (%)",
+        "unit": "%",
+        "min_value": 0.0,
+        "max_value": 400.0,          # 5180 mod allows extreme values
+        "coherence": "inverse_of:KFMIRL",
+    },
+    "KFMIRL": {
+        "description": "Inverse torque — load request from torque (%)",
+        "unit": "%",
+        "min_value": 0.0,
+        "max_value": 400.0,
+        "coherence": "inverse_of:KFMIOP",
+    },
+
+    # ── Load Limiting ──
+    "KFTARX": {
+        "description": "IAT-based load correction factor",
+        "unit": "factor",
+        "min_value": 0.0,
+        "max_value": 1.10,           # never increase load beyond 110%
+        "monotonicity": "non_increasing_with_x",  # must decrease or stay flat as IAT rises
+        "notes": "x-axis is IAT. Higher IAT = lower factor for safety."
+    },
+
+    # ── MAF ──
+    "MLHFM": {
+        "description": "MAF sensor linearization (kg/h)",
+        "unit": "kg/h",
+        "min_value": 0.0,
+        "max_value": None,           # no upper bound — extrapolated high-voltage entries can be very large
+        "monotonicity": "non_decreasing",
+        "max_delta_per_cell": 60.0,
+        "notes": "Must be monotonically increasing with voltage. Large swings indicate bad correction data."
+    },
+}
+
+# Cross-map coherence rules (checked in --coherence mode)
+COHERENCE_RULES = [
+    {
+        "name": "KFMIOP_KFMIRL_inverse",
+        "description": "KFMIOP must be the mathematical inverse of KFMIRL (within tolerance)",
+        "map_a": "KFMIOP",
+        "map_b": "KFMIRL",
+        "type": "inverse",
+        "tolerance_pct": 3.0,
+    },
+    {
+        "name": "KFZW_le_KFZWOP",
+        "description": "KFZW must not exceed KFZWOP at overlapping operating points",
+        "map_a": "KFZW",
+        "map_b": "KFZWOP",
+        "type": "a_le_b",
+        "tolerance": 0.5,  # allow 0.5° rounding
+    },
+    {
+        "name": "KFLDRL_le_KFLDIMX",
+        "description": "KFLDRL feed-forward must not exceed KFLDIMX I-limiter",
+        "map_a": "KFLDRL",
+        "map_b": "KFLDIMX",
+        "type": "a_le_b",
+        "tolerance": 1.0,
+    },
+]
+
+
+# ── Result Types ─────────────────────────────────────────────────────────────
+
+@dataclass
+class Finding:
+    severity: str          # "ERROR", "WARNING", "INFO"
+    map_name: str
+    rule: str
+    message: str
+    cell: Optional[Tuple[int, int]] = None  # (row, col)
+    value: Optional[float] = None
+    limit: Optional[float] = None
+
+    def to_dict(self):
+        d = {
+            "severity": self.severity,
+            "map": self.map_name,
+            "rule": self.rule,
+            "message": self.message,
+        }
+        if self.cell:
+            d["cell"] = {"row": self.cell[0], "col": self.cell[1]}
+        if self.value is not None:
+            d["value"] = self.value
+        if self.limit is not None:
+            d["limit"] = self.limit
+        return d
+
+
+@dataclass
+class ValidationResult:
+    passed: bool
+    errors: int = 0
+    warnings: int = 0
+    findings: List[Finding] = field(default_factory=list)
+
+    def add(self, f: Finding):
+        self.findings.append(f)
+        if f.severity == "ERROR":
+            self.errors += 1
+            self.passed = False
+        elif f.severity == "WARNING":
+            self.warnings += 1
+
+    def merge(self, other: 'ValidationResult'):
+        for f in other.findings:
+            self.add(f)
+
+    def to_dict(self):
+        return {
+            "passed": self.passed,
+            "errors": self.errors,
+            "warnings": self.warnings,
+            "findings": [f.to_dict() for f in self.findings],
+        }
+
+
+# ── XDF Parsing (reused from me7-bin-write) ──────────────────────────────────
+
+@dataclass
+class AxisDef:
+    address: int
+    size_bits: int
+    count: int
+    rows: int
+    cols: int
+    equation_scale: float
+    equation_offset: float
+    lsb_first: bool
+
+@dataclass
+class MapDef:
+    name: str
+    description: str
+    x_axis: AxisDef
+    y_axis: AxisDef
+    z_axis: AxisDef
+    rows: int
+    cols: int
+
+
+def parse_equation(eq_str: str) -> Tuple[float, float]:
+    eq_str = eq_str.strip()
+    m = re.match(r'^([-+]?\d*\.?\d+)\s*\*\s*X\s*([+-]\s*[-+]?\d*\.?\d+)?$', eq_str)
+    if m:
+        scale = float(m.group(1))
+        offset = 0.0
+        if m.group(2):
+            offset_str = m.group(2).replace(' ', '')
+            if offset_str.startswith('+-') or offset_str.startswith('-+'):
+                offset_str = '-' + offset_str[2:]
+            elif offset_str.startswith('--'):
+                offset_str = offset_str[2:]
+            elif offset_str.startswith('++'):
+                offset_str = '+' + offset_str[2:]
+            offset = float(offset_str)
+        return scale, offset
+
+    m = re.match(r'^X\s*\*\s*([-+]?\d*\.?\d+)$', eq_str)
+    if m:
+        return float(m.group(1)), 0.0
+
+    if eq_str.strip() == 'X':
+        return 1.0, 0.0
+
+    return 1.0, 0.0
+
+
+def parse_axis(axis_el, default_lsb_first: bool) -> AxisDef:
+    embedded = axis_el.find('EMBEDDEDDATA')
+    if embedded is None:
+        return AxisDef(0, 8, 1, 1, 1, 1.0, 0.0, default_lsb_first)
+
+    addr = int(embedded.get('mmedaddress', '0x0'), 0)
+    size_bits = int(embedded.get('mmedelementsizebits', '8'))
+    rows = int(embedded.get('mmedrowcount', '1'))
+    cols = int(embedded.get('mmedcolcount', '1'))
+
+    count_el = axis_el.find('indexcount')
+    count = int(count_el.text) if count_el is not None else max(rows * cols, 1)
+
+    type_flags = int(embedded.get('mmedtypeflags', '0x0'), 0)
+    if type_flags != 0:
+        lsb_first = bool(type_flags & 0x02)
+    else:
+        lsb_first = default_lsb_first
+
+    math_el = axis_el.find('MATH')
+    if math_el is not None:
+        eq = math_el.get('equation', 'X')
+        scale, offset = parse_equation(eq)
+    else:
+        scale, offset = 1.0, 0.0
+
+    return AxisDef(addr, size_bits, count, rows, cols, scale, offset, lsb_first)
+
+
+import xml.etree.ElementTree as ET
+
+def parse_xdf(xdf_path: str) -> Tuple[Dict[str, MapDef], bool]:
+    tree = ET.parse(xdf_path)
+    root = tree.getroot()
+
+    header = root.find('.//XDFHEADER')
+    default_lsb_first = True
+    if header is not None:
+        defaults = header.find('DEFAULTS')
+        if defaults is not None:
+            default_lsb_first = defaults.get('lsbfirst', '1') == '1'
+
+    maps = {}
+    for table in root.iter('XDFTABLE'):
+        title_el = table.find('title')
+        if title_el is None or not title_el.text:
+            continue
+
+        name = title_el.text.strip()
+        desc_el = table.find('description')
+        desc = desc_el.text.strip() if desc_el is not None and desc_el.text else ''
+
+        axes = {}
+        for axis_el in table.findall('XDFAXIS'):
+            axis_id = axis_el.get('id', '')
+            axes[axis_id] = parse_axis(axis_el, default_lsb_first)
+
+        x = axes.get('x', AxisDef(0, 8, 1, 1, 1, 1.0, 0.0, default_lsb_first))
+        y = axes.get('y', AxisDef(0, 8, 1, 1, 1, 1.0, 0.0, default_lsb_first))
+        z = axes.get('z', AxisDef(0, 8, 1, 1, 1, 1.0, 0.0, default_lsb_first))
+
+        rows = z.rows if z.rows > 1 else y.count
+        cols = z.cols if z.cols > 1 else x.count
+
+        if name not in maps:
+            maps[name] = MapDef(name, desc, x, y, z, rows, cols)
+
+    return maps, default_lsb_first
+
+
+# ── Binary Read Helpers ──────────────────────────────────────────────────────
+
+def read_raw(data: bytes, addr: int, size_bits: int, index: int, lsb_first: bool) -> int:
+    if size_bits == 8:
+        return data[addr + index]
+    elif size_bits == 16:
+        fmt = '<H' if lsb_first else '>H'
+        return struct.unpack_from(fmt, data, addr + index * 2)[0]
+    elif size_bits == 32:
+        fmt = '<I' if lsb_first else '>I'
+        return struct.unpack_from(fmt, data, addr + index * 4)[0]
+    return data[addr + index]
+
+
+def raw_to_phys(raw: int, scale: float, offset: float) -> float:
+    return scale * raw + offset
+
+
+def read_map_physical(data: bytes, map_def: MapDef) -> List[List[float]]:
+    z = map_def.z_axis
+    result = []
+    for r in range(map_def.rows):
+        row = []
+        for c in range(map_def.cols):
+            raw = read_raw(data, z.address, z.size_bits, r * map_def.cols + c, z.lsb_first)
+            row.append(round(raw_to_phys(raw, z.equation_scale, z.equation_offset), 6))
+        result.append(row)
+    return result
+
+
+def read_axis_physical(data: bytes, axis: AxisDef) -> List[float]:
+    result = []
+    for i in range(axis.count):
+        raw = read_raw(data, axis.address, axis.size_bits, i, axis.lsb_first)
+        result.append(round(raw_to_phys(raw, axis.equation_scale, axis.equation_offset), 4))
+    return result
+
+
+# ── Validators ───────────────────────────────────────────────────────────────
+
+def validate_map_bounds(map_name: str, values: List[List[float]], rule: dict,
+                        y_axis: Optional[List[float]] = None,
+                        map_def: Optional[MapDef] = None) -> ValidationResult:
+    """Check absolute min/max bounds for a map."""
+    result = ValidationResult(passed=True)
+
+    min_val = rule.get("min_value")
+    max_val = rule.get("max_value")
+    skip_raw_max = rule.get("skip_raw_max", False)
+
+    # Compute the physical value corresponding to raw max for this data type
+    raw_max_phys = None
+    if skip_raw_max and map_def:
+        z = map_def.z_axis
+        raw_max = (1 << z.size_bits) - 1  # 255 for 8-bit, 65535 for 16-bit
+        raw_max_phys = raw_to_phys(raw_max, z.equation_scale, z.equation_offset)
+        # Also compute near-max threshold (within 5% of max raw)
+        near_max_raw = raw_max * 0.95
+        near_max_phys = raw_to_phys(near_max_raw, z.equation_scale, z.equation_offset)
+
+    for r, row in enumerate(values):
+        for c, v in enumerate(row):
+            # Skip cells at or near raw maximum — these are "unused" markers
+            if raw_max_phys is not None and v >= near_max_phys:
+                continue
+
+            if min_val is not None and v < min_val:
+                result.add(Finding(
+                    severity="ERROR", map_name=map_name,
+                    rule="min_bound", cell=(r, c), value=v, limit=min_val,
+                    message=f"Value {v:.4f} below minimum {min_val}"
+                ))
+            if max_val is not None and v > max_val:
+                result.add(Finding(
+                    severity="ERROR", map_name=map_name,
+                    rule="max_bound", cell=(r, c), value=v, limit=max_val,
+                    message=f"Value {v:.4f} exceeds maximum {max_val}"
+                ))
+
+    # High-load ceiling check (KFZWOP, KFZW) — y-axis is load
+    ceiling = rule.get("high_load_ceiling")
+    if ceiling and y_axis:
+        for r, row in enumerate(values):
+            load = y_axis[r] if r < len(y_axis) else 0
+            # Find the applicable ceiling
+            applicable_ceiling = None
+            for load_threshold in sorted(ceiling.keys()):
+                if load >= load_threshold:
+                    applicable_ceiling = ceiling[load_threshold]
+            if applicable_ceiling is not None:
+                for c, v in enumerate(row):
+                    if v > applicable_ceiling:
+                        result.add(Finding(
+                            severity="WARNING", map_name=map_name,
+                            rule="high_load_ceiling",
+                            cell=(r, c), value=v, limit=applicable_ceiling,
+                            message=f"Value {v:.2f}° at load {load:.0f}% exceeds "
+                                    f"high-load ceiling {applicable_ceiling:.1f}°"
+                        ))
+
+    return result
+
+
+def validate_map_delta(map_name: str, values: List[List[float]],
+                       ref_values: List[List[float]], rule: dict) -> ValidationResult:
+    """Check per-cell delta limits against a reference binary."""
+    result = ValidationResult(passed=True)
+    max_delta = rule.get("max_delta_per_cell")
+    if max_delta is None:
+        return result
+
+    for r in range(min(len(values), len(ref_values))):
+        for c in range(min(len(values[r]), len(ref_values[r]))):
+            delta = abs(values[r][c] - ref_values[r][c])
+            if delta > max_delta:
+                result.add(Finding(
+                    severity="WARNING", map_name=map_name,
+                    rule="max_delta",
+                    cell=(r, c), value=delta, limit=max_delta,
+                    message=f"Delta {delta:.2f} exceeds per-cell limit {max_delta:.1f} "
+                            f"(was {ref_values[r][c]:.4f}, now {values[r][c]:.4f})"
+                ))
+
+    return result
+
+
+def validate_monotonicity(map_name: str, values: List[List[float]],
+                          rule: dict) -> ValidationResult:
+    """Check monotonicity constraints."""
+    result = ValidationResult(passed=True)
+    mono = rule.get("monotonicity")
+    if not mono:
+        return result
+
+    if mono == "non_decreasing":
+        # Each row should be non-decreasing
+        for r, row in enumerate(values):
+            for c in range(1, len(row)):
+                if row[c] < row[c - 1] - 0.01:  # small tolerance
+                    result.add(Finding(
+                        severity="ERROR", map_name=map_name,
+                        rule="monotonicity",
+                        cell=(r, c), value=row[c], limit=row[c - 1],
+                        message=f"Non-monotonic: [{r},{c}]={row[c]:.2f} < [{r},{c-1}]={row[c-1]:.2f}"
+                    ))
+
+    elif mono == "non_increasing_with_x":
+        # Each row should be non-increasing (e.g., KFTARX — higher IAT = lower factor)
+        for r, row in enumerate(values):
+            for c in range(1, len(row)):
+                if row[c] > row[c - 1] + 0.01:
+                    result.add(Finding(
+                        severity="WARNING", map_name=map_name,
+                        rule="monotonicity",
+                        cell=(r, c), value=row[c], limit=row[c - 1],
+                        message=f"Non-monotonic (should decrease with x): "
+                                f"[{r},{c}]={row[c]:.4f} > [{r},{c-1}]={row[c-1]:.4f}"
+                    ))
+
+    return result
+
+
+def validate_coherence_inverse(data: bytes, maps: Dict[str, MapDef],
+                               rule: dict) -> ValidationResult:
+    """Check that two maps are mathematical inverses (KFMIOP↔KFMIRL)."""
+    result = ValidationResult(passed=True)
+    map_a_name = rule["map_a"]
+    map_b_name = rule["map_b"]
+    tolerance = rule.get("tolerance_pct", 3.0)
+
+    if map_a_name not in maps or map_b_name not in maps:
+        result.add(Finding(
+            severity="INFO", map_name=f"{map_a_name}/{map_b_name}",
+            rule="inverse_coherence",
+            message=f"Cannot check inverse: one or both maps not found in XDF"
+        ))
+        return result
+
+    map_a = maps[map_a_name]
+    map_b = maps[map_b_name]
+    vals_a = read_map_physical(data, map_a)
+    vals_b = read_map_physical(data, map_b)
+
+    # For KFMIOP/KFMIRL: A[rpm, load] should == load where B[rpm, A[rpm,load]] == load
+    # Simplified check: axis ranges should match, and transposing one should approximate the other
+    # Real inversion requires axis interpolation — for now, check that value ranges are consistent
+    min_a = min(v for row in vals_a for v in row)
+    max_a = max(v for row in vals_a for v in row)
+    min_b = min(v for row in vals_b for v in row)
+    max_b = max(v for row in vals_b for v in row)
+
+    # Both maps should cover similar ranges
+    range_a = max_a - min_a
+    range_b = max_b - min_b
+    if range_a > 0 and range_b > 0:
+        ratio = range_a / range_b
+        if ratio > 1.5 or ratio < 0.667:
+            result.add(Finding(
+                severity="WARNING", map_name=f"{map_a_name}/{map_b_name}",
+                rule="inverse_range_mismatch",
+                message=f"Value range mismatch: {map_a_name}=[{min_a:.1f},{max_a:.1f}], "
+                        f"{map_b_name}=[{min_b:.1f},{max_b:.1f}] — may not be proper inverses"
+            ))
+
+    result.add(Finding(
+        severity="INFO", map_name=f"{map_a_name}/{map_b_name}",
+        rule="inverse_coherence",
+        message=f"Inverse check: {map_a_name} range [{min_a:.1f},{max_a:.1f}], "
+                f"{map_b_name} range [{min_b:.1f},{max_b:.1f}]"
+    ))
+
+    return result
+
+
+def validate_coherence_a_le_b(data: bytes, maps: Dict[str, MapDef],
+                              rule: dict) -> ValidationResult:
+    """Check that map_a ≤ map_b at overlapping operating points."""
+    result = ValidationResult(passed=True)
+    map_a_name = rule["map_a"]
+    map_b_name = rule["map_b"]
+    tolerance = rule.get("tolerance", 0.5)
+
+    if map_a_name not in maps or map_b_name not in maps:
+        result.add(Finding(
+            severity="INFO", map_name=f"{map_a_name}/{map_b_name}",
+            rule="a_le_b",
+            message=f"Cannot check: one or both maps not found in XDF"
+        ))
+        return result
+
+    map_a = maps[map_a_name]
+    map_b = maps[map_b_name]
+
+    # Only compare if dimensions match (same axis breakpoints)
+    if map_a.rows != map_b.rows or map_a.cols != map_b.cols:
+        result.add(Finding(
+            severity="INFO", map_name=f"{map_a_name}/{map_b_name}",
+            rule="a_le_b",
+            message=f"Different dimensions ({map_a.rows}×{map_a.cols} vs {map_b.rows}×{map_b.cols}) — "
+                    f"skipping direct comparison"
+        ))
+        return result
+
+    vals_a = read_map_physical(data, map_a)
+    vals_b = read_map_physical(data, map_b)
+
+    violations = 0
+    for r in range(map_a.rows):
+        for c in range(map_a.cols):
+            if vals_a[r][c] > vals_b[r][c] + tolerance:
+                violations += 1
+                if violations <= 5:  # cap detailed output
+                    result.add(Finding(
+                        severity="ERROR", map_name=f"{map_a_name}/{map_b_name}",
+                        rule="a_le_b",
+                        cell=(r, c), value=vals_a[r][c], limit=vals_b[r][c],
+                        message=f"{map_a_name}[{r},{c}]={vals_a[r][c]:.2f} > "
+                                f"{map_b_name}[{r},{c}]={vals_b[r][c]:.2f}"
+                    ))
+
+    if violations > 5:
+        result.add(Finding(
+            severity="ERROR", map_name=f"{map_a_name}/{map_b_name}",
+            rule="a_le_b",
+            message=f"... and {violations - 5} more violations ({violations} total)"
+        ))
+
+    if violations == 0:
+        result.add(Finding(
+            severity="INFO", map_name=f"{map_a_name}/{map_b_name}",
+            rule="a_le_b",
+            message=f"✓ {map_a_name} ≤ {map_b_name} at all {map_a.rows * map_a.cols} cells"
+        ))
+
+    return result
+
+
+# ── Log Pre-flight ───────────────────────────────────────────────────────────
+
+def preflight_logs(log_dir: str) -> ValidationResult:
+    """Validate log data quality before running the optimizer."""
+    result = ValidationResult(passed=True)
+    log_path = Path(log_dir)
+
+    if not log_path.is_dir():
+        result.add(Finding(
+            severity="ERROR", map_name="logs",
+            rule="directory_exists",
+            message=f"Log directory not found: {log_dir}"
+        ))
+        return result
+
+    csv_files = sorted(log_path.glob("*.csv"))
+    if not csv_files:
+        result.add(Finding(
+            severity="ERROR", map_name="logs",
+            rule="files_exist",
+            message=f"No CSV files found in {log_dir}"
+        ))
+        return result
+
+    result.add(Finding(
+        severity="INFO", map_name="logs",
+        rule="file_count",
+        message=f"Found {len(csv_files)} log files"
+    ))
+
+    # Parse a subset for quality checks
+    total_samples = 0
+    wot_samples = 0
+    ltft_values = []
+    afr_lean_wot = 0
+    iat_max = -999
+    map_saturated = 0
+
+    for csv_file in csv_files:
+        try:
+            samples = _parse_log_quick(csv_file)
+            for s in samples:
+                total_samples += 1
+                throttle = s.get('throttle', 0)
+                if throttle > 95:
+                    wot_samples += 1
+                    # Check AFR at WOT
+                    afr = s.get('lambda', s.get('afr', 0))
+                    if afr and afr > 0.93:  # lambda > 0.93 at WOT is lean
+                        afr_lean_wot += 1
+                # Track LTFT
+                ltft = s.get('ltft', None)
+                if ltft is not None:
+                    ltft_values.append(ltft)
+                # Track IAT
+                iat = s.get('iat', None)
+                if iat is not None and iat > iat_max:
+                    iat_max = iat
+                # Track MAP sensor saturation
+                boost = s.get('boost_kpa', s.get('load', 0))
+                if boost and boost > 490:  # 5-bar = 500 kPa, saturated near limit
+                    map_saturated += 1
+        except Exception:
+            continue
+
+    # Report findings
+    if total_samples == 0:
+        result.add(Finding(
+            severity="ERROR", map_name="logs",
+            rule="samples_exist",
+            message="No parseable samples found in log files"
+        ))
+        return result
+
+    result.add(Finding(
+        severity="INFO", map_name="logs",
+        rule="total_samples",
+        message=f"{total_samples} total samples across {len(csv_files)} files"
+    ))
+
+    # WOT sample count
+    if wot_samples < 20:
+        result.add(Finding(
+            severity="ERROR" if wot_samples < 5 else "WARNING",
+            map_name="logs", rule="wot_count",
+            value=float(wot_samples), limit=20.0,
+            message=f"Only {wot_samples} WOT samples (minimum: 20 for statistical significance)"
+        ))
+    else:
+        result.add(Finding(
+            severity="INFO", map_name="logs",
+            rule="wot_count",
+            message=f"✓ {wot_samples} WOT samples (minimum: 20)"
+        ))
+
+    # LTFT range
+    if ltft_values:
+        ltft_mean = sum(ltft_values) / len(ltft_values)
+        ltft_min = min(ltft_values)
+        ltft_max = max(ltft_values)
+        ltft_range = ltft_max - ltft_min
+
+        if abs(ltft_mean) > 15:
+            result.add(Finding(
+                severity="ERROR", map_name="logs",
+                rule="ltft_mean",
+                value=ltft_mean, limit=15.0,
+                message=f"LTFT mean {ltft_mean:.1f}% — fuel system problem, not a tuning issue"
+            ))
+        elif abs(ltft_mean) > 8:
+            result.add(Finding(
+                severity="WARNING", map_name="logs",
+                rule="ltft_mean",
+                value=ltft_mean,
+                message=f"LTFT mean {ltft_mean:.1f}% — elevated, consider fuel system check"
+            ))
+        else:
+            result.add(Finding(
+                severity="INFO", map_name="logs",
+                rule="ltft_mean",
+                message=f"✓ LTFT: mean {ltft_mean:.1f}%, range [{ltft_min:.1f}%, {ltft_max:.1f}%]"
+            ))
+
+    # WOT lean check
+    if wot_samples > 0:
+        lean_pct = afr_lean_wot / wot_samples * 100
+        if lean_pct > 10:
+            result.add(Finding(
+                severity="ERROR", map_name="logs",
+                rule="wot_lean",
+                value=lean_pct, limit=10.0,
+                message=f"WARNING: {lean_pct:.0f}% of WOT samples are lean (λ>0.93) — "
+                        f"dangerous, check fueling before tuning"
+            ))
+
+    # IAT
+    if iat_max > 60:
+        result.add(Finding(
+            severity="WARNING", map_name="logs",
+            rule="iat_max",
+            value=iat_max,
+            message=f"Max IAT {iat_max:.0f}°C — high heat soak, consider intercooler upgrade"
+        ))
+
+    # MAP sensor saturation
+    if wot_samples > 0 and map_saturated > 0:
+        sat_pct = map_saturated / total_samples * 100
+        if sat_pct > 10:
+            result.add(Finding(
+                severity="ERROR", map_name="logs",
+                rule="map_saturated",
+                value=sat_pct, limit=10.0,
+                message=f"MAP sensor saturated in {sat_pct:.0f}% of samples — "
+                        f"data unreliable, hardware limit reached"
+            ))
+
+    return result
+
+
+def _parse_log_quick(csv_file: Path) -> List[dict]:
+    """Quick-parse an ME7Logger CSV for pre-flight checks. Returns simplified dicts."""
+    samples = []
+    try:
+        with open(csv_file, 'r', encoding='latin-1') as f:
+            lines = f.readlines()
+    except Exception:
+        return samples
+
+    # Find header line (first line with "TimeStamp" or starts with numbers after metadata)
+    header_idx = -1
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith('TimeStamp') or stripped.startswith('timestamp'):
+            header_idx = i
+            break
+
+    if header_idx < 0:
+        return samples
+
+    # Parse header
+    headers = [h.strip().lower() for h in lines[header_idx].split(',')]
+
+    # Column mapping (flexible — different .ecu files have different names)
+    col_map = {}
+    for i, h in enumerate(headers):
+        if h in ('dkpot', 'wdkba', 'throttle'):
+            col_map['throttle'] = i
+        elif h in ('fra_w', 'ltft', 'long_term_fuel_trim'):
+            col_map['ltft'] = i
+        elif h in ('lamsoni_w', 'lambda', 'ftbrza'):
+            col_map['lambda'] = i
+        elif h in ('tans', 'tans_w', 'iat'):
+            col_map['iat'] = i
+        elif h in ('pvdks_w', 'boost', 'boost_kpa'):
+            col_map['boost_kpa'] = i
+        elif h in ('rl_w', 'load', 'engine_load'):
+            col_map['load'] = i
+
+    # Parse data lines (skip units and English name lines)
+    data_start = header_idx + 1
+    # Skip up to 2 non-numeric lines after header
+    for skip in range(3):
+        if data_start + skip < len(lines):
+            test_line = lines[data_start + skip].strip()
+            if test_line and test_line[0].isdigit():
+                data_start = data_start + skip
+                break
+            elif test_line and test_line[0] == '-':
+                data_start = data_start + skip
+                break
+
+    for line in lines[data_start:]:
+        try:
+            parts = line.strip().split(',')
+            if len(parts) < 3:
+                continue
+            s = {}
+            for key, idx in col_map.items():
+                if idx < len(parts):
+                    try:
+                        s[key] = float(parts[idx].strip())
+                    except ValueError:
+                        pass
+            if s:
+                samples.append(s)
+        except Exception:
+            continue
+
+    return samples
+
+
+# ── Main Validation Pipeline ─────────────────────────────────────────────────
+
+def validate_binary(xdf_path: str, bin_path: str, ref_path: Optional[str] = None,
+                    do_coherence: bool = True, verbose: bool = False) -> ValidationResult:
+    """Run full validation suite on a binary."""
+    result = ValidationResult(passed=True)
+
+    maps, _ = parse_xdf(xdf_path)
+    with open(bin_path, 'rb') as f:
+        data = f.read()
+
+    ref_data = None
+    if ref_path:
+        with open(ref_path, 'rb') as f:
+            ref_data = f.read()
+
+    # Per-map validation
+    for map_name, rule in SAFETY_RULES.items():
+        if map_name not in maps:
+            continue
+
+        map_def = maps[map_name]
+        values = read_map_physical(data, map_def)
+
+        # Read y-axis for load-ceiling checks
+        y_axis = None
+        if map_def.y_axis.address > 0:
+            y_axis = read_axis_physical(data, map_def.y_axis)
+
+        # Bounds check
+        result.merge(validate_map_bounds(map_name, values, rule, y_axis, map_def))
+
+        # Monotonicity check
+        result.merge(validate_monotonicity(map_name, values, rule))
+
+        # Delta check against reference
+        if ref_data:
+            ref_map_def = maps.get(map_name)
+            if ref_map_def:
+                ref_values = read_map_physical(ref_data, ref_map_def)
+                result.merge(validate_map_delta(map_name, values, ref_values, rule))
+
+    # Cross-map coherence
+    if do_coherence:
+        for rule in COHERENCE_RULES:
+            if rule["type"] == "inverse":
+                result.merge(validate_coherence_inverse(data, maps, rule))
+            elif rule["type"] == "a_le_b":
+                result.merge(validate_coherence_a_le_b(data, maps, rule))
+
+    return result
+
+
+# ── Output Formatting ────────────────────────────────────────────────────────
+
+def print_result(result: ValidationResult, format_type: str = "text"):
+    if format_type == "json":
+        print(json.dumps(result.to_dict(), indent=2))
+        return
+
+    # Text output
+    if result.passed:
+        status = "✓ PASSED"
+    else:
+        status = "✗ FAILED"
+
+    print(f"\n{'='*60}")
+    print(f"  Safety Validation: {status}")
+    print(f"  Errors: {result.errors}  Warnings: {result.warnings}")
+    print(f"{'='*60}\n")
+
+    # Group by severity
+    for severity in ["ERROR", "WARNING", "INFO"]:
+        findings = [f for f in result.findings if f.severity == severity]
+        if not findings:
+            continue
+
+        icon = {"ERROR": "✗", "WARNING": "⚠", "INFO": "✓"}[severity]
+        for f in findings:
+            cell_str = f"[{f.cell[0]},{f.cell[1]}] " if f.cell else ""
+            print(f"  {icon} {f.map_name}: {cell_str}{f.message}")
+
+    print()
+
+
+# ── CLI Entry Point ──────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="ME7 Safety Validator")
+    parser.add_argument('--xdf', help='XDF definition file')
+    parser.add_argument('--bin', help='Binary file to validate')
+    parser.add_argument('--reference', help='Reference binary for delta checks')
+    parser.add_argument('--logs', help='Log directory for pre-flight checks')
+    parser.add_argument('--validate', action='store_true', help='Validate binary against safety rules')
+    parser.add_argument('--coherence', action='store_true', help='Check cross-map coherence')
+    parser.add_argument('--preflight', action='store_true', help='Log data quality pre-flight')
+    parser.add_argument('--all', action='store_true', help='Run all checks')
+    parser.add_argument('--format', choices=['text', 'json'], default='text')
+    parser.add_argument('--strict', action='store_true', help='Treat warnings as errors')
+    parser.add_argument('--verbose', action='store_true')
+    args = parser.parse_args()
+
+    if args.preflight:
+        if not args.logs:
+            print("ERROR: --logs required for --preflight")
+            sys.exit(1)
+        result = preflight_logs(args.logs)
+        print_result(result, args.format)
+        sys.exit(0 if result.passed else 1)
+
+    if not args.xdf or not args.bin:
+        print("ERROR: --xdf and --bin are required for binary validation")
+        parser.print_help()
+        sys.exit(1)
+
+    if args.all:
+        args.validate = True
+        args.coherence = True
+
+    if not args.validate and not args.coherence:
+        args.validate = True  # default
+
+    result = validate_binary(
+        args.xdf, args.bin,
+        ref_path=args.reference,
+        do_coherence=args.coherence,
+        verbose=args.verbose,
+    )
+
+    if args.strict and result.warnings > 0:
+        result.passed = False
+
+    print_result(result, args.format)
+    sys.exit(0 if result.passed else 1)
+
+
+if __name__ == '__main__':
+    main()

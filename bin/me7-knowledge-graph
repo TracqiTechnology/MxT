@@ -1,0 +1,1007 @@
+#!/usr/bin/env python3
+"""
+ME7 Knowledge Graph — causal reasoning about ECU calibration using Kùzu graph DB.
+
+Models map dependencies, signal chains, tune version lineage, and diagnostic
+causal chains from the ME7 Funktionsrahmen. Enables queries like:
+  - "What maps are downstream of KFMIOP?"
+  - "What could cause knock at 5500 RPM?"
+  - "What changed between v2.7.4 and v3.2.1?"
+  - "What does water injection affect?"
+
+Usage:
+  bin/me7-knowledge-graph init --db <path>
+      Initialize graph with ME7 Funktionsrahmen knowledge (map deps, signal chains)
+
+  bin/me7-knowledge-graph add-tunes --db <path> --tunes <dir> --xdf <xdf>
+      Index tune versions and record map-level diffs as CHANGED_MAP edges
+
+  bin/me7-knowledge-graph diagnose --db <path> --symptom <type:rpm:load> \\
+      --cause <description> --requires-change <map>
+      Record a diagnostic finding as a causal chain
+
+  bin/me7-knowledge-graph query --db <path> <cypher-query>
+      Run a raw Cypher query against the graph
+
+  bin/me7-knowledge-graph show --db <path> [--map <name>] [--version <ver>]
+      Show graph neighborhood around a map or tune version
+
+  bin/me7-knowledge-graph downstream --db <path> --map <name> [--depth <n>]
+      Show all maps downstream of a given map (affected by changes)
+
+  bin/me7-knowledge-graph upstream --db <path> --map <name> [--depth <n>]
+      Show all maps upstream of a given map (that feed into it)
+
+  bin/me7-knowledge-graph chain --db <path>
+      Show the full ME7 4-link boost control signal chain
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import struct
+import sys
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+try:
+    import kuzu
+except ImportError:
+    print("ERROR: kuzu package not installed. Run: pip install kuzu")
+    sys.exit(1)
+
+
+# ── ME7 Funktionsrahmen Knowledge ────────────────────────────────────────────
+#
+# Pre-loaded knowledge from the ME7 Funktionsrahmen, calibration guides, and
+# real-world tuning experience. This is the "brain" that an agent uses to
+# reason about map dependencies and diagnose calibration issues.
+
+# Map catalog with descriptions and units
+MAP_CATALOG = {
+    # Torque model
+    "KFMIOP":    {"desc": "Optimal torque fill — load to torque (%)", "unit": "%", "group": "torque"},
+    "KFMIRL":    {"desc": "Inverse torque — torque request to load (%)", "unit": "%", "group": "torque"},
+    "KFMDS":     {"desc": "Driver torque request", "unit": "%", "group": "torque"},
+
+    # Ignition timing
+    "KFZWOP":    {"desc": "Optimal ignition timing (base timing map)", "unit": "°KW", "group": "ignition"},
+    "KFZW":      {"desc": "Actual ignition timing", "unit": "°KW", "group": "ignition"},
+    "KFZW2":     {"desc": "Ignition timing map 2 (bank 2)", "unit": "°KW", "group": "ignition"},
+    "KFZWWLNM":  {"desc": "IAT-based timing bonus/retard", "unit": "°KW", "group": "ignition"},
+    "KFZWMS":    {"desc": "Minimum ignition timing (knock floor)", "unit": "°KW", "group": "ignition"},
+    "KFZWMN":    {"desc": "Minimum timing (another variant)", "unit": "°KW", "group": "ignition"},
+    "KFZWMNST":  {"desc": "Minimum timing at start", "unit": "°KW", "group": "ignition"},
+    "KFZW_UM":   {"desc": "Ignition timing for emissions", "unit": "°KW", "group": "ignition"},
+
+    # Boost control (PID)
+    "KFLDRL":    {"desc": "Feed-forward PID linearization (wastegate duty)", "unit": "%", "group": "boost"},
+    "KFLDIMX":   {"desc": "I-term upper limiter", "unit": "%", "group": "boost"},
+    "LDRXN":     {"desc": "Requested boost pressure (setpoint)", "unit": "mbar", "group": "boost"},
+    "KFPBRK":    {"desc": "Barometric pressure correction for boost", "unit": "mbar", "group": "boost"},
+
+    # Load / pressure model
+    "PLSOL":     {"desc": "Pressure-to-load conversion table", "unit": "%", "group": "load"},
+    "KFURL":     {"desc": "Pressure ratio to load factor", "unit": "factor", "group": "load"},
+    "KFTARX":    {"desc": "IAT-based load correction factor", "unit": "factor", "group": "load"},
+
+    # Fueling
+    "KFLAMKRL":  {"desc": "Full-load enrichment target (AFR)", "unit": "AFR", "group": "fueling"},
+    "KFLF":      {"desc": "Partial-load injection correction factor", "unit": "factor", "group": "fueling"},
+    "KRKTE":     {"desc": "Primary fueling constant (injector flow)", "unit": "ms/%", "group": "fueling"},
+
+    # MAF
+    "MLHFM":     {"desc": "MAF sensor linearization (voltage to kg/h)", "unit": "kg/h", "group": "maf"},
+
+    # Throttle / transition
+    "KFVPDKSD":  {"desc": "Throttle plate to manifold pressure model", "unit": "%", "group": "throttle"},
+    "WDKUGDN":   {"desc": "Alpha-N fueling correction (throttle-based)", "unit": "factor", "group": "throttle"},
+}
+
+# Map dependency edges (from Funktionsrahmen)
+MAP_DEPENDENCIES = [
+    # Torque model: KFMIOP ↔ KFMIRL are inverses
+    {"from": "KFMIOP", "to": "KFMIRL", "type": "INVERSE_OF"},
+    {"from": "KFMIRL", "to": "KFMIOP", "type": "INVERSE_OF"},
+
+    # 4-link signal chain: LDRXN → rlsol → pssol → pvdks → rl_w
+    {"from": "LDRXN",  "to": "KFMIRL",  "type": "FEEDS_INTO", "desc": "Boost setpoint → load request"},
+    {"from": "KFMIRL", "to": "PLSOL",   "type": "FEEDS_INTO", "desc": "Load request → pressure setpoint"},
+    {"from": "PLSOL",  "to": "KFLDRL",  "type": "FEEDS_INTO", "desc": "Pressure setpoint → PID feed-forward"},
+    {"from": "KFLDRL", "to": "KFPBRK",  "type": "FEEDS_INTO", "desc": "PID output → baro-corrected output"},
+
+    # Torque request chain
+    {"from": "KFMDS",  "to": "KFMIOP",  "type": "FEEDS_INTO", "desc": "Driver torque → optimal fill"},
+    {"from": "KFMIOP", "to": "KFZWOP",  "type": "FEEDS_INTO", "desc": "Torque fill → optimal timing"},
+
+    # Ignition chain
+    {"from": "KFZWOP",   "to": "KFZW",     "type": "FEEDS_INTO", "desc": "Optimal timing → actual timing"},
+    {"from": "KFZWWLNM", "to": "KFZW",     "type": "FEEDS_INTO", "desc": "IAT bonus added to base timing"},
+    {"from": "KFZWMS",   "to": "KFZW",     "type": "FEEDS_INTO", "desc": "Min timing floor for actual"},
+
+    # Coupling relationships
+    {"from": "KFLAMKRL", "to": "KFZWOP",  "type": "COUPLES_WITH", "desc": "Enrichment and timing are coupled — enrich at same points you retard"},
+    {"from": "KFZWWLNM", "to": "KFZWOP",  "type": "COUPLES_WITH", "desc": "IAT bonus + base timing must be coordinated"},
+    {"from": "KFLDRL",   "to": "KFLDIMX", "type": "COUPLES_WITH", "desc": "Feed-forward and I-limiter must be coherent"},
+    {"from": "KFTARX",   "to": "KFLDRL",  "type": "COUPLES_WITH", "desc": "Load limit affects boost target"},
+
+    # MAF chain
+    {"from": "MLHFM",  "to": "KRKTE",   "type": "FEEDS_INTO", "desc": "MAF scaling affects fueling calculation"},
+    {"from": "MLHFM",  "to": "KFMIOP",  "type": "FEEDS_INTO", "desc": "MAF accuracy affects load/torque model"},
+]
+
+# Hardware-to-map impact edges
+HARDWARE_IMPACTS = {
+    "water_injection": {
+        "desc": "Aftermarket water injection system",
+        "affects": ["KFZWOP", "KFZWWLNM", "KFLAMKRL", "KFTARX"],
+        "notes": "When working: allows more timing and less enrichment. When broken: "
+                 "knock at high load, must retard timing and richen."
+    },
+    "intercooler": {
+        "desc": "Intercooler upgrade",
+        "affects": ["KFZWWLNM", "KFTARX", "KFLAMKRL"],
+        "notes": "Better cooling = lower IAT = more timing bonus available"
+    },
+    "injectors_865cc": {
+        "desc": "865cc fuel injectors",
+        "affects": ["KRKTE", "MLHFM", "WDKUGDN"],
+        "notes": "Large injectors change fueling constant and alpha-N behavior"
+    },
+    "k04_turbos": {
+        "desc": "K04 turbochargers (upgraded from K03)",
+        "affects": ["KFLDRL", "KFLDIMX", "LDRXN", "KFPBRK"],
+        "notes": "Larger turbos need different PID tuning — more spool lag, higher peak flow"
+    },
+    "map_5180_mod": {
+        "desc": "5180 MAP sensor extension (5-bar range)",
+        "affects": ["PLSOL", "KFMIOP", "KFMIRL", "KFZWOP", "KFZW", "KFLDRL"],
+        "notes": "Extends load axis beyond standard 191% to 300%+. All load-axis maps must be rescaled."
+    },
+    "ported_heads": {
+        "desc": "CNC ported cylinder heads",
+        "affects": ["MLHFM", "KFMIOP", "KFMIRL"],
+        "notes": "Changes volumetric efficiency, affects MAF scaling and torque model"
+    },
+}
+
+# Calibration order constraints (must calibrate in this order)
+CALIBRATION_ORDER = [
+    ("KRKTE",   "MLHFM",   "Fueling constant must be correct before MAF scaling"),
+    ("MLHFM",   "KFMIOP",  "MAF must be correct before torque model"),
+    ("KFMIOP",  "KFMIRL",  "Forward torque → inverse torque"),
+    ("KFMIRL",  "KFZWOP",  "Load model → ignition timing"),
+    ("KFZWOP",  "KFLDRL",  "Timing → boost control (timing must be safe before adding boost)"),
+    ("KFLDRL",  "LDRXN",   "PID linearization → boost setpoints"),
+]
+
+# Known failure patterns
+FAILURE_PATTERNS = [
+    {
+        "symptom": "knock_high_load",
+        "description": "Knock retard at high RPM and load",
+        "causes": [
+            {"map": "KFZWOP", "reason": "Base timing too aggressive for conditions"},
+            {"map": "KFZWWLNM", "reason": "IAT timing bonus too aggressive (or water injection failed)"},
+            {"map": "KFLAMKRL", "reason": "Insufficient enrichment (too lean → detonation)"},
+        ],
+        "hardware": ["water_injection"],
+    },
+    {
+        "symptom": "pressure_error",
+        "description": "Boost deviation from setpoint (requested vs actual mismatch)",
+        "causes": [
+            {"map": "KFLDRL", "reason": "Feed-forward duty cycle doesn't match actual turbo behavior"},
+            {"map": "KFLDIMX", "reason": "I-term limiter too restrictive"},
+            {"map": "KFPBRK", "reason": "Barometric correction not accounting for altitude"},
+        ],
+    },
+    {
+        "symptom": "torque_intervention",
+        "description": "ECU limiting torque (torque model mismatch)",
+        "causes": [
+            {"map": "KFMIOP", "reason": "Torque-to-load mapping incorrect for actual power output"},
+            {"map": "KFMIRL", "reason": "Inverse not properly matched to KFMIOP"},
+        ],
+    },
+    {
+        "symptom": "maf_underscaling",
+        "description": "MAF sensor reading low → ECU underestimates airflow",
+        "causes": [
+            {"map": "MLHFM", "reason": "Linearization curve doesn't match actual sensor output"},
+            {"map": "KRKTE", "reason": "Fueling constant incorrect for injector size"},
+        ],
+    },
+    {
+        "symptom": "density_altitude_sensitivity",
+        "description": "Tune works at one altitude but not another",
+        "causes": [
+            {"map": "KFPBRK", "reason": "Barometric correction insufficient for altitude range"},
+            {"map": "KFTARX", "reason": "IAT-based load limiting not aggressive enough at high IAT"},
+            {"map": "KFZWWLNM", "reason": "IAT timing bonus doesn't retard enough at high temps"},
+        ],
+        "hardware": ["intercooler", "water_injection"],
+    },
+]
+
+
+# ── Graph Operations ─────────────────────────────────────────────────────────
+
+def init_graph(db_path: str) -> kuzu.Database:
+    """Create the graph schema and load Funktionsrahmen knowledge."""
+    db = kuzu.Database(db_path)
+    conn = kuzu.Connection(db)
+
+    # Create node tables
+    conn.execute("""
+        CREATE NODE TABLE IF NOT EXISTS Map (
+            name STRING, description STRING, unit STRING, grp STRING,
+            PRIMARY KEY (name)
+        )
+    """)
+    conn.execute("""
+        CREATE NODE TABLE IF NOT EXISTS TuneVersion (
+            version STRING, sha256 STRING, date STRING,
+            fuel_type STRING, status STRING, path STRING,
+            PRIMARY KEY (version)
+        )
+    """)
+    conn.execute("""
+        CREATE NODE TABLE IF NOT EXISTS Hardware (
+            component STRING, description STRING, notes STRING,
+            PRIMARY KEY (component)
+        )
+    """)
+    conn.execute("""
+        CREATE NODE TABLE IF NOT EXISTS Symptom (
+            name STRING, description STRING,
+            PRIMARY KEY (name)
+        )
+    """)
+    conn.execute("""
+        CREATE NODE TABLE IF NOT EXISTS Diagnosis (
+            id STRING, map_name STRING, reason STRING,
+            PRIMARY KEY (id)
+        )
+    """)
+
+    # Create relationship tables
+    conn.execute("""
+        CREATE REL TABLE IF NOT EXISTS FEEDS_INTO (
+            FROM Map TO Map, description STRING
+        )
+    """)
+    conn.execute("""
+        CREATE REL TABLE IF NOT EXISTS INVERSE_OF (
+            FROM Map TO Map
+        )
+    """)
+    conn.execute("""
+        CREATE REL TABLE IF NOT EXISTS COUPLES_WITH (
+            FROM Map TO Map, description STRING
+        )
+    """)
+    conn.execute("""
+        CREATE REL TABLE IF NOT EXISTS CALIBRATE_BEFORE (
+            FROM Map TO Map, reason STRING
+        )
+    """)
+    conn.execute("""
+        CREATE REL TABLE IF NOT EXISTS DERIVED_FROM (
+            FROM TuneVersion TO TuneVersion
+        )
+    """)
+    conn.execute("""
+        CREATE REL TABLE IF NOT EXISTS CHANGED_MAP (
+            FROM TuneVersion TO Map, cells_changed INT64, delta_summary STRING
+        )
+    """)
+    conn.execute("""
+        CREATE REL TABLE IF NOT EXISTS AFFECTS (
+            FROM Hardware TO Map, notes STRING
+        )
+    """)
+    conn.execute("""
+        CREATE REL TABLE IF NOT EXISTS EXHIBITS (
+            FROM TuneVersion TO Symptom
+        )
+    """)
+    conn.execute("""
+        CREATE REL TABLE IF NOT EXISTS CAUSED_BY (
+            FROM Symptom TO Diagnosis
+        )
+    """)
+    conn.execute("""
+        CREATE REL TABLE IF NOT EXISTS REQUIRES_CHANGE (
+            FROM Diagnosis TO Map
+        )
+    """)
+
+    # Helper: MERGE node with properties (Kùzu requires ON CREATE SET / ON MATCH SET)
+    def merge_node(label, pk_field, pk_val, props: dict):
+        set_clause = ", ".join(f"n.{k} = ${k}" for k in props)
+        params = {pk_field: pk_val, **props}
+        conn.execute(
+            f"MERGE (n:{label} {{{pk_field}: ${pk_field}}}) "
+            f"ON CREATE SET {set_clause} ON MATCH SET {set_clause}",
+            params
+        )
+
+    # Load map catalog
+    for name, info in MAP_CATALOG.items():
+        try:
+            merge_node("Map", "name", name, {
+                "description": info["desc"], "unit": info["unit"], "grp": info["group"]
+            })
+        except Exception as e:
+            print(f"  Warning: could not create map node {name}: {e}")
+
+    # Load map dependencies
+    for dep in MAP_DEPENDENCIES:
+        src, dst = dep["from"], dep["to"]
+        rel_type = dep["type"]
+        desc = dep.get("desc", "")
+
+        # Ensure both nodes exist
+        for n in (src, dst):
+            if n not in MAP_CATALOG:
+                merge_node("Map", "name", n, {"description": "", "unit": "", "grp": ""})
+
+        try:
+            if rel_type == "FEEDS_INTO":
+                conn.execute(
+                    "MATCH (a:Map {name: $src}), (b:Map {name: $dst}) "
+                    "CREATE (a)-[:FEEDS_INTO {description: $description}]->(b)",
+                    {"src": src, "dst": dst, "description": desc}
+                )
+            elif rel_type == "INVERSE_OF":
+                conn.execute(
+                    "MATCH (a:Map {name: $src}), (b:Map {name: $dst}) "
+                    "CREATE (a)-[:INVERSE_OF {}]->(b)",
+                    {"src": src, "dst": dst}
+                )
+            elif rel_type == "COUPLES_WITH":
+                conn.execute(
+                    "MATCH (a:Map {name: $src}), (b:Map {name: $dst}) "
+                    "CREATE (a)-[:COUPLES_WITH {description: $description}]->(b)",
+                    {"src": src, "dst": dst, "description": desc}
+                )
+        except Exception as e:
+            print(f"  Warning: could not create edge {src}-[{rel_type}]->{dst}: {e}")
+
+    # Load calibration order
+    for src, dst, reason in CALIBRATION_ORDER:
+        try:
+            conn.execute(
+                "MATCH (a:Map {name: $src}), (b:Map {name: $dst}) "
+                "CREATE (a)-[:CALIBRATE_BEFORE {reason: $reason}]->(b)",
+                {"src": src, "dst": dst, "reason": reason}
+            )
+        except Exception as e:
+            print(f"  Warning: could not create calibration order {src}->{dst}: {e}")
+
+    # Load hardware components
+    for comp, info in HARDWARE_IMPACTS.items():
+        try:
+            merge_node("Hardware", "component", comp, {
+                "description": info["desc"], "notes": info["notes"]
+            })
+            for map_name in info["affects"]:
+                conn.execute(
+                    "MATCH (h:Hardware {component: $comp}), (m:Map {name: $map}) "
+                    "CREATE (h)-[:AFFECTS {notes: $notes}]->(m)",
+                    {"comp": comp, "map": map_name, "notes": info["notes"]}
+                )
+        except Exception as e:
+            print(f"  Warning: could not create hardware {comp}: {e}")
+
+    # Load failure patterns
+    for pattern in FAILURE_PATTERNS:
+        symptom = pattern["symptom"]
+        try:
+            merge_node("Symptom", "name", symptom, {"description": pattern["description"]})
+            for cause in pattern["causes"]:
+                diag_id = f"{symptom}_{cause['map']}"
+                merge_node("Diagnosis", "id", diag_id, {
+                    "map_name": cause["map"], "reason": cause["reason"]
+                })
+                conn.execute(
+                    "MATCH (s:Symptom {name: $symptom}), (d:Diagnosis {id: $diag_id}) "
+                    "CREATE (s)-[:CAUSED_BY {}]->(d)",
+                    {"symptom": symptom, "diag_id": diag_id}
+                )
+                conn.execute(
+                    "MATCH (d:Diagnosis {id: $diag_id}), (m:Map {name: $map}) "
+                    "CREATE (d)-[:REQUIRES_CHANGE {}]->(m)",
+                    {"diag_id": diag_id, "map": cause["map"]}
+                )
+        except Exception as e:
+            print(f"  Warning: could not create failure pattern {symptom}: {e}")
+
+    # Count what we loaded
+    maps_count = conn.execute("MATCH (m:Map) RETURN count(m)").get_next()[0]
+    hw_count = conn.execute("MATCH (h:Hardware) RETURN count(h)").get_next()[0]
+    symptom_count = conn.execute("MATCH (s:Symptom) RETURN count(s)").get_next()[0]
+
+    feeds_count = conn.execute("MATCH ()-[r:FEEDS_INTO]->() RETURN count(r)").get_next()[0]
+    couples_count = conn.execute("MATCH ()-[r:COUPLES_WITH]->() RETURN count(r)").get_next()[0]
+    affects_count = conn.execute("MATCH ()-[r:AFFECTS]->() RETURN count(r)").get_next()[0]
+
+    print(f"Knowledge graph initialized at {db_path}")
+    print(f"  Nodes: {maps_count} maps, {hw_count} hardware, {symptom_count} symptoms")
+    print(f"  Edges: {feeds_count} FEEDS_INTO, {couples_count} COUPLES_WITH, {affects_count} AFFECTS")
+
+    conn.close()
+    return db
+
+
+# ── XDF Parsing (for tune comparison) ────────────────────────────────────────
+
+def parse_equation(eq_str: str) -> Tuple[float, float]:
+    eq_str = eq_str.strip()
+    m = re.match(r'^([-+]?\d*\.?\d+)\s*\*\s*X\s*([+-]\s*[-+]?\d*\.?\d+)?$', eq_str)
+    if m:
+        scale = float(m.group(1))
+        offset = 0.0
+        if m.group(2):
+            offset_str = m.group(2).replace(' ', '')
+            if offset_str.startswith('+-') or offset_str.startswith('-+'):
+                offset_str = '-' + offset_str[2:]
+            elif offset_str.startswith('--'):
+                offset_str = offset_str[2:]
+            offset = float(offset_str)
+        return scale, offset
+    if eq_str.strip() == 'X':
+        return 1.0, 0.0
+    return 1.0, 0.0
+
+
+def parse_xdf_maps(xdf_path: str) -> dict:
+    """Parse XDF for map definitions (simplified for comparison)."""
+    tree = ET.parse(xdf_path)
+    root = tree.getroot()
+
+    header = root.find('.//XDFHEADER')
+    default_lsb = True
+    if header is not None:
+        defaults = header.find('DEFAULTS')
+        if defaults is not None:
+            default_lsb = defaults.get('lsbfirst', '1') == '1'
+
+    maps = {}
+    for table in root.iter('XDFTABLE'):
+        title = table.find('title')
+        if title is None or not title.text:
+            continue
+        name = title.text.strip()
+        if name in maps:
+            continue
+
+        z = table.find('.//XDFAXIS[@id="z"]')
+        if z is None:
+            continue
+        emb = z.find('EMBEDDEDDATA')
+        if emb is None:
+            continue
+
+        addr = int(emb.get('mmedaddress', '0x0'), 0)
+        bits = int(emb.get('mmedelementsizebits', '8'))
+        rows = int(emb.get('mmedrowcount', '1'))
+        cols = int(emb.get('mmedcolcount', '1'))
+
+        type_flags = int(emb.get('mmedtypeflags', '0x0'), 0)
+        lsb = bool(type_flags & 0x02) if type_flags else default_lsb
+
+        math = z.find('MATH')
+        eq = math.get('equation', 'X') if math is not None else 'X'
+        scale, offset = parse_equation(eq)
+
+        # Compute total cells
+        idx_el = z.find('.//indexcount')
+        if idx_el is not None:
+            count = int(idx_el.text)
+        else:
+            count = max(rows * cols, 1)
+
+        maps[name] = {
+            "addr": addr, "bits": bits, "rows": rows, "cols": cols,
+            "count": count, "scale": scale, "offset": offset, "lsb": lsb
+        }
+
+    return maps
+
+
+def read_map_values(data: bytes, m: dict) -> List[float]:
+    """Read all physical values from a map."""
+    values = []
+    byte_size = m["bits"] // 8
+    for i in range(m["count"]):
+        offset = m["addr"] + i * byte_size
+        if m["bits"] == 8:
+            raw = data[offset]
+        elif m["bits"] == 16:
+            fmt = '<H' if m["lsb"] else '>H'
+            raw = struct.unpack_from(fmt, data, offset)[0]
+        else:
+            raw = data[offset]
+        values.append(m["scale"] * raw + m["offset"])
+    return values
+
+
+def add_tunes(db_path: str, tunes_dir: str, xdf_path: str):
+    """Index tune versions and record map changes between consecutive versions."""
+    db = kuzu.Database(db_path)
+    conn = kuzu.Connection(db)
+
+    xdf_maps = parse_xdf_maps(xdf_path)
+    tunes_path = Path(tunes_dir)
+
+    # Find all version directories
+    versions = []
+    for d in sorted(tunes_path.iterdir()):
+        if d.is_dir() and d.name.startswith('v'):
+            bins = list(d.glob('*.bin'))
+            # Prefer the non-"valid" binary
+            main_bin = None
+            for b in bins:
+                if '_valid' not in b.name:
+                    main_bin = b
+                    break
+            if main_bin is None and bins:
+                main_bin = bins[0]
+            if main_bin:
+                versions.append((d.name, main_bin))
+
+    print(f"Found {len(versions)} tune versions in {tunes_dir}")
+
+    # Create version nodes
+    for ver_name, bin_path in versions:
+        bin_data = bin_path.read_bytes()
+        sha = hashlib.sha256(bin_data).hexdigest()[:16]
+        mtime = datetime.fromtimestamp(bin_path.stat().st_mtime).isoformat()[:10]
+
+        try:
+            conn.execute(
+                "MERGE (t:TuneVersion {version: $ver}) "
+                "ON CREATE SET t.sha256 = $sha, t.date = $date, t.path = $path, t.status = $status "
+                "ON MATCH SET t.sha256 = $sha, t.date = $date, t.path = $path, t.status = $status",
+                {"ver": ver_name, "sha": sha, "date": mtime, "path": str(bin_path), "status": "indexed"}
+            )
+        except Exception as e:
+            print(f"  Warning: could not create version {ver_name}: {e}")
+
+    # Create DERIVED_FROM edges between consecutive versions
+    for i in range(1, len(versions)):
+        parent = versions[i - 1][0]
+        child = versions[i][0]
+        try:
+            conn.execute(
+                "MATCH (c:TuneVersion {version: $child}), (p:TuneVersion {version: $parent}) "
+                "MERGE (c)-[:DERIVED_FROM]->(p)",
+                {"child": child, "parent": parent}
+            )
+        except Exception as e:
+            print(f"  Warning: could not link {child} -> {parent}: {e}")
+
+    # Compare consecutive versions and record CHANGED_MAP edges
+    for i in range(1, len(versions)):
+        parent_ver, parent_bin = versions[i - 1]
+        child_ver, child_bin = versions[i]
+
+        parent_data = parent_bin.read_bytes()
+        child_data = child_bin.read_bytes()
+
+        changed_maps = []
+        for map_name, m in xdf_maps.items():
+            try:
+                parent_vals = read_map_values(parent_data, m)
+                child_vals = read_map_values(child_data, m)
+
+                if len(parent_vals) != len(child_vals):
+                    continue
+
+                cells_diff = sum(1 for a, b in zip(parent_vals, child_vals)
+                                 if abs(a - b) > 0.001)
+                if cells_diff > 0:
+                    max_delta = max(abs(a - b) for a, b in zip(parent_vals, child_vals))
+                    summary = f"{cells_diff}/{len(parent_vals)} cells, max_delta={max_delta:.4f}"
+                    changed_maps.append((map_name, cells_diff, summary))
+
+                    # Ensure map node exists
+                    if map_name not in MAP_CATALOG:
+                        conn.execute(
+                            "MERGE (m:Map {name: $name}) "
+                            "ON CREATE SET m.description = $d, m.unit = $u, m.grp = $g "
+                            "ON MATCH SET m.description = $d",
+                            {"name": map_name, "d": "", "u": "", "g": ""}
+                        )
+
+                    try:
+                        conn.execute(
+                            "MATCH (t:TuneVersion {version: $ver}), (m:Map {name: $map}) "
+                            "MERGE (t)-[:CHANGED_MAP {cells_changed: $cells, delta_summary: $summary}]->(m)",
+                            {"ver": child_ver, "map": map_name, "cells": cells_diff, "summary": summary}
+                        )
+                    except Exception:
+                        pass
+
+            except Exception:
+                continue
+
+        if changed_maps:
+            print(f"  {parent_ver} → {child_ver}: {len(changed_maps)} maps changed")
+            for mn, cells, summary in sorted(changed_maps, key=lambda x: -x[1])[:5]:
+                print(f"    {mn}: {summary}")
+
+    conn.close()
+    print("Done indexing tune versions.")
+
+
+# ── Query Commands ───────────────────────────────────────────────────────────
+
+def cmd_downstream(db_path: str, map_name: str, depth: int = 3):
+    """Show all maps downstream of a given map."""
+    db = kuzu.Database(db_path)
+    conn = kuzu.Connection(db)
+
+    result = conn.execute(
+        "MATCH (start:Map {name: $name})-[:FEEDS_INTO*1.." + str(depth) + "]->(downstream:Map) "
+        "RETURN DISTINCT downstream.name, downstream.description",
+        {"name": map_name}
+    )
+
+    print(f"\nMaps downstream of {map_name} (depth {depth}):")
+    count = 0
+    while result.has_next():
+        row = result.get_next()
+        print(f"  → {row[0]}: {row[1]}")
+        count += 1
+
+    if count == 0:
+        print("  (none found)")
+
+    # Also show coupled maps
+    result = conn.execute(
+        "MATCH (start:Map {name: $name})-[:COUPLES_WITH]->(coupled:Map) "
+        "RETURN coupled.name, coupled.description",
+        {"name": map_name}
+    )
+    coupled = []
+    while result.has_next():
+        coupled.append(result.get_next())
+
+    if coupled:
+        print(f"\nMaps coupled with {map_name}:")
+        for row in coupled:
+            print(f"  ↔ {row[0]}: {row[1]}")
+
+    conn.close()
+
+
+def cmd_upstream(db_path: str, map_name: str, depth: int = 3):
+    """Show all maps upstream of a given map."""
+    db = kuzu.Database(db_path)
+    conn = kuzu.Connection(db)
+
+    result = conn.execute(
+        "MATCH (upstream:Map)-[:FEEDS_INTO*1.." + str(depth) + "]->(target:Map {name: $name}) "
+        "RETURN DISTINCT upstream.name, upstream.description",
+        {"name": map_name}
+    )
+
+    print(f"\nMaps upstream of {map_name} (depth {depth}):")
+    count = 0
+    while result.has_next():
+        row = result.get_next()
+        print(f"  ← {row[0]}: {row[1]}")
+        count += 1
+
+    if count == 0:
+        print("  (none found)")
+
+    conn.close()
+
+
+def cmd_chain(db_path: str):
+    """Show the ME7 4-link boost control signal chain."""
+    db = kuzu.Database(db_path)
+    conn = kuzu.Connection(db)
+
+    print("\nME7 4-Link Boost Control Signal Chain:")
+    print("=" * 60)
+
+    chain_maps = ["LDRXN", "KFMIRL", "PLSOL", "KFLDRL", "KFPBRK"]
+    for i, name in enumerate(chain_maps):
+        result = conn.execute(
+            "MATCH (m:Map {name: $name}) RETURN m.description, m.unit",
+            {"name": name}
+        )
+        if result.has_next():
+            row = result.get_next()
+            prefix = "  " if i == 0 else "  → "
+            print(f"{prefix}{name}: {row[0]} ({row[1]})")
+
+        if i < len(chain_maps) - 1:
+            result = conn.execute(
+                "MATCH (a:Map {name: $src})-[r:FEEDS_INTO]->(b:Map {name: $dst}) "
+                "RETURN r.description",
+                {"src": chain_maps[i], "dst": chain_maps[i + 1]}
+            )
+            if result.has_next():
+                desc = result.get_next()[0]
+                print(f"    ↓ {desc}")
+
+    conn.close()
+
+
+def cmd_show(db_path: str, map_name: Optional[str] = None, version: Optional[str] = None,
+             format_type: str = "text"):
+    """Show graph neighborhood around a map or tune version."""
+    db = kuzu.Database(db_path)
+    conn = kuzu.Connection(db)
+
+    if map_name:
+        # Incoming edges
+        result = conn.execute(
+            "MATCH (upstream:Map)-[r:FEEDS_INTO]->(m:Map {name: $name}) "
+            "RETURN upstream.name, r.description",
+            {"name": map_name}
+        )
+        incoming = []
+        while result.has_next():
+            incoming.append(result.get_next())
+
+        # Outgoing edges
+        result = conn.execute(
+            "MATCH (m:Map {name: $name})-[r:FEEDS_INTO]->(downstream:Map) "
+            "RETURN downstream.name, r.description",
+            {"name": map_name}
+        )
+        outgoing = []
+        while result.has_next():
+            outgoing.append(result.get_next())
+
+        # Coupled
+        result = conn.execute(
+            "MATCH (m:Map {name: $name})-[:COUPLES_WITH]->(coupled:Map) "
+            "RETURN coupled.name, coupled.description",
+            {"name": map_name}
+        )
+        coupled = []
+        while result.has_next():
+            coupled.append(result.get_next())
+
+        # Hardware affecting this map
+        result = conn.execute(
+            "MATCH (h:Hardware)-[r:AFFECTS]->(m:Map {name: $name}) "
+            "RETURN h.component, h.description",
+            {"name": map_name}
+        )
+        hardware = []
+        while result.has_next():
+            hardware.append(result.get_next())
+
+        # Versions that changed this map
+        result = conn.execute(
+            "MATCH (t:TuneVersion)-[c:CHANGED_MAP]->(m:Map {name: $name}) "
+            "RETURN t.version, c.cells_changed, c.delta_summary "
+            "ORDER BY t.version",
+            {"name": map_name}
+        )
+        changes = []
+        while result.has_next():
+            changes.append(result.get_next())
+
+        if format_type == "json":
+            print(json.dumps({
+                "map": map_name,
+                "incoming": [{"map": r[0], "desc": r[1]} for r in incoming],
+                "outgoing": [{"map": r[0], "desc": r[1]} for r in outgoing],
+                "coupled": [{"map": r[0], "desc": r[1]} for r in coupled],
+                "hardware": [{"component": r[0], "desc": r[1]} for r in hardware],
+                "version_changes": [{"version": r[0], "cells": r[1], "summary": r[2]} for r in changes],
+            }, indent=2))
+        else:
+            print(f"\n{'='*60}")
+            print(f"  Map: {map_name}")
+            print(f"{'='*60}")
+
+            if incoming:
+                print(f"\n  Feeds from:")
+                for r in incoming:
+                    print(f"    ← {r[0]}: {r[1]}")
+            if outgoing:
+                print(f"\n  Feeds into:")
+                for r in outgoing:
+                    print(f"    → {r[0]}: {r[1]}")
+            if coupled:
+                print(f"\n  Coupled with:")
+                for r in coupled:
+                    print(f"    ↔ {r[0]}: {r[1]}")
+            if hardware:
+                print(f"\n  Affected by hardware:")
+                for r in hardware:
+                    print(f"    ⚙ {r[0]}: {r[1]}")
+            if changes:
+                print(f"\n  Changed in versions:")
+                for r in changes:
+                    print(f"    {r[0]}: {r[2]}")
+
+    elif version:
+        # Show what this version changed
+        result = conn.execute(
+            "MATCH (t:TuneVersion {version: $ver})-[c:CHANGED_MAP]->(m:Map) "
+            "RETURN m.name, c.cells_changed, c.delta_summary "
+            "ORDER BY c.cells_changed DESC",
+            {"ver": version}
+        )
+        changes = []
+        while result.has_next():
+            changes.append(result.get_next())
+
+        # Parent version
+        result = conn.execute(
+            "MATCH (t:TuneVersion {version: $ver})-[:DERIVED_FROM]->(p:TuneVersion) "
+            "RETURN p.version",
+            {"ver": version}
+        )
+        parent = result.get_next()[0] if result.has_next() else None
+
+        if format_type == "json":
+            print(json.dumps({
+                "version": version,
+                "parent": parent,
+                "changes": [{"map": r[0], "cells": r[1], "summary": r[2]} for r in changes],
+            }, indent=2))
+        else:
+            print(f"\n{'='*60}")
+            print(f"  Tune Version: {version}")
+            if parent:
+                print(f"  Derived from: {parent}")
+            print(f"{'='*60}")
+
+            if changes:
+                print(f"\n  Maps changed ({len(changes)}):")
+                for r in changes:
+                    print(f"    {r[0]}: {r[2]}")
+            else:
+                print("  No map changes recorded.")
+
+    conn.close()
+
+
+def cmd_diagnose_symptom(db_path: str, symptom_name: str, format_type: str = "text"):
+    """Query the graph for possible causes of a symptom."""
+    db = kuzu.Database(db_path)
+    conn = kuzu.Connection(db)
+
+    result = conn.execute(
+        "MATCH (s:Symptom {name: $name})-[:CAUSED_BY]->(d:Diagnosis)-[:REQUIRES_CHANGE]->(m:Map) "
+        "RETURN d.reason, m.name, m.description",
+        {"name": symptom_name}
+    )
+
+    causes = []
+    while result.has_next():
+        causes.append(result.get_next())
+
+    # Also check hardware
+    hw_result = conn.execute(
+        "MATCH (s:Symptom {name: $name})-[:CAUSED_BY]->(d:Diagnosis)-[:REQUIRES_CHANGE]->(m:Map)"
+        "<-[:AFFECTS]-(h:Hardware) "
+        "RETURN DISTINCT h.component, h.description",
+        {"name": symptom_name}
+    )
+    hardware = []
+    while hw_result.has_next():
+        hardware.append(hw_result.get_next())
+
+    if format_type == "json":
+        print(json.dumps({
+            "symptom": symptom_name,
+            "causes": [{"reason": r[0], "map": r[1], "map_desc": r[2]} for r in causes],
+            "related_hardware": [{"component": r[0], "desc": r[1]} for r in hardware],
+        }, indent=2))
+    else:
+        print(f"\nDiagnosis for symptom: {symptom_name}")
+        print("=" * 50)
+        if causes:
+            for r in causes:
+                print(f"  Cause: {r[0]}")
+                print(f"    → Change: {r[1]} ({r[2]})")
+                print()
+        else:
+            print("  No known causes in the knowledge graph.")
+
+        if hardware:
+            print("  Related hardware:")
+            for r in hardware:
+                print(f"    ⚙ {r[0]}: {r[1]}")
+
+    conn.close()
+
+
+# ── CLI Entry Point ──────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(description="ME7 Knowledge Graph")
+    sub = parser.add_subparsers(dest="command")
+
+    # init
+    p_init = sub.add_parser("init", help="Initialize graph with ME7 Funktionsrahmen knowledge")
+    p_init.add_argument("--db", required=True, help="Path to Kùzu database directory")
+
+    # add-tunes
+    p_tunes = sub.add_parser("add-tunes", help="Index tune versions and record map diffs")
+    p_tunes.add_argument("--db", required=True)
+    p_tunes.add_argument("--tunes", required=True, help="Directory containing version subdirs")
+    p_tunes.add_argument("--xdf", required=True, help="XDF definition file")
+
+    # downstream
+    p_down = sub.add_parser("downstream", help="Maps downstream of a given map")
+    p_down.add_argument("--db", required=True)
+    p_down.add_argument("--map", required=True)
+    p_down.add_argument("--depth", type=int, default=3)
+
+    # upstream
+    p_up = sub.add_parser("upstream", help="Maps upstream of a given map")
+    p_up.add_argument("--db", required=True)
+    p_up.add_argument("--map", required=True)
+    p_up.add_argument("--depth", type=int, default=3)
+
+    # chain
+    p_chain = sub.add_parser("chain", help="Show ME7 4-link boost control signal chain")
+    p_chain.add_argument("--db", required=True)
+
+    # show
+    p_show = sub.add_parser("show", help="Show neighborhood around map or version")
+    p_show.add_argument("--db", required=True)
+    p_show.add_argument("--map", help="Map name")
+    p_show.add_argument("--version", help="Tune version")
+    p_show.add_argument("--format", choices=["text", "json"], default="text")
+
+    # diagnose
+    p_diag = sub.add_parser("diagnose", help="Query causes of a symptom")
+    p_diag.add_argument("--db", required=True)
+    p_diag.add_argument("--symptom", required=True)
+    p_diag.add_argument("--format", choices=["text", "json"], default="text")
+
+    # query
+    p_query = sub.add_parser("query", help="Run raw Cypher query")
+    p_query.add_argument("--db", required=True)
+    p_query.add_argument("cypher", help="Cypher query string")
+
+    args = parser.parse_args()
+
+    if args.command == "init":
+        init_graph(args.db)
+    elif args.command == "add-tunes":
+        add_tunes(args.db, args.tunes, args.xdf)
+    elif args.command == "downstream":
+        cmd_downstream(args.db, args.map, args.depth)
+    elif args.command == "upstream":
+        cmd_upstream(args.db, args.map, args.depth)
+    elif args.command == "chain":
+        cmd_chain(args.db)
+    elif args.command == "show":
+        cmd_show(args.db, args.map, args.version, args.format)
+    elif args.command == "diagnose":
+        cmd_diagnose_symptom(args.db, args.symptom, args.format)
+    elif args.command == "query":
+        db = kuzu.Database(args.db)
+        conn = kuzu.Connection(db)
+        result = conn.execute(args.cypher)
+        while result.has_next():
+            print(result.get_next())
+        conn.close()
+    else:
+        parser.print_help()
+
+
+if __name__ == '__main__':
+    main()
