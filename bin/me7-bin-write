@@ -441,6 +441,16 @@ def _parse_table_block(lines: List[str], start: int) -> Optional[List[List[float
 
         i += 1
 
+    if not rows:
+        return None
+
+    # Detect and remove axis header row: the axis header has one fewer
+    # value than data rows because it lacks the RPM label column.
+    # E.g. axis: "875.0 1025.0 ..." → parts[1:] has N-1 values
+    #      data: "1000   10    ..." → parts[1:] has N values
+    if len(rows) >= 2 and len(rows[0]) != len(rows[1]):
+        rows = rows[1:]
+
     return rows if rows else None
 
 
