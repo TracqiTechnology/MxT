@@ -1,0 +1,715 @@
+#!/usr/bin/env python3
+"""
+ME7 Per-Cylinder Knock Analysis — parses raw ME7Logger CSVs for dwkrz
+(per-cylinder knock retard) patterns that destroy power under boost.
+
+This is the analysis that the MxT optimizer CANNOT do — it tracks per-cylinder
+knock retard across all log files, identifies bank-specific patterns, and
+correlates knock severity with IAT/load/RPM to produce actionable KFZWOP
+timing reduction recommendations.
+
+Usage:
+  bin/me7-knock-analyze <log-directory> [options]
+
+Options:
+  --rpm-min N        Minimum RPM for WOT analysis (default: 3000)
+  --rpm-max N        Maximum RPM for WOT analysis (default: 7000)
+  --throttle-min N   Minimum throttle for WOT detection (default: 95%)
+  --output FILE      Write JSON report to file (default: stdout)
+  --top N            Show top N worst knock events (default: 20)
+  --csv              Output machine-readable CSV instead of human report
+
+Designed for AI-driven tuning — output is structured for programmatic parsing.
+"""
+
+import csv
+import glob
+import json
+import os
+import re
+import sys
+from collections import defaultdict
+from datetime import datetime
+from pathlib import Path
+from statistics import mean, median, stdev
+
+# ME7Logger CSV column names for per-cylinder knock retard.
+# ME7Logger uses dwkrz_N (underscore, no _w suffix) and the index-to-physical
+# cylinder mapping follows Bosch firing order:
+#   dwkrz_1 → physical cylinder 5
+#   dwkrz_2 → physical cylinder 3
+#   dwkrz_3 → physical cylinder 2
+#   dwkrz_4 → physical cylinder 6
+#   dwkrz_5 → physical cylinder 4
+#   dwkrz_6 → physical cylinder 1
+# We report by PHYSICAL cylinder number for tuning clarity.
+DWKRZ_COLUMNS_PRIMARY = {
+    5: "dwkrz_1",
+    3: "dwkrz_2",
+    2: "dwkrz_3",
+    6: "dwkrz_4",
+    4: "dwkrz_5",
+    1: "dwkrz_6",
+}
+
+# Some configs may use the _w suffix variant
+DWKRZ_COLUMNS_ALT = {
+    5: "dwkrz1_w",
+    3: "dwkrz2_w",
+    2: "dwkrz3_w",
+    6: "dwkrz4_w",
+    4: "dwkrz5_w",
+    1: "dwkrz6_w",
+}
+
+# Adapted ignition angle (dynamic range) — per-cylinder long-term adaptation
+WKRDYA_COLUMNS = {
+    5: "wkrdya_1",
+    3: "wkrdya_2",
+    2: "wkrdya_3",
+    6: "wkrdya_4",
+}
+
+# Aggregate knock
+WKRMDY_COLUMN = "wkrmdy_w"
+
+# Essential columns
+RPM_COLUMN = "nmot"
+THROTTLE_COLUMN = "wdkba"
+LOAD_COLUMN = "rl_w"
+TIMING_COLUMN = "zwout"
+BOOST_ACTUAL = "pvdks_w"
+IAT_COLUMN = "tans"       # intake air temp (ME7Logger name)
+IAT_ALT = "tans_w"        # some configs add _w suffix
+COOLANT_COLUMN = "tmot"   # coolant temp
+
+
+def parse_log_date(filepath):
+    """Extract date from ME7Logger filename (format: YYYY-MM-DD-HH-MM-SS.csv)."""
+    basename = os.path.basename(filepath)
+    match = re.match(r"(\d{4})-(\d{2})-(\d{2})", basename)
+    if match:
+        try:
+            return datetime(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+        except ValueError:
+            pass
+    # Try file mtime as fallback
+    try:
+        return datetime.fromtimestamp(os.path.getmtime(filepath))
+    except OSError:
+        return None
+
+
+def find_header_row(filepath):
+    """Find the row index where ME7Logger CSV data headers start.
+
+    ME7Logger files have metadata lines starting with # or containing
+    descriptive text, then a header line with column names like:
+        TimeStamp, dwkrz_1   , dwkrz_2   , ...
+    followed by a units line and an English names line, then data.
+    """
+    encodings = ["latin-1", "utf-8", "cp1252"]
+    for enc in encodings:
+        try:
+            with open(filepath, "r", encoding=enc) as f:
+                lines = f.readlines()
+
+            for i, line in enumerate(lines):
+                stripped = line.strip().replace("\r", "")
+                # Look for the header line containing column names
+                if "TimeStamp" in stripped and "nmot" in stripped:
+                    return i, enc
+                # Alternative: look for nmot without TimeStamp
+                if stripped.startswith("TimeStamp,") or stripped.startswith('"TimeStamp"'):
+                    return i, enc
+
+            # Fallback: look for any line with nmot
+            for i, line in enumerate(lines):
+                stripped = line.strip().replace("\r", "")
+                if "nmot" in stripped.lower() and "," in stripped:
+                    return i, enc
+
+            return None, None
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return None, None
+
+
+def parse_log_file(filepath, rpm_min, rpm_max, throttle_min):
+    """Parse a single ME7Logger CSV and extract WOT knock data.
+
+    ME7Logger CSVs have:
+      - Metadata lines (# comments, ECU info)
+      - Header line: 'TimeStamp, dwkrz_1   , nmot      , ...'
+      - Units line:  '  sec.ms , °KW       , rpm       , ...'
+      - English line: '"TIME","IgnitionRetardCyl5",...'
+      - Data lines:  '    0.000, 0         , 840       , ...'
+    """
+    header_row, encoding = find_header_row(filepath)
+    if header_row is None:
+        return None
+
+    try:
+        with open(filepath, "r", encoding=encoding) as f:
+            lines = f.readlines()
+
+        if header_row >= len(lines):
+            return None
+
+        # Parse header line — strip whitespace and \r from field names
+        header_line = lines[header_row].replace("\r", "").strip()
+        raw_fields = header_line.split(",")
+        fields = [f.strip().strip('"') for f in raw_fields]
+
+        # Skip units line and English names line (2 lines after header)
+        data_start = header_row + 1
+        # Skip lines that start with spaces (units) or quotes (English names)
+        while data_start < len(lines):
+            test_line = lines[data_start].strip().replace("\r", "")
+            if not test_line:
+                data_start += 1
+                continue
+            # Units line typically starts with space or contains "sec.ms"
+            if test_line.startswith('"') or "sec.ms" in test_line or "°" in test_line:
+                data_start += 1
+                continue
+            # Check if it looks like data (starts with a number or spaces+number)
+            stripped = test_line.lstrip()
+            if stripped and (stripped[0].isdigit() or stripped[0] == '-'):
+                break
+            data_start += 1
+
+        # Check for required columns
+        has_rpm = RPM_COLUMN in fields
+        has_throttle = THROTTLE_COLUMN in fields
+        if not has_rpm:
+            return None
+
+        # Find available dwkrz columns — try primary naming first
+        available_cyl = {}
+        for cyl, col_name in DWKRZ_COLUMNS_PRIMARY.items():
+            if col_name in fields:
+                available_cyl[cyl] = fields.index(col_name)
+
+        if not available_cyl:
+            # Try alternate naming
+            for cyl, col_name in DWKRZ_COLUMNS_ALT.items():
+                if col_name in fields:
+                    available_cyl[cyl] = fields.index(col_name)
+
+        if not available_cyl:
+            return None
+
+        # Find column indices for other fields
+        def col_idx(name):
+            return fields.index(name) if name in fields else None
+
+        rpm_idx = col_idx(RPM_COLUMN)
+        throttle_idx = col_idx(THROTTLE_COLUMN)
+        load_idx = col_idx(LOAD_COLUMN)
+        timing_idx = col_idx(TIMING_COLUMN)
+        boost_idx = col_idx(BOOST_ACTUAL)
+
+        # IAT: try multiple column names
+        iat_idx = None
+        for iat_name in [IAT_COLUMN, IAT_ALT]:
+            iat_idx = col_idx(iat_name)
+            if iat_idx is not None:
+                break
+
+        # Parse WOT samples from data lines
+        wot_samples = []
+        all_samples = 0
+
+        for line_idx in range(data_start, len(lines)):
+            line = lines[line_idx].replace("\r", "").strip()
+            if not line:
+                continue
+
+            values = [v.strip() for v in line.split(",")]
+            if len(values) < len(fields):
+                continue
+
+            all_samples += 1
+            try:
+                rpm = float(values[rpm_idx])
+                throttle = float(values[throttle_idx]) if throttle_idx is not None else 100.0
+
+                if rpm < rpm_min or rpm > rpm_max or throttle < throttle_min:
+                    continue
+
+                sample = {"rpm": rpm, "throttle": throttle}
+
+                # Load
+                if load_idx is not None:
+                    try:
+                        sample["load"] = float(values[load_idx])
+                    except (ValueError, IndexError):
+                        pass
+
+                # Timing output
+                if timing_idx is not None:
+                    try:
+                        sample["zwout"] = float(values[timing_idx])
+                    except (ValueError, IndexError):
+                        pass
+
+                # Boost actual
+                if boost_idx is not None:
+                    try:
+                        sample["boost_mbar"] = float(values[boost_idx])
+                    except (ValueError, IndexError):
+                        pass
+
+                # IAT
+                if iat_idx is not None:
+                    try:
+                        sample["iat_c"] = float(values[iat_idx])
+                    except (ValueError, IndexError):
+                        pass
+
+                # Per-cylinder knock retard
+                cyl_knock = {}
+                for cyl, idx in available_cyl.items():
+                    try:
+                        val = float(values[idx])
+                        cyl_knock[cyl] = val
+                    except (ValueError, IndexError):
+                        pass
+
+                if cyl_knock:
+                    sample["dwkrz"] = cyl_knock
+
+                wot_samples.append(sample)
+
+            except (ValueError, IndexError):
+                continue
+
+        if not wot_samples:
+            return None
+
+        return {
+            "file": os.path.basename(filepath),
+            "path": filepath,
+            "date": parse_log_date(filepath),
+            "total_samples": all_samples,
+            "wot_samples": wot_samples,
+            "has_per_cylinder": bool(available_cyl),
+            "cylinders_available": sorted(available_cyl.keys()),
+        }
+
+    except Exception as e:
+        return None
+
+
+def rpm_bucket(rpm, step=500):
+    """Round RPM to nearest bucket for aggregation."""
+    return int(round(rpm / step) * step)
+
+
+def analyze_knock(parsed_logs, rpm_min, rpm_max):
+    """Analyze knock patterns across all parsed logs."""
+
+    # Per-cylinder knock accumulation by RPM bucket
+    cyl_knock_by_rpm = defaultdict(lambda: defaultdict(list))
+    # Per-file worst knock
+    file_worst = []
+    # All WOT samples with knock
+    knock_events = []
+    # Timing vs knock correlation
+    timing_data = []
+    # Temperature correlation
+    temp_knock = []
+
+    for log in parsed_logs:
+        file_max_retard = 0
+        file_worst_cyl = None
+        file_worst_rpm = None
+
+        for sample in log["wot_samples"]:
+            rpm = sample["rpm"]
+            bucket = rpm_bucket(rpm)
+            dwkrz = sample.get("dwkrz", {})
+            zwout = sample.get("zwout")
+            iat = sample.get("iat_c")
+            load = sample.get("load")
+
+            for cyl, retard in dwkrz.items():
+                if retard < 0:  # knock retard is negative
+                    cyl_knock_by_rpm[cyl][bucket].append(retard)
+
+                    effective_timing = (zwout + retard) if zwout is not None else None
+
+                    event = {
+                        "file": log["file"],
+                        "date": log["date"],
+                        "rpm": rpm,
+                        "cyl": cyl,
+                        "retard": retard,
+                        "zwout": zwout,
+                        "effective_timing": effective_timing,
+                        "load": load,
+                        "iat_c": iat,
+                    }
+                    knock_events.append(event)
+
+                    if abs(retard) > abs(file_max_retard):
+                        file_max_retard = retard
+                        file_worst_cyl = cyl
+                        file_worst_rpm = rpm
+
+                    if zwout is not None:
+                        timing_data.append({
+                            "base_timing": zwout,
+                            "retard": retard,
+                            "effective": zwout + retard,
+                            "rpm": rpm,
+                            "load": load,
+                        })
+
+                    if iat is not None:
+                        temp_knock.append({
+                            "iat_c": iat,
+                            "retard": retard,
+                            "rpm": rpm,
+                            "cyl": cyl,
+                        })
+
+        if file_max_retard < 0:
+            file_worst.append({
+                "file": log["file"],
+                "date": log["date"],
+                "max_retard": file_max_retard,
+                "worst_cyl": file_worst_cyl,
+                "worst_rpm": file_worst_rpm,
+                "wot_count": len(log["wot_samples"]),
+            })
+
+    # Build analysis results
+    results = {}
+
+    # 1. Per-cylinder severity by RPM
+    cyl_summary = {}
+    for cyl in sorted(cyl_knock_by_rpm.keys()):
+        rpm_data = {}
+        total_events = 0
+        total_retard = 0
+        for bucket in sorted(cyl_knock_by_rpm[cyl].keys()):
+            retards = cyl_knock_by_rpm[cyl][bucket]
+            total_events += len(retards)
+            total_retard += sum(retards)
+            rpm_data[bucket] = {
+                "count": len(retards),
+                "mean_retard": round(mean(retards), 2),
+                "max_retard": round(min(retards), 2),  # min because retard is negative
+                "median_retard": round(median(retards), 2),
+            }
+        cyl_summary[cyl] = {
+            "rpm_buckets": rpm_data,
+            "total_events": total_events,
+            "mean_retard": round(total_retard / total_events, 2) if total_events > 0 else 0,
+        }
+    results["per_cylinder"] = cyl_summary
+
+    # 2. Bank analysis (V6: bank 1 = cyl 1,2,3; bank 2 = cyl 4,5,6)
+    bank1_events = sum(cyl_summary.get(c, {}).get("total_events", 0) for c in [1, 2, 3])
+    bank2_events = sum(cyl_summary.get(c, {}).get("total_events", 0) for c in [4, 5, 6])
+
+    bank1_retards = [e["retard"] for e in knock_events if e["cyl"] in [1, 2, 3]]
+    bank2_retards = [e["retard"] for e in knock_events if e["cyl"] in [4, 5, 6]]
+
+    results["bank_analysis"] = {
+        "bank1": {
+            "cylinders": [1, 2, 3],
+            "total_events": bank1_events,
+            "mean_retard": round(mean(bank1_retards), 2) if bank1_retards else 0,
+            "max_retard": round(min(bank1_retards), 2) if bank1_retards else 0,
+        },
+        "bank2": {
+            "cylinders": [4, 5, 6],
+            "total_events": bank2_events,
+            "mean_retard": round(mean(bank2_retards), 2) if bank2_retards else 0,
+            "max_retard": round(min(bank2_retards), 2) if bank2_retards else 0,
+        },
+        "bank2_ratio": round(bank2_events / max(bank1_events, 1), 2),
+    }
+
+    # 3. Worst events (sorted by severity)
+    knock_events.sort(key=lambda e: e["retard"])
+    results["worst_events"] = knock_events[:50]
+
+    # 4. Worst files
+    file_worst.sort(key=lambda f: f["max_retard"])
+    results["worst_files"] = file_worst
+
+    # 5. Temperature correlation
+    if temp_knock:
+        # Bin by temperature (5°C buckets)
+        temp_bins = defaultdict(list)
+        for item in temp_knock:
+            t_bucket = int(round(item["iat_c"] / 5) * 5)
+            temp_bins[t_bucket].append(item["retard"])
+
+        results["temperature_correlation"] = {
+            str(t): {
+                "count": len(retards),
+                "mean_retard": round(mean(retards), 2),
+                "max_retard": round(min(retards), 2),
+            }
+            for t, retards in sorted(temp_bins.items())
+        }
+
+    # 6. RPM-Load heatmap (where knock lives)
+    if timing_data:
+        load_rpm_grid = defaultdict(list)
+        for item in timing_data:
+            if item["load"] is not None:
+                r_bucket = rpm_bucket(item["rpm"])
+                l_bucket = int(round(item["load"] / 25) * 25)
+                load_rpm_grid[(r_bucket, l_bucket)].append(item["retard"])
+
+        results["knock_heatmap"] = {
+            f"{rpm},{load}": {
+                "count": len(retards),
+                "mean_retard": round(mean(retards), 2),
+                "max_retard": round(min(retards), 2),
+            }
+            for (rpm, load), retards in sorted(load_rpm_grid.items())
+        }
+
+    # 7. KFZWOP timing reduction recommendations
+    if timing_data:
+        recommendations = generate_timing_recommendations(timing_data, knock_events)
+        results["kfzwop_recommendations"] = recommendations
+
+    # 8. Summary statistics
+    total_wot = sum(len(l["wot_samples"]) for l in parsed_logs)
+    total_knock = len(knock_events)
+    results["summary"] = {
+        "files_analyzed": len(parsed_logs),
+        "total_wot_samples": total_wot,
+        "total_knock_events": total_knock,
+        "knock_rate": round(total_knock / max(total_wot, 1) * 100, 1),
+        "files_with_knock": len(file_worst),
+        "cylinders_with_data": sorted(cyl_knock_by_rpm.keys()),
+    }
+
+    return results
+
+
+def generate_timing_recommendations(timing_data, knock_events):
+    """Generate KFZWOP timing reduction recommendations from knock data."""
+    # Group knock by RPM/load zone
+    zone_data = defaultdict(list)
+    for event in knock_events:
+        if event["load"] is not None and event["zwout"] is not None:
+            r_bucket = rpm_bucket(event["rpm"])
+            l_bucket = int(round(event["load"] / 50) * 50)
+            zone_data[(r_bucket, l_bucket)].append({
+                "retard": event["retard"],
+                "base_timing": event["zwout"],
+                "effective": event["effective_timing"],
+            })
+
+    recommendations = []
+    for (rpm, load), events in sorted(zone_data.items()):
+        if len(events) < 3:  # need minimum data
+            continue
+
+        retards = [e["retard"] for e in events]
+        base_timings = [e["base_timing"] for e in events]
+
+        avg_retard = mean(retards)
+        max_retard = min(retards)  # min because negative
+        avg_base = mean(base_timings)
+
+        # Recommendation: reduce base timing by 50-70% of average retard
+        # (not full retard, because some knock is acceptable and we want
+        # headroom for the reactive system to still work)
+        reduction = round(abs(avg_retard) * 0.6, 1)
+        if reduction < 0.5:
+            continue  # negligible
+
+        recommended = round(avg_base - reduction, 1)
+
+        recommendations.append({
+            "rpm": rpm,
+            "load_pct": load,
+            "current_base_timing": round(avg_base, 1),
+            "avg_knock_retard": round(avg_retard, 1),
+            "max_knock_retard": round(max_retard, 1),
+            "recommended_reduction": reduction,
+            "recommended_timing": recommended,
+            "sample_count": len(events),
+            "rationale": f"Avg {abs(avg_retard):.1f}° reactive retard over {len(events)} events → reduce base by {reduction:.1f}°",
+        })
+
+    recommendations.sort(key=lambda r: r["avg_knock_retard"])
+    return recommendations
+
+
+def format_human_report(results, top_n):
+    """Format analysis results as human-readable report."""
+    lines = []
+    s = results["summary"]
+    lines.append("=" * 70)
+    lines.append("ME7 PER-CYLINDER KNOCK ANALYSIS")
+    lines.append("=" * 70)
+    lines.append(f"Files analyzed: {s['files_analyzed']}")
+    lines.append(f"Total WOT samples: {s['total_wot_samples']}")
+    lines.append(f"Total knock events: {s['total_knock_events']} ({s['knock_rate']}% of WOT)")
+    lines.append(f"Files with knock: {s['files_with_knock']}")
+    lines.append(f"Cylinders with data: {s['cylinders_with_data']}")
+    lines.append("")
+
+    # Bank analysis
+    ba = results.get("bank_analysis", {})
+    lines.append("--- Bank Analysis (V6: Bank 1 = Cyl 1,2,3 | Bank 2 = Cyl 4,5,6) ---")
+    b1 = ba.get("bank1", {})
+    b2 = ba.get("bank2", {})
+    lines.append(f"  Bank 1: {b1.get('total_events', 0)} events, mean {b1.get('mean_retard', 0):.2f}°, max {b1.get('max_retard', 0):.2f}°")
+    lines.append(f"  Bank 2: {b2.get('total_events', 0)} events, mean {b2.get('mean_retard', 0):.2f}°, max {b2.get('max_retard', 0):.2f}°")
+    ratio = ba.get("bank2_ratio", 0)
+    if ratio > 1.5:
+        lines.append(f"  ⚠ Bank 2 knocks {ratio:.1f}× more than Bank 1 — check intercooler distribution")
+    lines.append("")
+
+    # Per-cylinder summary
+    lines.append("--- Per-Cylinder Knock by RPM ---")
+    for cyl, data in sorted(results.get("per_cylinder", {}).items()):
+        lines.append(f"  Cylinder {cyl}: {data['total_events']} events, mean {data['mean_retard']:.2f}°")
+        for rpm_bucket, rpm_data in sorted(data["rpm_buckets"].items()):
+            lines.append(f"    {rpm_bucket} RPM: n={rpm_data['count']}, mean={rpm_data['mean_retard']:.2f}°, max={rpm_data['max_retard']:.2f}°")
+    lines.append("")
+
+    # Temperature correlation
+    tc = results.get("temperature_correlation", {})
+    if tc:
+        lines.append("--- Temperature vs Knock ---")
+        for temp, data in sorted(tc.items(), key=lambda x: int(x[0])):
+            lines.append(f"  {temp}°C: {data['count']} events, mean {data['mean_retard']:.2f}°, max {data['max_retard']:.2f}°")
+        lines.append("")
+
+    # Knock heatmap (RPM × Load)
+    heatmap = results.get("knock_heatmap", {})
+    if heatmap:
+        lines.append("--- Knock Heatmap (RPM × Load%) ---")
+        lines.append(f"  {'RPM':>6s}  {'Load%':>6s}  {'Count':>6s}  {'Mean°':>7s}  {'Max°':>7s}")
+        lines.append("  " + "-" * 40)
+        for key, data in sorted(heatmap.items()):
+            rpm, load = key.split(",")
+            lines.append(f"  {rpm:>6s}  {load:>6s}  {data['count']:>6d}  {data['mean_retard']:>7.2f}  {data['max_retard']:>7.2f}")
+        lines.append("")
+
+    # Timing recommendations
+    recs = results.get("kfzwop_recommendations", [])
+    if recs:
+        lines.append("--- KFZWOP Timing Reduction Recommendations ---")
+        lines.append(f"  {'RPM':>6s}  {'Load%':>6s}  {'Current':>8s}  {'Reduce':>8s}  {'Target':>8s}  {'n':>4s}  Rationale")
+        lines.append("  " + "-" * 80)
+        for r in recs:
+            lines.append(f"  {r['rpm']:>6d}  {r['load_pct']:>6d}  {r['current_base_timing']:>7.1f}°  {r['recommended_reduction']:>7.1f}°  {r['recommended_timing']:>7.1f}°  {r['sample_count']:>4d}  {r['rationale']}")
+        lines.append("")
+
+    # Worst events
+    worst = results.get("worst_events", [])[:top_n]
+    if worst:
+        lines.append(f"--- Top {top_n} Worst Knock Events ---")
+        lines.append(f"  {'File':>30s}  {'RPM':>5s}  {'Cyl':>3s}  {'Retard':>7s}  {'Base':>6s}  {'Eff':>6s}  {'Load%':>6s}  {'IAT°C':>6s}")
+        lines.append("  " + "-" * 85)
+        for e in worst:
+            f = e["file"]
+            if len(f) > 28:
+                f = "..." + f[-25:]
+            eff = f"{e['effective_timing']:.1f}" if e.get("effective_timing") is not None else "N/A"
+            zwout = f"{e['zwout']:.1f}" if e.get("zwout") is not None else "N/A"
+            load = f"{e['load']:.0f}" if e.get("load") is not None else "N/A"
+            iat = f"{e['iat_c']:.0f}" if e.get("iat_c") is not None else "N/A"
+            lines.append(f"  {f:>30s}  {e['rpm']:>5.0f}  {e['cyl']:>3d}  {e['retard']:>7.2f}  {zwout:>6s}  {eff:>6s}  {load:>6s}  {iat:>6s}")
+        lines.append("")
+
+    # Worst files
+    wf = results.get("worst_files", [])[:10]
+    if wf:
+        lines.append("--- Worst Log Files ---")
+        for f in wf:
+            date_str = f["date"].strftime("%Y-%m-%d") if f.get("date") else "unknown"
+            lines.append(f"  {date_str}  {f['file']:40s}  max={f['max_retard']:.2f}°  cyl={f['worst_cyl']}  @{f['worst_rpm']:.0f}rpm  ({f['wot_count']} WOT samples)")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def main():
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="ME7 per-cylinder knock analysis from ME7Logger CSV files",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument("log_dir", help="Directory containing ME7Logger CSV log files")
+    parser.add_argument("--rpm-min", type=int, default=3000, help="Min RPM for WOT (default: 3000)")
+    parser.add_argument("--rpm-max", type=int, default=7000, help="Max RPM for WOT (default: 7000)")
+    parser.add_argument("--throttle-min", type=float, default=95.0, help="Min throttle %% for WOT (default: 95)")
+    parser.add_argument("--output", help="Write JSON report to file")
+    parser.add_argument("--top", type=int, default=20, help="Top N worst events (default: 20)")
+    parser.add_argument("--json", action="store_true", help="Output JSON instead of human report")
+
+    args = parser.parse_args()
+
+    log_dir = args.log_dir
+    if not os.path.isdir(log_dir):
+        print(f"Error: {log_dir} is not a directory", file=sys.stderr)
+        sys.exit(1)
+
+    # Find all CSV files
+    csv_files = sorted(glob.glob(os.path.join(log_dir, "*.csv")))
+    if not csv_files:
+        # Try recursive
+        csv_files = sorted(glob.glob(os.path.join(log_dir, "**/*.csv"), recursive=True))
+
+    if not csv_files:
+        print(f"No CSV files found in {log_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    print(f"Scanning {len(csv_files)} CSV files...", file=sys.stderr)
+
+    # Parse all logs
+    parsed_logs = []
+    for i, filepath in enumerate(csv_files):
+        if (i + 1) % 50 == 0:
+            print(f"  {i + 1}/{len(csv_files)}...", file=sys.stderr)
+        result = parse_log_file(filepath, args.rpm_min, args.rpm_max, args.throttle_min)
+        if result is not None and result["wot_samples"]:
+            parsed_logs.append(result)
+
+    print(f"Parsed {len(parsed_logs)} files with WOT data", file=sys.stderr)
+
+    if not parsed_logs:
+        print("No WOT data found in any log files.", file=sys.stderr)
+        sys.exit(1)
+
+    # Analyze
+    results = analyze_knock(parsed_logs, args.rpm_min, args.rpm_max)
+
+    # Serialize dates for JSON
+    def serialize(obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        raise TypeError(f"Type {type(obj)} not serializable")
+
+    if args.json or args.output:
+        json_str = json.dumps(results, indent=2, default=serialize)
+        if args.output:
+            with open(args.output, "w") as f:
+                f.write(json_str)
+            print(f"JSON report written to {args.output}", file=sys.stderr)
+        else:
+            print(json_str)
+    else:
+        print(format_human_report(results, args.top))
+
+
+if __name__ == "__main__":
+    main()

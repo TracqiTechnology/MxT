@@ -1,0 +1,527 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+# me7-tune-analyze — Automated ME7 tuning analysis harness
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Chains MxT CLI (optimizer, MLHFM, KRKTE) + ecuxPlot CLI (WOT stats, SAE
+# correction, boost efficiency) + me7-knock-analyze (per-cylinder knock) into
+# a single pipeline that produces structured, actionable calibration advice.
+#
+# Designed for AI-driven tuning: an agent loads logs + ECU files, runs this
+# script, and gets back a JSON + human-readable diagnosis with specific map
+# corrections.  The iterative loop is:
+#
+#     log → analyze → correct → flash → log → verify convergence
+#
+# Usage:
+#   bin/me7-tune-analyze --xdf <xdf> --bin <bin> --logs <dir> [options]
+#
+# Required:
+#   --xdf  <path>    XDF definition file
+#   --bin  <path>    BIN file (current calibration)
+#   --logs <path>    Directory of ME7Logger CSV log files
+#
+# Optional:
+#   --baseline-bin <path>   Baseline BIN for comparison (e.g. Denver tune)
+#   --baseline-logs <path>  Baseline log directory for comparison
+#   --output <dir>          Output directory (default: /tmp/me7-analysis)
+#   --displacement <cc>     Engine displacement in cc (default: 2703)
+#   --injector <cc>         Injector size in cc (default: 865)
+#   --cylinders <n>         Number of cylinders (default: 6)
+#   --fuel <type>           Fuel type: pump|e85|race (default: pump)
+#   --skip-ecuxplot         Skip ecuxPlot analysis
+#   --skip-optimizer        Skip MxT optimizer
+#   --skip-knock            Skip knock analysis
+#   --json                  Output machine-readable JSON report
+#   --verbose               Show full tool output
+#
+# Environment:
+#   MXT_DIR       Path to ME7Tuner project (default: script's parent dir)
+#   ECUXPLOT_DIR  Path to ecuxPlot project (default: ~/Projects/ecuxplot)
+#
+# Examples:
+#   # Full analysis of Washington tune
+#   bin/me7-tune-analyze \
+#     --xdf ~/Dropbox/S4/8D0907551M-latest/8D0907551M-20190711.xdf \
+#     --bin ~/Dropbox/S4/tunes/kaleb/v3.2.1/mmodified_v321.bin \
+#     --logs ~/Dropbox/S4/ME7Logger/logs/ \
+#     --baseline-bin ~/Dropbox/S4/tunes/kaleb/v2.7.4/mmodified_v274.bin
+#
+#   # Quick optimizer-only run
+#   bin/me7-tune-analyze --xdf X --bin B --logs L --skip-ecuxplot --skip-knock
+# ─────────────────────────────────────────────────────────────────────────────
+
+set -euo pipefail
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MXT_DIR="${MXT_DIR:-$(dirname "$SCRIPT_DIR")}"
+ECUXPLOT_DIR="${ECUXPLOT_DIR:-$HOME/Projects/ecuxplot}"
+OUTPUT_DIR="/tmp/me7-analysis"
+
+XDF_FILE=""
+BIN_FILE=""
+LOG_DIR=""
+BASELINE_BIN=""
+BASELINE_LOGS=""
+DISPLACEMENT=2703
+INJECTOR=865
+CYLINDERS=6
+FUEL="pump"
+SKIP_ECUXPLOT=false
+SKIP_OPTIMIZER=false
+SKIP_KNOCK=false
+JSON_OUTPUT=false
+VERBOSE=false
+
+# Fuel parameters (set after argument parsing below)
+
+# ── Argument parsing ─────────────────────────────────────────────────────────
+
+usage() {
+    head -n 48 "$0" | tail -n +3 | sed 's/^# \?//'
+    exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --xdf)        XDF_FILE="$2"; shift 2;;
+        --bin)        BIN_FILE="$2"; shift 2;;
+        --logs)       LOG_DIR="$2"; shift 2;;
+        --baseline-bin) BASELINE_BIN="$2"; shift 2;;
+        --baseline-logs) BASELINE_LOGS="$2"; shift 2;;
+        --output)     OUTPUT_DIR="$2"; shift 2;;
+        --displacement) DISPLACEMENT="$2"; shift 2;;
+        --injector)   INJECTOR="$2"; shift 2;;
+        --cylinders)  CYLINDERS="$2"; shift 2;;
+        --fuel)       FUEL="$2"; shift 2;;
+        --skip-ecuxplot) SKIP_ECUXPLOT=true; shift;;
+        --skip-optimizer) SKIP_OPTIMIZER=true; shift;;
+        --skip-knock) SKIP_KNOCK=true; shift;;
+        --json)       JSON_OUTPUT=true; shift;;
+        --verbose)    VERBOSE=true; shift;;
+        --help|-h)    usage;;
+        *) echo "Unknown option: $1"; usage;;
+    esac
+done
+
+# ── Validation ───────────────────────────────────────────────────────────────
+
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+[[ -n "$XDF_FILE" ]] || die "Missing --xdf <xdf-file>"
+[[ -n "$BIN_FILE" ]] || die "Missing --bin <bin-file>"
+[[ -n "$LOG_DIR" ]]  || die "Missing --logs <log-directory>"
+[[ -f "$XDF_FILE" ]] || die "XDF file not found: $XDF_FILE"
+[[ -f "$BIN_FILE" ]] || die "BIN file not found: $BIN_FILE"
+[[ -d "$LOG_DIR" ]]  || die "Log directory not found: $LOG_DIR"
+
+if [[ -n "$BASELINE_BIN" && ! -f "$BASELINE_BIN" ]]; then
+    die "Baseline BIN not found: $BASELINE_BIN"
+fi
+if [[ -n "$BASELINE_LOGS" && ! -d "$BASELINE_LOGS" ]]; then
+    die "Baseline log directory not found: $BASELINE_LOGS"
+fi
+
+[[ -d "$MXT_DIR" ]] || die "MxT directory not found: $MXT_DIR"
+
+# Resolve fuel parameters
+case "$FUEL" in
+    pump) AFR=14.7; GAS_DENSITY=0.72; OCTANE=92;;
+    e85)  AFR=9.8;  GAS_DENSITY=0.79; OCTANE=105;;
+    race) AFR=14.7; GAS_DENSITY=0.72; OCTANE=104;;
+    *)    AFR=14.7; GAS_DENSITY=0.72; OCTANE=92;;
+esac
+
+# ── Output setup ─────────────────────────────────────────────────────────────
+
+mkdir -p "$OUTPUT_DIR"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+REPORT_DIR="$OUTPUT_DIR/$TIMESTAMP"
+mkdir -p "$REPORT_DIR"
+
+log_step() { echo ""; echo "══════════════════════════════════════════════════════════════"; echo "  $1"; echo "══════════════════════════════════════════════════════════════"; }
+log_info() { echo "  ▸ $*"; }
+log_warn() { echo "  ⚠ $*"; }
+
+# Redirect verbose output
+if $VERBOSE; then
+    REDIR=""
+else
+    REDIR="> /dev/null 2>&1"
+fi
+
+# ── Helper: run MxT CLI commands via pipe ────────────────────────────────────
+
+run_mxt() {
+    local commands="$1"
+    local output_file="${2:-/dev/stdout}"
+    echo "$commands" | (cd "$MXT_DIR" && ./gradlew -q cli 2>/dev/null) > "$output_file"
+}
+
+# ── Helper: run ecuxPlot CLI commands via pipe ───────────────────────────────
+
+run_ecuxplot() {
+    local commands="$1"
+    local output_file="${2:-/dev/stdout}"
+    if [[ -d "$ECUXPLOT_DIR" ]]; then
+        local cp="$ECUXPLOT_DIR/build/classes"
+        for jar in "$ECUXPLOT_DIR"/lib/*.jar; do
+            cp="$cp:$jar"
+        done
+        echo "$commands" | java -cp "$cp" org.nyet.ecuxplot.ECUxCLI 2>/dev/null > "$output_file"
+    else
+        log_warn "ecuxPlot not found at $ECUXPLOT_DIR — skipping"
+        return 1
+    fi
+}
+
+# ── Phase 0: Session Header ──────────────────────────────────────────────────
+
+log_step "ME7 Automated Tune Analysis"
+log_info "Timestamp:    $TIMESTAMP"
+log_info "XDF:          $(basename "$XDF_FILE")"
+log_info "BIN:          $(basename "$BIN_FILE")"
+log_info "Logs:         $LOG_DIR"
+log_info "Fuel:         $FUEL (AFR=$AFR, octane=$OCTANE)"
+log_info "Displacement: ${DISPLACEMENT}cc / $CYLINDERS cyl"
+log_info "Injector:     ${INJECTOR}cc"
+log_info "Output:       $REPORT_DIR"
+[[ -n "$BASELINE_BIN" ]] && log_info "Baseline BIN: $(basename "$BASELINE_BIN")"
+[[ -n "$BASELINE_LOGS" ]] && log_info "Baseline logs: $BASELINE_LOGS"
+echo ""
+
+# Count log files (follow symlinks with -L)
+LOG_COUNT=$(find -L "$LOG_DIR" -name "*.csv" -type f 2>/dev/null | wc -l | tr -d ' ')
+log_info "Found $LOG_COUNT log files"
+
+# ── Phase 1: MxT — Load ECU + Extract Maps ──────────────────────────────────
+
+log_step "Phase 1: ECU Map Extraction (MxT CLI)"
+
+MXT_COMMANDS="load-ecu \"$XDF_FILE\" \"$BIN_FILE\"
+summary
+maps"
+
+# Extract key maps individually
+KEY_MAPS="KFLDRL KFLDIMX KFPBRK KFMIOP KFMIRL MLHFM KFURL KFZWOP KFZW LAMFA KRKTE LDRXN KFLF"
+for map_name in $KEY_MAPS; do
+    MXT_COMMANDS="$MXT_COMMANDS
+map $map_name"
+done
+
+# Export key maps to CSV
+for map_name in $KEY_MAPS; do
+    MXT_COMMANDS="$MXT_COMMANDS
+export $map_name \"$REPORT_DIR/${map_name}.csv\""
+done
+
+MXT_COMMANDS="$MXT_COMMANDS
+quit"
+
+log_info "Loading ECU and extracting $( echo $KEY_MAPS | wc -w | tr -d ' ') key maps..."
+run_mxt "$MXT_COMMANDS" "$REPORT_DIR/phase1_ecu.txt"
+log_info "ECU data saved to $REPORT_DIR/phase1_ecu.txt"
+
+# ── Phase 1b: Baseline comparison (if provided) ─────────────────────────────
+
+if [[ -n "$BASELINE_BIN" ]]; then
+    log_step "Phase 1b: Baseline Binary Comparison"
+
+    BASELINE_COMMANDS="load-ecu \"$XDF_FILE\" \"$BASELINE_BIN\"
+summary"
+
+    for map_name in $KEY_MAPS; do
+        BASELINE_COMMANDS="$BASELINE_COMMANDS
+export $map_name \"$REPORT_DIR/baseline_${map_name}.csv\""
+    done
+
+    BASELINE_COMMANDS="$BASELINE_COMMANDS
+quit"
+
+    log_info "Loading baseline and exporting maps..."
+    run_mxt "$BASELINE_COMMANDS" "$REPORT_DIR/phase1b_baseline.txt"
+
+    # Diff each map CSV
+    log_info "Computing map deltas..."
+    DIFF_REPORT="$REPORT_DIR/map_deltas.txt"
+    echo "=== Map Comparison: $(basename "$BASELINE_BIN") → $(basename "$BIN_FILE") ===" > "$DIFF_REPORT"
+    echo "" >> "$DIFF_REPORT"
+
+    for map_name in $KEY_MAPS; do
+        current="$REPORT_DIR/${map_name}.csv"
+        baseline="$REPORT_DIR/baseline_${map_name}.csv"
+        if [[ -f "$current" && -f "$baseline" ]]; then
+            if diff -q "$current" "$baseline" > /dev/null 2>&1; then
+                echo "$map_name: IDENTICAL" >> "$DIFF_REPORT"
+            else
+                echo "" >> "$DIFF_REPORT"
+                echo "--- $map_name: CHANGED ---" >> "$DIFF_REPORT"
+                diff --unified "$baseline" "$current" >> "$DIFF_REPORT" 2>/dev/null || true
+            fi
+        fi
+    done
+    log_info "Map deltas saved to $DIFF_REPORT"
+fi
+
+# ── Phase 2: MxT — Optimizer ────────────────────────────────────────────────
+
+if ! $SKIP_OPTIMIZER; then
+    log_step "Phase 2: MxT Optimizer"
+
+    OPT_COMMANDS="load-ecu \"$XDF_FILE\" \"$BIN_FILE\"
+load-logs \"$LOG_DIR\" --type optimizer
+optimize
+quit"
+
+    log_info "Running optimizer on $LOG_COUNT log files..."
+    run_mxt "$OPT_COMMANDS" "$REPORT_DIR/phase2_optimizer.txt"
+    log_info "Optimizer output saved to $REPORT_DIR/phase2_optimizer.txt"
+fi
+
+# ── Phase 3: MxT — KRKTE Calculation ────────────────────────────────────────
+
+log_step "Phase 3: KRKTE Injection Constant"
+
+KRKTE_COMMANDS="load-ecu \"$XDF_FILE\" \"$BIN_FILE\"
+krkte --displacement $DISPLACEMENT --injector $INJECTOR --afr $AFR --gas-density $GAS_DENSITY
+quit"
+
+log_info "Calculating KRKTE for ${DISPLACEMENT}cc / ${INJECTOR}cc / AFR=$AFR..."
+run_mxt "$KRKTE_COMMANDS" "$REPORT_DIR/phase3_krkte.txt"
+log_info "KRKTE output saved to $REPORT_DIR/phase3_krkte.txt"
+
+# ── Phase 4: MxT — MLHFM Correction ─────────────────────────────────────────
+
+log_step "Phase 4: MLHFM MAF Correction"
+
+MLHFM_COMMANDS="load-ecu \"$XDF_FILE\" \"$BIN_FILE\"
+load-logs \"$LOG_DIR\" --type closed
+mlhfm-correct --mode closed
+quit"
+
+log_info "Running closed-loop MLHFM correction..."
+run_mxt "$MLHFM_COMMANDS" "$REPORT_DIR/phase4_mlhfm.txt"
+log_info "MLHFM output saved to $REPORT_DIR/phase4_mlhfm.txt"
+
+# ── Phase 5: MxT — Mechanical Limits ────────────────────────────────────────
+
+log_step "Phase 5: Mechanical Limit Detection"
+
+LIMITS_COMMANDS="load-ecu \"$XDF_FILE\" \"$BIN_FILE\"
+load-logs \"$LOG_DIR\" --type optimizer
+limits
+quit"
+
+log_info "Checking mechanical limits..."
+run_mxt "$LIMITS_COMMANDS" "$REPORT_DIR/phase5_limits.txt"
+log_info "Limits output saved to $REPORT_DIR/phase5_limits.txt"
+
+# ── Phase 6: ecuxPlot — WOT Performance Analysis ────────────────────────────
+
+if ! $SKIP_ECUXPLOT; then
+    log_step "Phase 6: ecuxPlot WOT Performance Analysis"
+
+    if [[ -d "$ECUXPLOT_DIR" ]]; then
+        ECUX_COMMANDS="load current \"$LOG_DIR\"
+summary
+sae-compare
+pressure
+metrics"
+
+        # Add baseline comparison if provided
+        if [[ -n "$BASELINE_LOGS" ]]; then
+            ECUX_COMMANDS="load baseline \"$BASELINE_LOGS\"
+$ECUX_COMMANDS
+compare baseline current
+efficiency \"Max WHP\"
+da-normalize \"Max WHP\"
+trend current \"Max WHP\"
+trend baseline \"Max WHP\""
+        else
+            ECUX_COMMANDS="$ECUX_COMMANDS
+trend current \"Max WHP\""
+        fi
+
+        ECUX_COMMANDS="$ECUX_COMMANDS
+quit"
+
+        log_info "Running ecuxPlot analysis..."
+        run_ecuxplot "$ECUX_COMMANDS" "$REPORT_DIR/phase6_ecuxplot.txt"
+        log_info "ecuxPlot output saved to $REPORT_DIR/phase6_ecuxplot.txt"
+    else
+        log_warn "ecuxPlot not found at $ECUXPLOT_DIR — skipping WOT analysis"
+    fi
+fi
+
+# ── Phase 7: Per-Cylinder Knock Analysis ─────────────────────────────────────
+
+if ! $SKIP_KNOCK; then
+    log_step "Phase 7: Per-Cylinder Knock Analysis"
+
+    KNOCK_SCRIPT="$SCRIPT_DIR/me7-knock-analyze"
+    if [[ -f "$KNOCK_SCRIPT" ]]; then
+        log_info "Running per-cylinder knock analysis..."
+        python3 "$KNOCK_SCRIPT" "$LOG_DIR" \
+            --output "$REPORT_DIR/phase7_knock.json" \
+            > "$REPORT_DIR/phase7_knock.txt" 2>&1 || true
+
+        log_info "Knock report saved to $REPORT_DIR/phase7_knock.txt"
+        log_info "Knock JSON saved to $REPORT_DIR/phase7_knock.json"
+    else
+        log_warn "Knock analysis script not found at $KNOCK_SCRIPT"
+    fi
+fi
+
+# ── Phase 8: Synthesis Report ────────────────────────────────────────────────
+
+log_step "Phase 8: Synthesis Report"
+
+SYNTHESIS="$REPORT_DIR/REPORT.md"
+cat > "$SYNTHESIS" << 'HEADER'
+# ME7 Automated Tune Analysis Report
+HEADER
+
+cat >> "$SYNTHESIS" << EOF
+
+**Generated:** $(date)
+**BIN:** $(basename "$BIN_FILE")
+**XDF:** $(basename "$XDF_FILE")
+**Logs:** $LOG_DIR ($LOG_COUNT files)
+**Fuel:** $FUEL (AFR=$AFR, octane=$OCTANE)
+**Engine:** ${DISPLACEMENT}cc / $CYLINDERS cyl / ${INJECTOR}cc injectors
+
+---
+
+## Phase Results
+
+Each phase output is in the \`$REPORT_DIR\` directory:
+
+| Phase | File | Description |
+|-------|------|-------------|
+| 1 | phase1_ecu.txt | ECU map extraction + key map values |
+| 2 | phase2_optimizer.txt | MxT optimizer (KFLDRL, KFLDIMX, pressure errors) |
+| 3 | phase3_krkte.txt | KRKTE injection constant calculation |
+| 4 | phase4_mlhfm.txt | MLHFM closed-loop correction |
+| 5 | phase5_limits.txt | Mechanical limits (MAF, injector, turbo, MAP) |
+| 6 | phase6_ecuxplot.txt | ecuxPlot WOT stats, SAE correction, efficiency |
+| 7 | phase7_knock.txt | Per-cylinder knock analysis + KFZWOP recommendations |
+| 7 | phase7_knock.json | Knock analysis (machine-readable) |
+EOF
+
+if [[ -n "$BASELINE_BIN" ]]; then
+    cat >> "$SYNTHESIS" << EOF
+| 1b | phase1b_baseline.txt | Baseline ECU extraction |
+| 1b | map_deltas.txt | Map-by-map diff (baseline → current) |
+EOF
+fi
+
+cat >> "$SYNTHESIS" << EOF
+
+## Key Map CSVs
+
+Exported maps are in \`$REPORT_DIR/*.csv\`. Load these into a spreadsheet
+or programmatically compare against corrected values.
+
+## Next Steps
+
+1. Read \`phase2_optimizer.txt\` for KFLDRL/KFLDIMX corrections
+2. Read \`phase7_knock.txt\` for KFZWOP timing reduction recommendations
+3. Read \`phase4_mlhfm.txt\` for MLHFM scaling corrections
+4. Read \`phase3_krkte.txt\` to verify injection constant
+5. Read \`phase5_limits.txt\` to check hardware limits
+6. Read \`phase6_ecuxplot.txt\` for overall performance assessment
+
+## Iterative Workflow
+
+\`\`\`
+1. Run this analysis       → identify corrections needed
+2. Apply corrections       → update BIN with corrected maps
+3. Flash + log             → collect new ME7Logger data
+4. Re-run this analysis    → verify convergence
+5. Repeat until:
+   - Knock retard (dwkrz) < 2° per cylinder at all RPM
+   - Optimizer pressure error < 100 mbar
+   - SAE-corrected HP/PSI > 10.0
+   - No mechanical limits exceeded
+\`\`\`
+EOF
+
+log_info "Synthesis report saved to $SYNTHESIS"
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+
+log_step "Analysis Complete"
+echo ""
+log_info "All results in: $REPORT_DIR"
+echo ""
+echo "  Key files:"
+echo "    $REPORT_DIR/REPORT.md              ← Start here"
+[[ -f "$REPORT_DIR/phase2_optimizer.txt" ]] && \
+echo "    $REPORT_DIR/phase2_optimizer.txt    ← Boost corrections"
+[[ -f "$REPORT_DIR/phase7_knock.txt" ]] && \
+echo "    $REPORT_DIR/phase7_knock.txt        ← Knock diagnosis"
+[[ -f "$REPORT_DIR/phase7_knock.json" ]] && \
+echo "    $REPORT_DIR/phase7_knock.json       ← Knock data (JSON)"
+[[ -f "$REPORT_DIR/phase4_mlhfm.txt" ]] && \
+echo "    $REPORT_DIR/phase4_mlhfm.txt        ← MAF correction"
+[[ -f "$REPORT_DIR/phase6_ecuxplot.txt" ]] && \
+echo "    $REPORT_DIR/phase6_ecuxplot.txt      ← WOT performance"
+[[ -f "$REPORT_DIR/map_deltas.txt" ]] && \
+echo "    $REPORT_DIR/map_deltas.txt           ← Baseline comparison"
+echo ""
+
+# ── JSON output (optional) ───────────────────────────────────────────────────
+
+if $JSON_OUTPUT; then
+    # Build a JSON manifest of all outputs
+    python3 -c "
+import json, os, sys
+
+report_dir = sys.argv[1]
+manifest = {
+    'report_dir': report_dir,
+    'phases': {}
+}
+
+phase_files = {
+    'ecu': 'phase1_ecu.txt',
+    'optimizer': 'phase2_optimizer.txt',
+    'krkte': 'phase3_krkte.txt',
+    'mlhfm': 'phase4_mlhfm.txt',
+    'limits': 'phase5_limits.txt',
+    'ecuxplot': 'phase6_ecuxplot.txt',
+    'knock_report': 'phase7_knock.txt',
+    'knock_json': 'phase7_knock.json',
+    'baseline': 'phase1b_baseline.txt',
+    'map_deltas': 'map_deltas.txt',
+}
+
+for key, filename in phase_files.items():
+    path = os.path.join(report_dir, filename)
+    if os.path.exists(path):
+        with open(path, 'r') as f:
+            content = f.read()
+        manifest['phases'][key] = {
+            'file': path,
+            'size': len(content),
+            'preview': content[:500],
+        }
+        # Include full knock JSON if available
+        if key == 'knock_json':
+            try:
+                manifest['phases'][key]['data'] = json.loads(content)
+            except json.JSONDecodeError:
+                pass
+
+# Map CSVs
+manifest['maps'] = {}
+for f in sorted(os.listdir(report_dir)):
+    if f.endswith('.csv') and not f.startswith('baseline_'):
+        path = os.path.join(report_dir, f)
+        manifest['maps'][f.replace('.csv', '')] = path
+
+print(json.dumps(manifest, indent=2))
+" "$REPORT_DIR"
+fi
