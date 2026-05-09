@@ -1,0 +1,830 @@
+#!/usr/bin/env python3
+"""
+ME7 Binary Writer — applies calibration changes to ME7 ECU binaries.
+
+Closes the tuning loop: me7-tune-analyze diagnoses → me7-bin-write corrects.
+
+Usage:
+  bin/me7-bin-write --xdf <xdf> --bin <source.bin> --out <output.bin> [actions...]
+
+Actions (applied in order):
+  --restore <map> --from <reference.bin>
+      Copy raw map bytes from a reference binary (e.g., restore Denver values).
+
+  --apply-optimizer <phase2_optimizer.txt>
+      Parse MxT optimizer output and write KFLDRL + KFLDIMX suggestions.
+
+  --apply-knock <phase7_knock.json>
+      Parse knock analysis recommendations and reduce KFZWOP timing.
+
+  --set-map <map> --csv <file.csv>
+      Set a map's z-data from a CSV file (physical values).
+
+  --iat-taper <map> --profile <cold_factor>,<hot_factor>
+      Write an IAT-based load correction taper (e.g., for KFTARX).
+      Profile is comma-separated factors from coldest to hottest IAT breakpoint.
+
+  --apply-changes <changes.json>
+      Batch multiple changes from a JSON specification file.
+
+  --changelog <file>
+      Write a detailed changelog (default: <output>.log alongside the binary).
+
+Options:
+  --dry-run         Show what would be written without modifying the binary.
+  --verify          After writing, read back and verify all changes.
+  --verbose         Show detailed output for each cell written.
+  --help            This message.
+
+Examples:
+  # Restore KFLAMKRL and KFZWWLNM from Denver, apply optimizer + knock fixes
+  bin/me7-bin-write \\
+    --xdf 8D0907551M-20190711.xdf \\
+    --bin v3.2.1/mmodified_v321.bin \\
+    --out v3.2.2/mmodified_v322.bin \\
+    --restore KFLAMKRL --from v2.7.4/mmodified_v274.bin \\
+    --restore KFZWWLNM --from v2.7.4/mmodified_v274.bin \\
+    --apply-optimizer /tmp/me7-analysis/phase2_optimizer.txt \\
+    --apply-knock /tmp/me7-analysis/phase7_knock.json \\
+    --iat-taper KFTARX --profile 1.02,1.02,0.97,0.97,0.92,0.75,0.75,0.60
+
+  # Apply batch changes from a JSON spec
+  bin/me7-bin-write \\
+    --xdf def.xdf --bin source.bin --out target.bin \\
+    --apply-changes changes.json
+
+JSON changes format:
+  {
+    "changes": [
+      {"action": "restore", "map": "KFLAMKRL", "from": "reference.bin"},
+      {"action": "optimizer", "file": "phase2_optimizer.txt"},
+      {"action": "knock", "file": "phase7_knock.json"},
+      {"action": "iat_taper", "map": "KFTARX", "profile": [1.02,1.0,0.97,0.92,0.85,0.75,0.65,0.60]},
+      {"action": "set_map", "map": "KFZWOP", "csv": "corrected_kfzwop.csv"}
+    ]
+  }
+"""
+
+import argparse
+import csv
+import json
+import os
+import re
+import shutil
+import struct
+import sys
+import xml.etree.ElementTree as ET
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+
+# ── XDF Parsing ──────────────────────────────────────────────────────────────
+
+@dataclass
+class AxisDef:
+    address: int
+    size_bits: int
+    count: int
+    rows: int
+    cols: int
+    equation_scale: float
+    equation_offset: float
+    lsb_first: bool  # True = little-endian
+
+@dataclass
+class MapDef:
+    name: str
+    description: str
+    x_axis: AxisDef
+    y_axis: AxisDef
+    z_axis: AxisDef
+    rows: int
+    cols: int
+
+
+def parse_equation(eq_str: str) -> Tuple[float, float]:
+    """Parse XDF equation string like '0.750000 * X' or '0.75*X - 48' into (scale, offset).
+    Also handles TunerPro quirk format: '0.750000 * X+ -48.000000'."""
+    eq_str = eq_str.strip()
+
+    # Try: scale * X [+/- offset]  (handles '+ -48', '- 48', '+48', etc.)
+    m = re.match(r'^([-+]?\d*\.?\d+)\s*\*\s*X\s*([+-]\s*[-+]?\d*\.?\d+)?$', eq_str)
+    if m:
+        scale = float(m.group(1))
+        offset = 0.0
+        if m.group(2):
+            offset_str = m.group(2).replace(' ', '')
+            # Collapse double-signs: '+-' → '-', '-+' → '-', '--' → '+', '++' → '+'
+            if offset_str.startswith('+-') or offset_str.startswith('-+'):
+                offset_str = '-' + offset_str[2:]
+            elif offset_str.startswith('--'):
+                offset_str = offset_str[2:]
+            elif offset_str.startswith('++'):
+                offset_str = '+' + offset_str[2:]
+            offset = float(offset_str)
+        return scale, offset
+
+    # Try: X * scale
+    m = re.match(r'^X\s*\*\s*([-+]?\d*\.?\d+)$', eq_str)
+    if m:
+        return float(m.group(1)), 0.0
+
+    # Try: just X
+    if eq_str.strip() == 'X':
+        return 1.0, 0.0
+
+    # Fallback
+    return 1.0, 0.0
+
+
+def parse_axis(axis_el, default_lsb_first: bool) -> AxisDef:
+    """Parse an XDFAXIS element into an AxisDef."""
+    embedded = axis_el.find('EMBEDDEDDATA')
+    if embedded is None:
+        return AxisDef(0, 8, 1, 1, 1, 1.0, 0.0, default_lsb_first)
+
+    addr = int(embedded.get('mmedaddress', '0x0'), 0)
+    size_bits = int(embedded.get('mmedelementsizebits', '8'))
+    rows = int(embedded.get('mmedrowcount', '1'))
+    cols = int(embedded.get('mmedcolcount', '1'))
+
+    # Count from indexcount or rows*cols
+    count_el = axis_el.find('indexcount')
+    count = int(count_el.text) if count_el is not None else max(rows * cols, 1)
+
+    # Endianness: mmedtypeflags bit 1 = LSB first
+    type_flags = int(embedded.get('mmedtypeflags', '0x0'), 0)
+    if type_flags != 0:
+        lsb_first = bool(type_flags & 0x02)
+    else:
+        lsb_first = default_lsb_first
+
+    # Equation
+    math_el = axis_el.find('MATH')
+    if math_el is not None:
+        eq = math_el.get('equation', 'X')
+        scale, offset = parse_equation(eq)
+    else:
+        scale, offset = 1.0, 0.0
+
+    return AxisDef(addr, size_bits, count, rows, cols, scale, offset, lsb_first)
+
+
+def parse_xdf(xdf_path: str) -> Tuple[Dict[str, MapDef], bool]:
+    """Parse XDF file and return map definitions and default endianness."""
+    tree = ET.parse(xdf_path)
+    root = tree.getroot()
+
+    # Parse header defaults
+    header = root.find('.//XDFHEADER')
+    default_lsb_first = True
+    if header is not None:
+        defaults = header.find('DEFAULTS')
+        if defaults is not None:
+            default_lsb_first = defaults.get('lsbfirst', '1') == '1'
+
+    maps = {}
+    for table in root.iter('XDFTABLE'):
+        title_el = table.find('title')
+        if title_el is None or not title_el.text:
+            continue
+
+        name = title_el.text.strip()
+        desc_el = table.find('description')
+        desc = desc_el.text.strip() if desc_el is not None and desc_el.text else ''
+
+        # Parse axes
+        axes = {}
+        for axis_el in table.findall('XDFAXIS'):
+            axis_id = axis_el.get('id', '')
+            axes[axis_id] = parse_axis(axis_el, default_lsb_first)
+
+        x = axes.get('x', AxisDef(0, 8, 1, 1, 1, 1.0, 0.0, default_lsb_first))
+        y = axes.get('y', AxisDef(0, 8, 1, 1, 1, 1.0, 0.0, default_lsb_first))
+        z = axes.get('z', AxisDef(0, 8, 1, 1, 1, 1.0, 0.0, default_lsb_first))
+
+        rows = z.rows if z.rows > 1 else y.count
+        cols = z.cols if z.cols > 1 else x.count
+
+        # Handle duplicate names — keep first (primary) definition
+        if name not in maps:
+            maps[name] = MapDef(name, desc, x, y, z, rows, cols)
+
+    return maps, default_lsb_first
+
+
+# ── Binary I/O ───────────────────────────────────────────────────────────────
+
+def read_raw(data: bytes, addr: int, size_bits: int, index: int, lsb_first: bool) -> int:
+    """Read a single raw value from binary data."""
+    if size_bits == 8:
+        return data[addr + index]
+    elif size_bits == 16:
+        fmt = '<H' if lsb_first else '>H'
+        return struct.unpack_from(fmt, data, addr + index * 2)[0]
+    elif size_bits == 32:
+        fmt = '<I' if lsb_first else '>I'
+        return struct.unpack_from(fmt, data, addr + index * 4)[0]
+    else:
+        return data[addr + index]
+
+
+def write_raw(data: bytearray, addr: int, size_bits: int, index: int,
+              value: int, lsb_first: bool) -> None:
+    """Write a single raw value to binary data."""
+    byte_size = size_bits // 8
+    if size_bits == 8:
+        value = max(0, min(255, int(round(value))))
+        data[addr + index] = value
+    elif size_bits == 16:
+        value = max(0, min(65535, int(round(value))))
+        fmt = '<H' if lsb_first else '>H'
+        struct.pack_into(fmt, data, addr + index * 2, value)
+    elif size_bits == 32:
+        value = max(0, min(0xFFFFFFFF, int(round(value))))
+        fmt = '<I' if lsb_first else '>I'
+        struct.pack_into(fmt, data, addr + index * 4, value)
+
+
+def phys_to_raw(value: float, scale: float, offset: float) -> float:
+    """Convert physical value to raw: raw = (physical - offset) / scale."""
+    if scale == 0:
+        return 0
+    return (value - offset) / scale
+
+
+def raw_to_phys(raw: int, scale: float, offset: float) -> float:
+    """Convert raw value to physical: physical = scale * raw + offset."""
+    return scale * raw + offset
+
+
+def read_map_physical(data: bytes, map_def: MapDef) -> List[List[float]]:
+    """Read a map from binary and return physical values."""
+    z = map_def.z_axis
+    result = []
+    for r in range(map_def.rows):
+        row = []
+        for c in range(map_def.cols):
+            raw = read_raw(data, z.address, z.size_bits, r * map_def.cols + c, z.lsb_first)
+            row.append(round(raw_to_phys(raw, z.equation_scale, z.equation_offset), 6))
+        result.append(row)
+    return result
+
+
+def read_axis_physical(data: bytes, axis: AxisDef) -> List[float]:
+    """Read an axis from binary and return physical values."""
+    result = []
+    for i in range(axis.count):
+        raw = read_raw(data, axis.address, axis.size_bits, i, axis.lsb_first)
+        result.append(round(raw_to_phys(raw, axis.equation_scale, axis.equation_offset), 4))
+    return result
+
+
+def map_byte_range(map_def: MapDef) -> Tuple[int, int]:
+    """Return (start_addr, end_addr) of a map's z-data."""
+    z = map_def.z_axis
+    byte_size = z.size_bits // 8
+    total = map_def.rows * map_def.cols * byte_size
+    return z.address, z.address + total - 1
+
+
+# ── Change Actions ───────────────────────────────────────────────────────────
+
+@dataclass
+class ChangeRecord:
+    map_name: str
+    action: str
+    cells_changed: int
+    details: List[str] = field(default_factory=list)
+
+
+def action_restore(data: bytearray, ref_data: bytes, map_def: MapDef,
+                   verbose: bool = False) -> ChangeRecord:
+    """Copy map bytes from a reference binary."""
+    z = map_def.z_axis
+    total = map_def.rows * map_def.cols
+    byte_size = z.size_bits // 8
+    record = ChangeRecord(map_def.name, 'restore', 0)
+
+    for i in range(total):
+        offset = z.address + i * byte_size
+        for b in range(byte_size):
+            if data[offset + b] != ref_data[offset + b]:
+                record.cells_changed += 1
+                break
+
+        for b in range(byte_size):
+            data[offset + b] = ref_data[offset + b]
+
+    record.details.append(f"Restored {record.cells_changed}/{total} cells from reference binary")
+    return record
+
+
+def action_set_map_values(data: bytearray, map_def: MapDef,
+                          values: List[List[float]], verbose: bool = False) -> ChangeRecord:
+    """Write physical values to a map."""
+    z = map_def.z_axis
+    record = ChangeRecord(map_def.name, 'set_values', 0)
+
+    for r in range(min(map_def.rows, len(values))):
+        for c in range(min(map_def.cols, len(values[r]))):
+            phys = values[r][c]
+            raw = phys_to_raw(phys, z.equation_scale, z.equation_offset)
+            idx = r * map_def.cols + c
+
+            old_raw = read_raw(data, z.address, z.size_bits, idx, z.lsb_first)
+            new_raw = int(round(raw))
+
+            if old_raw != new_raw:
+                write_raw(data, z.address, z.size_bits, idx, new_raw, z.lsb_first)
+                record.cells_changed += 1
+                if verbose:
+                    old_phys = raw_to_phys(old_raw, z.equation_scale, z.equation_offset)
+                    new_phys = raw_to_phys(new_raw, z.equation_scale, z.equation_offset)
+                    record.details.append(f"  [{r},{c}]: {old_phys:.4f} -> {new_phys:.4f}")
+
+    record.details.insert(0, f"Set {record.cells_changed} cells to specified values")
+    return record
+
+
+def action_iat_taper(data: bytearray, map_def: MapDef, source_data: bytes,
+                     profile: List[float], verbose: bool = False) -> ChangeRecord:
+    """Write IAT-based taper profile to a map. Profile length must match column count."""
+    z = map_def.z_axis
+    record = ChangeRecord(map_def.name, 'iat_taper', 0)
+
+    if len(profile) != map_def.cols:
+        record.details.append(
+            f"ERROR: Profile has {len(profile)} values but map has {map_def.cols} columns. "
+            f"Read the IAT axis to determine correct breakpoints."
+        )
+        return record
+
+    # Read the IAT (x) axis for logging
+    iat_axis = read_axis_physical(source_data, map_def.x_axis)
+    record.details.append(f"IAT axis: {iat_axis}")
+    record.details.append(f"Profile:  {profile}")
+
+    values = []
+    for r in range(map_def.rows):
+        values.append(list(profile))
+
+    return action_set_map_values(data, map_def, values, verbose)
+
+
+def parse_optimizer_output(text: str) -> Tuple[Optional[List[List[float]]], Optional[List[List[float]]]]:
+    """Parse MxT optimizer output to extract KFLDRL and KFLDIMX suggestion tables."""
+    kfldrl = None
+    kfldimx = None
+
+    lines = text.split('\n')
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+
+        # Look for KFLDRL or KFLDIMX table headers
+        if 'KFLDRL' in line and ('suggested' in line.lower() or 'corrected' in line.lower()
+                                  or 'linearization' in line.lower()):
+            table = _parse_table_block(lines, i + 1)
+            if table:
+                kfldrl = table
+
+        elif 'KFLDIMX' in line and ('suggested' in line.lower() or 'corrected' in line.lower()
+                                     or 'integral' in line.lower() or 'i-term' in line.lower()):
+            table = _parse_table_block(lines, i + 1)
+            if table:
+                kfldimx = table
+
+        i += 1
+
+    return kfldrl, kfldimx
+
+
+def _parse_table_block(lines: List[str], start: int) -> Optional[List[List[float]]]:
+    """Parse a formatted table block (header row + data rows) into a 2D float list."""
+    rows = []
+    # Skip blank lines and find the header row
+    i = start
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+
+    if i >= len(lines):
+        return None
+
+    # The header row has the column labels — skip it
+    header = lines[i].strip()
+    if not any(c.isdigit() for c in header):
+        i += 1
+
+    # Now read data rows until we hit an empty line or non-data line
+    while i < len(lines):
+        line = lines[i].strip()
+        if not line:
+            if rows:
+                break
+            i += 1
+            continue
+
+        # Data row: RPM_label  val1  val2  val3 ...
+        parts = line.split()
+        try:
+            # First part is the RPM label, rest are values
+            vals = [float(p) for p in parts[1:]]
+            if vals:
+                rows.append(vals)
+        except (ValueError, IndexError):
+            if rows:
+                break
+
+        i += 1
+
+    return rows if rows else None
+
+
+def parse_knock_json(json_path: str) -> Dict:
+    """Parse knock analysis JSON and extract KFZWOP reduction recommendations."""
+    with open(json_path) as f:
+        data = json.load(f)
+
+    reductions = {}
+    if 'recommendations' in data:
+        for rec in data['recommendations']:
+            if 'rpm' in rec and 'load' in rec and 'reduction' in rec:
+                key = (rec['rpm'], rec['load'])
+                reductions[key] = rec['reduction']
+
+    return reductions
+
+
+def action_apply_knock(data: bytearray, map_def: MapDef, source_data: bytes,
+                       reductions: Dict, verbose: bool = False) -> ChangeRecord:
+    """Apply knock-based timing reductions to KFZWOP."""
+    z = map_def.z_axis
+    record = ChangeRecord(map_def.name, 'knock_reduction', 0)
+
+    # Read axes to find the right cells
+    load_axis = read_axis_physical(source_data, map_def.x_axis)
+    rpm_axis = read_axis_physical(source_data, map_def.y_axis)
+
+    for (rpm, load), reduction in reductions.items():
+        # Find nearest RPM row
+        rpm_idx = min(range(len(rpm_axis)), key=lambda i: abs(rpm_axis[i] - rpm))
+        # Find nearest load column
+        load_idx = min(range(len(load_axis)), key=lambda i: abs(load_axis[i] - load))
+
+        idx = rpm_idx * map_def.cols + load_idx
+        old_raw = read_raw(data, z.address, z.size_bits, idx, z.lsb_first)
+        old_phys = raw_to_phys(old_raw, z.equation_scale, z.equation_offset)
+
+        new_phys = max(3.0, old_phys - abs(reduction))  # Floor at 3°
+        new_raw = int(round(phys_to_raw(new_phys, z.equation_scale, z.equation_offset)))
+
+        if new_raw != old_raw:
+            write_raw(data, z.address, z.size_bits, idx, new_raw, z.lsb_first)
+            actual = raw_to_phys(new_raw, z.equation_scale, z.equation_offset)
+            record.cells_changed += 1
+            record.details.append(
+                f"  [{rpm_axis[rpm_idx]:.0f}rpm, {load_axis[load_idx]:.1f}%]: "
+                f"{old_phys:.2f}° -> {actual:.2f}° (Δ{actual-old_phys:+.2f}°)"
+            )
+
+    record.details.insert(0, f"Applied {record.cells_changed} knock-based timing reductions")
+    return record
+
+
+def read_csv_values(csv_path: str) -> List[List[float]]:
+    """Read a CSV file into a 2D list of float values.
+    Expects: first column is row label (RPM), first row is column label (load/pressure).
+    """
+    rows = []
+    with open(csv_path) as f:
+        reader = csv.reader(f)
+        header = next(reader)  # Skip header row
+        for row in reader:
+            # First column is RPM label, rest are values
+            try:
+                vals = [float(v.strip()) for v in row[1:] if v.strip()]
+                if vals:
+                    rows.append(vals)
+            except ValueError:
+                continue
+    return rows
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='ME7 Binary Writer — apply calibration changes to ECU binaries.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__
+    )
+
+    parser.add_argument('--xdf', required=True, help='XDF definition file')
+    parser.add_argument('--bin', required=True, help='Source binary file')
+    parser.add_argument('--out', required=True, help='Output binary file')
+    parser.add_argument('--changelog', help='Changelog output file (default: <out>.log)')
+    parser.add_argument('--dry-run', action='store_true', help='Show changes without writing')
+    parser.add_argument('--verify', action='store_true', help='Verify changes after writing')
+    parser.add_argument('--verbose', action='store_true', help='Show per-cell details')
+
+    # Action arguments are handled via custom parsing since argparse
+    # can't easily handle repeated --restore MAP --from FILE pairs
+    args, remaining = parser.parse_known_args()
+
+    # Parse action arguments manually
+    actions = parse_action_args(remaining)
+
+    if not actions:
+        parser.print_help()
+        print("\nERROR: No actions specified. Use --restore, --apply-optimizer, etc.")
+        sys.exit(1)
+
+    # Parse XDF
+    print(f"Parsing XDF: {os.path.basename(args.xdf)}")
+    maps, default_lsb = parse_xdf(args.xdf)
+    print(f"  {len(maps)} map definitions loaded")
+
+    # Read source binary
+    print(f"Reading source: {os.path.basename(args.bin)}")
+    with open(args.bin, 'rb') as f:
+        source_data = f.read()
+
+    # Create working copy
+    data = bytearray(source_data)
+
+    # Track all changes
+    all_records: List[ChangeRecord] = []
+
+    # Execute actions
+    for action in actions:
+        atype = action['type']
+        print(f"\n--- {atype.upper()}: {action.get('map', action.get('file', ''))} ---")
+
+        if atype == 'restore':
+            map_name = action['map']
+            ref_path = action['from']
+
+            if map_name not in maps:
+                print(f"  WARNING: Map '{map_name}' not found in XDF. Available: {sorted(maps.keys())[:20]}...")
+                continue
+
+            with open(ref_path, 'rb') as f:
+                ref_data = f.read()
+
+            record = action_restore(data, ref_data, maps[map_name], args.verbose)
+            all_records.append(record)
+            for d in record.details:
+                print(f"  {d}")
+
+        elif atype == 'optimizer':
+            opt_path = action['file']
+            with open(opt_path) as f:
+                opt_text = f.read()
+
+            kfldrl_vals, kfldimx_vals = parse_optimizer_output(opt_text)
+
+            if kfldrl_vals and 'KFLDRL' in maps:
+                record = action_set_map_values(data, maps['KFLDRL'], kfldrl_vals, args.verbose)
+                record.action = 'optimizer'
+                record.details.insert(0, "Applied KFLDRL from MxT optimizer suggestions")
+                all_records.append(record)
+                for d in record.details[:3]:
+                    print(f"  {d}")
+                if len(record.details) > 3:
+                    print(f"  ... ({len(record.details) - 3} more)")
+            else:
+                print("  WARNING: Could not parse KFLDRL from optimizer output")
+
+            if kfldimx_vals and 'KFLDIMX' in maps:
+                record = action_set_map_values(data, maps['KFLDIMX'], kfldimx_vals, args.verbose)
+                record.action = 'optimizer'
+                record.details.insert(0, "Applied KFLDIMX from MxT optimizer suggestions")
+                all_records.append(record)
+                for d in record.details[:3]:
+                    print(f"  {d}")
+                if len(record.details) > 3:
+                    print(f"  ... ({len(record.details) - 3} more)")
+            else:
+                print("  WARNING: Could not parse KFLDIMX from optimizer output")
+
+        elif atype == 'knock':
+            knock_path = action['file']
+            reductions = parse_knock_json(knock_path)
+
+            if reductions and 'KFZWOP' in maps:
+                record = action_apply_knock(data, maps['KFZWOP'], source_data,
+                                            reductions, args.verbose)
+                all_records.append(record)
+                for d in record.details:
+                    print(f"  {d}")
+            else:
+                print("  WARNING: No knock reductions found or KFZWOP not in XDF")
+
+        elif atype == 'iat_taper':
+            map_name = action['map']
+            profile = action['profile']
+
+            if map_name not in maps:
+                print(f"  WARNING: Map '{map_name}' not found in XDF")
+                continue
+
+            # Create the taper
+            map_def = maps[map_name]
+            z = map_def.z_axis
+            taper_record = ChangeRecord(map_name, 'iat_taper', 0)
+
+            iat_axis = read_axis_physical(source_data, map_def.x_axis)
+            taper_record.details.append(f"IAT axis: {iat_axis}")
+            taper_record.details.append(f"Profile:  {profile}")
+
+            # Expand or truncate profile to match columns
+            while len(profile) < map_def.cols:
+                profile.append(profile[-1])
+            profile = profile[:map_def.cols]
+
+            values = [list(profile) for _ in range(map_def.rows)]
+            record = action_set_map_values(data, map_def, values, args.verbose)
+            record.action = 'iat_taper'
+            record.details = taper_record.details + record.details
+            all_records.append(record)
+            for d in record.details:
+                print(f"  {d}")
+
+        elif atype == 'set_map':
+            map_name = action['map']
+            csv_path = action['csv']
+
+            if map_name not in maps:
+                print(f"  WARNING: Map '{map_name}' not found in XDF")
+                continue
+
+            values = read_csv_values(csv_path)
+            record = action_set_map_values(data, maps[map_name], values, args.verbose)
+            all_records.append(record)
+            for d in record.details:
+                print(f"  {d}")
+
+        elif atype == 'changes':
+            changes_path = action['file']
+            with open(changes_path) as f:
+                changes = json.load(f)
+
+            for change in changes.get('changes', []):
+                # Recursively apply each change
+                sub_action = {'type': change['action']}
+                sub_action.update(change)
+                actions.append(sub_action)
+
+    # Summary
+    total_bytes = sum(1 for a, b in zip(source_data, data) if a != b)
+    print(f"\n{'='*60}")
+    print(f"Total: {total_bytes} bytes changed across {len(all_records)} maps")
+
+    if args.dry_run:
+        print("\n*** DRY RUN — no files written ***")
+        return
+
+    # Write output
+    os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
+    with open(args.out, 'wb') as f:
+        f.write(data)
+    print(f"Written: {args.out} ({len(data)} bytes)")
+
+    # Verify
+    if args.verify:
+        print("\nVerifying...")
+        with open(args.out, 'rb') as f:
+            verify_data = f.read()
+
+        if verify_data == bytes(data):
+            print("  ✓ Binary verified — written data matches in-memory data")
+        else:
+            print("  ✗ VERIFICATION FAILED — written data does not match!")
+            sys.exit(1)
+
+        # Re-read each modified map and check
+        for record in all_records:
+            if record.map_name in maps:
+                map_def = maps[record.map_name]
+                start, end = map_byte_range(map_def)
+                if verify_data[start:end+1] == data[start:end+1]:
+                    print(f"  ✓ {record.map_name}: {record.cells_changed} cells verified")
+                else:
+                    print(f"  ✗ {record.map_name}: MISMATCH!")
+
+    # Write changelog
+    changelog_path = args.changelog or (args.out.rsplit('.', 1)[0] + '.log'
+                                         if '.' in args.out else args.out + '.log')
+    write_changelog(changelog_path, args, all_records, total_bytes, maps, source_data, data)
+    print(f"Changelog: {changelog_path}")
+
+
+def write_changelog(path: str, args, records: List[ChangeRecord],
+                    total_bytes: int, maps: Dict[str, MapDef],
+                    source_data: bytes, new_data: bytearray):
+    """Write a detailed changelog file."""
+    with open(path, 'w') as f:
+        f.write(f"ME7 Binary Writer Changelog\n")
+        f.write(f"{'='*60}\n")
+        f.write(f"Timestamp: {datetime.now().isoformat()}\n")
+        f.write(f"Source:    {os.path.basename(args.bin)}\n")
+        f.write(f"Output:    {os.path.basename(args.out)}\n")
+        f.write(f"XDF:       {os.path.basename(args.xdf)}\n")
+        f.write(f"Total bytes modified: {total_bytes}\n\n")
+
+        for i, record in enumerate(records, 1):
+            f.write(f"--- {i}. {record.map_name} ({record.action}) ---\n")
+            if record.map_name in maps:
+                md = maps[record.map_name]
+                f.write(f"Address: 0x{md.z_axis.address:05X}, "
+                        f"{md.z_axis.size_bits}-bit, "
+                        f"{md.rows}×{md.cols}\n")
+            f.write(f"Cells changed: {record.cells_changed}\n")
+            for detail in record.details:
+                f.write(f"{detail}\n")
+            f.write("\n")
+
+        # Address range summary
+        f.write(f"\nModified address ranges:\n")
+        diffs = [i for i in range(len(source_data)) if source_data[i] != new_data[i]]
+        if diffs:
+            regions = []
+            start = diffs[0]
+            prev = diffs[0]
+            for d in diffs[1:]:
+                if d > prev + 2:  # Allow 2-byte gap for 16-bit alignment
+                    regions.append((start, prev))
+                    start = d
+                prev = d
+            regions.append((start, prev))
+
+            for s, e in regions:
+                # Find which map this belongs to
+                name = '?'
+                for mn, md in maps.items():
+                    ms, me = map_byte_range(md)
+                    if s >= ms and s <= me:
+                        name = mn
+                        break
+                f.write(f"  0x{s:05X}-0x{e:05X} ({e-s+1} bytes) -> {name}\n")
+
+
+def parse_action_args(args: List[str]) -> List[dict]:
+    """Parse action arguments from remaining command-line args."""
+    actions = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+
+        if arg == '--restore':
+            map_name = args[i + 1] if i + 1 < len(args) else ''
+            ref_path = ''
+            i += 2
+            if i < len(args) and args[i] == '--from':
+                ref_path = args[i + 1] if i + 1 < len(args) else ''
+                i += 2
+            actions.append({'type': 'restore', 'map': map_name, 'from': ref_path})
+
+        elif arg == '--apply-optimizer':
+            actions.append({'type': 'optimizer', 'file': args[i + 1]})
+            i += 2
+
+        elif arg == '--apply-knock':
+            actions.append({'type': 'knock', 'file': args[i + 1]})
+            i += 2
+
+        elif arg == '--set-map':
+            map_name = args[i + 1] if i + 1 < len(args) else ''
+            csv_path = ''
+            i += 2
+            if i < len(args) and args[i] == '--csv':
+                csv_path = args[i + 1] if i + 1 < len(args) else ''
+                i += 2
+            actions.append({'type': 'set_map', 'map': map_name, 'csv': csv_path})
+
+        elif arg == '--iat-taper':
+            map_name = args[i + 1] if i + 1 < len(args) else ''
+            profile = []
+            i += 2
+            if i < len(args) and args[i] == '--profile':
+                profile = [float(v) for v in args[i + 1].split(',')]
+                i += 2
+            actions.append({'type': 'iat_taper', 'map': map_name, 'profile': profile})
+
+        elif arg == '--apply-changes':
+            actions.append({'type': 'changes', 'file': args[i + 1]})
+            i += 2
+
+        else:
+            print(f"WARNING: Unknown action argument: {arg}")
+            i += 1
+
+    return actions
+
+
+if __name__ == '__main__':
+    main()
