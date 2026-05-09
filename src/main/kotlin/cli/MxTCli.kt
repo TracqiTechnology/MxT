@@ -12,6 +12,7 @@ import domain.model.optimizer.MapDelta
 import domain.model.optimizer.OptimizerCalculator
 import domain.model.simulator.Me7Simulator
 import domain.model.simulator.MechanicalLimitDetector
+import domain.model.simulator.PidSimulator
 import java.io.*
 import java.util.regex.Pattern
 
@@ -111,6 +112,10 @@ private fun dispatch(args: Array<String>) {
             "lookup"     -> cmdLookup(cleanArgs, cmdJson)
             "axis"       -> cmdAxis(cleanArgs, cmdJson)
             "set-format" -> cmdSetFormat(cleanArgs)
+            "simulate"   -> cmdSimulate(cleanArgs, cmdJson)
+            "pid-sim"    -> cmdPidSim(cleanArgs, cmdJson)
+            "batch"      -> cmdBatch(cleanArgs)
+            "what-if"    -> cmdWhatIf(cleanArgs, cmdJson)
             "help"       -> cmdHelp()
             else         -> {
                 if (cmdJson) println("""{"error":${jsonStr("Unknown command: ${cleanArgs[0]}")}}""")
@@ -831,6 +836,441 @@ private fun cmdExport(args: Array<String>) {
     println("Exported ${def.tableName} (${map.yAxis.size}×${map.xAxis.size}) to ${outFile.absolutePath}")
 }
 
+private fun cmdSimulate(args: Array<String>, json: Boolean) {
+    if (mapList.isEmpty()) {
+        if (json) println("""{"error":"No ECU loaded. Use load-ecu first."}""")
+        else println("No ECU loaded. Use 'load-ecu' first.")
+        return
+    }
+
+    var rpm = Double.NaN
+    var load = Double.NaN
+    var baro = 1013.0
+    var iat = 25.0
+
+    for (i in 1 until args.size step 2) {
+        if (i + 1 >= args.size) break
+        when (args[i]) {
+            "--rpm"  -> rpm = args[i + 1].toDouble()
+            "--load" -> load = args[i + 1].toDouble()
+            "--baro" -> baro = args[i + 1].toDouble()
+            "--iat"  -> iat = args[i + 1].toDouble()
+        }
+    }
+
+    if (rpm.isNaN() || load.isNaN()) {
+        if (json) println("""{"error":"Usage: simulate --rpm <rpm> --load <load> [--baro 1013] [--iat 25]"}""")
+        else println("Usage: simulate --rpm <rpm> --load <load> [--baro 1013] [--iat 25]")
+        return
+    }
+
+    val kfpbrk = findMap("KFPBRK")?.second
+    val kfldrl = findMap("KFLDRL")?.second
+    val kfldimx = findMap("KFLDIMX")?.second
+    val kfmiop = findMap("KFMIOP")?.second
+    val kfmirl = findMap("KFMIRL")?.second
+    val kfurlMap = findMap("KFURL")?.second
+    val kfprgMap = findMap("KFPRG")?.second
+    val ldrxnVal = findMap("LDRXN")?.second?.zAxis?.firstOrNull()?.firstOrNull() ?: 191.0
+
+    val calibration = Me7Simulator.CalibrationSet(
+        kfpbrk = kfpbrk,
+        kfldrl = kfldrl,
+        kfldimx = kfldimx,
+        kfmiop = kfmiop,
+        kfmirl = kfmirl,
+        kfurlMap = kfurlMap,
+        kfprgMap = kfprgMap,
+        ldrxn = ldrxnVal
+    )
+
+    // Build synthetic WotLogEntry for this operating point
+    // Use KFMIRL to convert load → pressure if available, otherwise estimate
+    val estimatedPressure = if (kfmirl != null) {
+        // KFMIRL maps torque/load → pressure; use as rough pressure estimate
+        kfmirl.lookup(rpm, load) * baro / 100.0 + baro
+    } else {
+        // Rough estimate: load% → pressure via basic VE relationship
+        load * baro / 100.0 + baro
+    }
+
+    val entry = OptimizerCalculator.WotLogEntry(
+        rpm = rpm,
+        requestedLoad = load,
+        actualLoad = load,
+        requestedMap = estimatedPressure,
+        actualMap = estimatedPressure,
+        barometricPressure = baro,
+        wgdc = 50.0,
+        throttleAngle = 100.0,
+        intakeAirTemp = iat
+    )
+
+    val result = Me7Simulator.simulateEntry(entry, calibration)
+
+    if (json) {
+        val sb = StringBuilder("{")
+        sb.append("\"rpm\":${fmtJsonNum(rpm)}")
+        sb.append(",\"requested_load\":${fmtJsonNum(load)}")
+        sb.append(",\"baro\":${fmtJsonNum(baro)}")
+        sb.append(",\"iat\":${fmtJsonNum(iat)}")
+        sb.append(",\"link1_torque\":{")
+        sb.append("\"ldrxn_target\":${fmtJsonNum(result.ldrxnTarget)}")
+        sb.append(",\"rlsol\":${fmtJsonNum(result.rlsol)}")
+        sb.append(",\"torque_limited\":${result.torqueLimited}")
+        sb.append(",\"headroom\":${fmtJsonNum(result.torqueHeadroom)}")
+        sb.append("}")
+        sb.append(",\"link2_plsol\":{")
+        sb.append("\"simulated_pssol\":${fmtJsonNum(result.simulatedPssol)}")
+        sb.append(",\"actual_pssol\":${fmtJsonNum(result.actualPssol)}")
+        sb.append(",\"error\":${fmtJsonNum(result.pssolError)}")
+        sb.append("}")
+        sb.append(",\"link3_boost\":{")
+        sb.append("\"simulated_plsol\":${fmtJsonNum(result.simulatedPlsol)}")
+        sb.append(",\"actual_pvdks\":${fmtJsonNum(result.actualPvdks)}")
+        sb.append(",\"boost_error\":${fmtJsonNum(result.boostError)}")
+        sb.append(",\"predicted_wgdc\":${fmtJsonNum(result.predictedWgdc)}")
+        sb.append(",\"actual_wgdc\":${fmtJsonNum(result.actualWgdc)}")
+        sb.append(",\"kfldrl_correction\":${fmtJsonNum(result.kfldrlCorrection)}")
+        sb.append("}")
+        sb.append(",\"link4_ve\":{")
+        sb.append("\"simulated_rl\":${fmtJsonNum(result.simulatedRlFromPressure)}")
+        sb.append(",\"actual_rl\":${fmtJsonNum(result.actualRl)}")
+        sb.append(",\"kfpbrk_correction\":${fmtJsonNum(result.kfpbrkCorrectionFactor)}")
+        sb.append("}")
+        sb.append(",\"dominant_error\":${jsonStr(result.dominantError.name)}")
+        sb.append(",\"total_load_deficit\":${fmtJsonNum(result.totalLoadDeficit)}")
+        sb.append("}")
+        println(sb)
+    } else {
+        println("=== Chain Simulation @ ${fmtVal(rpm)} RPM, ${fmtVal(load)}% load ===")
+        println("  Baro: ${fmtVal(baro)} mbar, IAT: ${fmtVal(iat)}°C")
+        println()
+
+        val link1Status = if (result.torqueLimited) "⚠ TORQUE LIMITED" else "✓ OK"
+        println("  Link 1 — Torque → Load Request: $link1Status")
+        println("    LDRXN target: ${fmtVal(result.ldrxnTarget)}%  rlsol: ${fmtVal(result.rlsol)}%  headroom: ${fmtVal(result.torqueHeadroom)}%")
+
+        val pssolAbsErr = kotlin.math.abs(result.pssolError)
+        val link2Status = if (pssolAbsErr > 20.0) "⚠ PSSOL ERROR (${fmtVal(result.pssolError)} mbar)" else "✓ OK"
+        println("  Link 2 — Load → Pressure (PLSOL): $link2Status")
+        println("    Simulated pssol: ${fmtVal(result.simulatedPssol)} mbar  actual: ${fmtVal(result.actualPssol)} mbar")
+
+        val boostAbsErr = kotlin.math.abs(result.boostError)
+        val link3Status = if (boostAbsErr > 30.0) "⚠ BOOST SHORTFALL (${fmtVal(result.boostError)} mbar)" else "✓ OK"
+        println("  Link 3 — Pressure → Boost (WGDC): $link3Status")
+        println("    Predicted WGDC: ${fmtVal(result.predictedWgdc)}%  actual: ${fmtVal(result.actualWgdc)}%  correction: ${fmtVal(result.kfldrlCorrection)}%")
+
+        val veCorrDiff = kotlin.math.abs(result.kfpbrkCorrectionFactor - 1.0)
+        val link4Status = if (veCorrDiff > 0.05) "⚠ VE MISMATCH (×${fmtVal(result.kfpbrkCorrectionFactor)})" else "✓ OK"
+        println("  Link 4 — Pressure → Load (VE): $link4Status")
+        println("    Simulated rl: ${fmtVal(result.simulatedRlFromPressure)}%  actual: ${fmtVal(result.actualRl)}%")
+
+        println()
+        println("  Dominant error: ${result.dominantError.name}")
+        println("  Total load deficit: ${fmtVal(result.totalLoadDeficit)}%")
+    }
+}
+
+private fun cmdPidSim(args: Array<String>, json: Boolean) {
+    if (mapList.isEmpty()) {
+        if (json) println("""{"error":"No ECU loaded. Use load-ecu first."}""")
+        else println("No ECU loaded. Use 'load-ecu' first.")
+        return
+    }
+
+    var target = Double.NaN
+    var start = 1013.0
+    var rpm = 4000.0
+    var duration = 2.0
+
+    for (i in 1 until args.size step 2) {
+        if (i + 1 >= args.size) break
+        when (args[i]) {
+            "--target"   -> target = args[i + 1].toDouble()
+            "--start"    -> start = args[i + 1].toDouble()
+            "--rpm"      -> rpm = args[i + 1].toDouble()
+            "--duration" -> duration = args[i + 1].toDouble()
+        }
+    }
+
+    if (target.isNaN()) {
+        if (json) println("""{"error":"Usage: pid-sim --target <mbar> [--start 1013] [--rpm 4000] [--duration 2.0]"}""")
+        else println("Usage: pid-sim --target <mbar> [--start 1013] [--rpm 4000] [--duration 2.0]")
+        return
+    }
+
+    val kfldrq0 = findMap("KFLDRQ0")?.second
+    val kfldrq1 = findMap("KFLDRQ1")?.second
+    val kfldrq2 = findMap("KFLDRQ2")?.second
+    val kfldrl = findMap("KFLDRL")?.second
+    val kfldimx = findMap("KFLDIMX")?.second
+
+    // Build synthetic WOT pull: ramp from start to target over 0.5s, then hold
+    val sampleIntervalMs = 20.0
+    val totalSamples = (duration * 1000.0 / sampleIntervalMs).toInt()
+    val rampSamples = (500.0 / sampleIntervalMs).toInt() // 0.5s ramp
+
+    val pullEntries = (0 until totalSamples).map { i ->
+        val progress = if (i < rampSamples) i.toDouble() / rampSamples else 1.0
+        val currentPressure = start + (target - start) * progress
+        OptimizerCalculator.WotLogEntry(
+            rpm = rpm,
+            requestedLoad = 100.0,
+            actualLoad = 100.0,
+            requestedMap = target,
+            actualMap = currentPressure,
+            barometricPressure = 1013.0,
+            wgdc = 50.0,
+            throttleAngle = 100.0,
+            intakeAirTemp = 25.0
+        )
+    }
+
+    val result = PidSimulator.simulate(
+        pullEntries = pullEntries,
+        kfldrq0 = kfldrq0,
+        kfldrq1 = kfldrq1,
+        kfldrq2 = kfldrq2,
+        kfldrl = kfldrl,
+        kfldimx = kfldimx
+    )
+
+    val diag = result.diagnosis
+
+    if (json) {
+        val sb = StringBuilder("{")
+        sb.append("\"target_mbar\":${fmtJsonNum(target)}")
+        sb.append(",\"start_mbar\":${fmtJsonNum(start)}")
+        sb.append(",\"rpm\":${fmtJsonNum(rpm)}")
+        sb.append(",\"duration_s\":${fmtJsonNum(duration)}")
+        sb.append(",\"diagnosis\":{")
+        sb.append("\"oscillation_detected\":${diag.oscillationDetected}")
+        sb.append(",\"oscillation_count\":${diag.oscillationCount}")
+        sb.append(",\"windup_detected\":${diag.windupDetected}")
+        sb.append(",\"windup_duration_ms\":${fmtJsonNum(diag.windupDurationMs)}")
+        sb.append(",\"slow_convergence\":${diag.slowConvergence}")
+        sb.append(",\"convergence_time_ms\":${fmtJsonNum(diag.convergenceTimeMs)}")
+        sb.append(",\"overshoot_detected\":${diag.overshootDetected}")
+        sb.append(",\"overshoot_magnitude_mbar\":${fmtJsonNum(diag.overshootMagnitude)}")
+        sb.append(",\"avg_abs_lde\":${fmtJsonNum(diag.avgAbsLde)}")
+        sb.append(",\"recommendations\":${jsonStrArr(diag.recommendations)}")
+        if (diag.q2Warnings.isNotEmpty()) {
+            sb.append(",\"q2_warnings\":${jsonStrArr(diag.q2Warnings)}")
+        }
+        sb.append("}}")
+        println(sb)
+    } else {
+        println("=== PID Simulation: ${fmtVal(start)} → ${fmtVal(target)} mbar @ ${fmtVal(rpm)} RPM ===")
+        println("  Duration: ${fmtVal(duration)}s, Samples: ${result.states.size}")
+        println()
+
+        println("  Oscillation:   ${if (diag.oscillationDetected) "⚠ YES (${diag.oscillationCount} sign changes)" else "✓ No"}")
+        println("  Windup:        ${if (diag.windupDetected) "⚠ YES (${fmtVal(diag.windupDurationMs)} ms at I-limit)" else "✓ No"}")
+        println("  Convergence:   ${if (diag.slowConvergence) "⚠ SLOW (${fmtVal(diag.convergenceTimeMs)} ms)" else "✓ ${fmtVal(diag.convergenceTimeMs)} ms"}")
+        println("  Overshoot:     ${if (diag.overshootDetected) "⚠ YES (${fmtVal(diag.overshootMagnitude)} mbar)" else "✓ No"}")
+        println("  Avg |lde|:     ${fmtVal(diag.avgAbsLde)} mbar")
+
+        if (diag.recommendations.isNotEmpty()) {
+            println()
+            println("  Recommendations:")
+            diag.recommendations.forEach { println("    → $it") }
+        }
+        if (diag.q2Warnings.isNotEmpty()) {
+            println()
+            println("  Q2 Warnings:")
+            diag.q2Warnings.forEach { println("    ⚠ $it") }
+        }
+    }
+}
+
+private fun cmdBatch(args: Array<String>) {
+    if (args.size < 2) {
+        println("Usage: batch <filename>")
+        return
+    }
+    val file = File(args[1])
+    if (!file.exists()) {
+        println("File not found: ${args[1]}")
+        return
+    }
+
+    var lineNum = 0
+    var executed = 0
+    file.bufferedReader().useLines { lines ->
+        for (line in lines) {
+            lineNum++
+            val trimmed = line.trim()
+            if (trimmed.isEmpty() || trimmed.startsWith("#")) continue
+            if (!outputJson) {
+                println("[$lineNum] $trimmed")
+            }
+            dispatch(tokenize(trimmed))
+            executed++
+        }
+    }
+    if (!outputJson) {
+        println("Batch complete: $executed commands executed from ${file.name}")
+    }
+}
+
+private fun cmdWhatIf(args: Array<String>, json: Boolean) {
+    if (mapList.isEmpty()) {
+        if (json) println("""{"error":"No ECU loaded. Use load-ecu first."}""")
+        else println("No ECU loaded. Use 'load-ecu' first.")
+        return
+    }
+    if (args.size < 2) {
+        if (json) println("""{"error":"Usage: what-if <map> --cell <x>,<y> --from <val> --to <val>"}""")
+        else println("Usage: what-if <map> --cell <x>,<y> --from <val> --to <val>")
+        return
+    }
+
+    val mapName = args[1]
+    var cellX = Double.NaN
+    var cellY = Double.NaN
+    var fromVal = Double.NaN
+    var toVal = Double.NaN
+
+    for (i in 2 until args.size) {
+        when (args[i]) {
+            "--cell" -> {
+                if (i + 1 < args.size) {
+                    val parts = args[i + 1].split(",")
+                    if (parts.size == 2) {
+                        cellX = parts[0].toDoubleOrNull() ?: Double.NaN
+                        cellY = parts[1].toDoubleOrNull() ?: Double.NaN
+                    }
+                }
+            }
+            "--from" -> if (i + 1 < args.size) fromVal = args[i + 1].toDoubleOrNull() ?: Double.NaN
+            "--to"   -> if (i + 1 < args.size) toVal = args[i + 1].toDoubleOrNull() ?: Double.NaN
+        }
+    }
+
+    if (cellX.isNaN() || cellY.isNaN() || fromVal.isNaN() || toVal.isNaN()) {
+        if (json) println("""{"error":"Usage: what-if <map> --cell <x>,<y> --from <val> --to <val>"}""")
+        else println("Usage: what-if <map> --cell <x>,<y> --from <val> --to <val>")
+        return
+    }
+
+    val match = findMap(mapName)
+    if (match == null) {
+        if (json) println("""{"error":${jsonStr("Map '$mapName' not found.")}}""")
+        else println("Map '$mapName' not found. Use 'maps' to list.")
+        return
+    }
+
+    val (def, map) = match
+    val nearestXIdx = findNearestIndex(map.xAxis, cellX)
+    val nearestYIdx = findNearestIndex(map.yAxis, cellY)
+    val nearestX = if (map.xAxis.isNotEmpty()) map.xAxis[nearestXIdx] else 0.0
+    val nearestY = if (map.yAxis.isNotEmpty()) map.yAxis[nearestYIdx] else 0.0
+    val currentVal = if (nearestYIdx < map.zAxis.size && nearestXIdx < map.zAxis[nearestYIdx].size)
+        map.zAxis[nearestYIdx][nearestXIdx] else Double.NaN
+
+    val delta = toVal - fromVal
+    val upperName = def.tableName.uppercase()
+    val isTimingMap = upperName.contains("KFZWOP") || upperName.contains("KFZW")
+    val isBoostMap = upperName.contains("KFLDRL") || upperName.contains("KFLDIMX")
+
+    if (json) {
+        val sb = StringBuilder("{")
+        sb.append("\"map\":${jsonStr(def.tableName)}")
+        sb.append(",\"cell\":{\"x\":${fmtJsonNum(nearestX)},\"y\":${fmtJsonNum(nearestY)}}")
+        sb.append(",\"current_value\":${fmtJsonNum(currentVal)}")
+        sb.append(",\"from\":${fmtJsonNum(fromVal)}")
+        sb.append(",\"to\":${fmtJsonNum(toVal)}")
+        sb.append(",\"delta\":${fmtJsonNum(delta)}")
+        if (isTimingMap) {
+            sb.append(",\"timing_analysis\":{")
+            sb.append("\"type\":\"ignition_timing\"")
+            sb.append(",\"knock_margin_change\":${fmtJsonNum(-delta)}")
+            sb.append(",\"direction\":${jsonStr(if (delta > 0) "advanced" else "retarded")}")
+            sb.append(",\"warning\":${if (delta > 2.0) jsonStr("Advancing >2° increases knock risk") else "null"}")
+            sb.append("}")
+        }
+        if (isBoostMap) {
+            sb.append(",\"boost_analysis\":{")
+            sb.append("\"type\":${jsonStr(if (upperName.contains("KFLDRL")) "feedforward_wgdc" else "i_term_limit")}")
+            sb.append(",\"change_pct\":${fmtJsonNum(delta)}")
+            sb.append(",\"direction\":${jsonStr(if (delta > 0) "more_duty" else "less_duty")}")
+            sb.append("}")
+        }
+        sb.append("}")
+        println(sb)
+    } else {
+        println("=== What-If: ${def.tableName} ===")
+        println("  Cell [x=${fmtVal(nearestX)}, y=${fmtVal(nearestY)}]")
+        println("  Current value: ${fmtVal(currentVal)}")
+        println("  Change: ${fmtVal(fromVal)} → ${fmtVal(toVal)} (Δ${fmtVal(delta)})")
+
+        if (isTimingMap) {
+            println()
+            println("  Timing analysis:")
+            if (delta > 0) {
+                println("    → Advancing ignition by ${fmtVal(delta)}° KW")
+                println("    → Knock margin reduced by ${fmtVal(delta)}°")
+                if (delta > 2.0) println("    ⚠ Advancing >2° increases knock risk — verify with knock logging")
+            } else {
+                println("    → Retarding ignition by ${fmtVal(-delta)}° KW")
+                println("    → Knock margin increased by ${fmtVal(-delta)}°")
+            }
+        }
+
+        if (isBoostMap) {
+            println()
+            val boostType = if (upperName.contains("KFLDRL")) "feedforward WGDC" else "I-term limit"
+            println("  Boost analysis ($boostType):")
+            if (delta > 0) {
+                println("    → Increasing $boostType by ${fmtVal(delta)}%")
+                println("    → Expect higher boost at this operating point")
+            } else {
+                println("    → Decreasing $boostType by ${fmtVal(-delta)}%")
+                println("    → Expect lower boost at this operating point")
+            }
+
+            // Run PID comparison if maps are available
+            val kfldrl = findMap("KFLDRL")?.second
+            if (kfldrl != null) {
+                val kfldrq0 = findMap("KFLDRQ0")?.second
+                val kfldrq1 = findMap("KFLDRQ1")?.second
+                val kfldrq2 = findMap("KFLDRQ2")?.second
+                val kfldimxMap = findMap("KFLDIMX")?.second
+
+                val targetPressure = 2500.0
+                val sampleIntervalMs = 20.0
+                val totalSamples = (2000.0 / sampleIntervalMs).toInt()
+                val rampSamples = (500.0 / sampleIntervalMs).toInt()
+                val pullEntries = (0 until totalSamples).map { i ->
+                    val progress = if (i < rampSamples) i.toDouble() / rampSamples else 1.0
+                    val currentPressure = 1013.0 + (targetPressure - 1013.0) * progress
+                    OptimizerCalculator.WotLogEntry(
+                        rpm = nearestY,
+                        requestedLoad = 100.0,
+                        actualLoad = 100.0,
+                        requestedMap = targetPressure,
+                        actualMap = currentPressure,
+                        barometricPressure = 1013.0,
+                        wgdc = 50.0,
+                        throttleAngle = 100.0,
+                        intakeAirTemp = 25.0
+                    )
+                }
+
+                val beforeResult = PidSimulator.simulate(pullEntries, kfldrq0, kfldrq1, kfldrq2, kfldrl, kfldimxMap)
+                println()
+                println("  PID impact (simulated):")
+                println("    Convergence: ${fmtVal(beforeResult.diagnosis.convergenceTimeMs)} ms")
+                if (beforeResult.diagnosis.oscillationDetected)
+                    println("    ⚠ Oscillation detected (${beforeResult.diagnosis.oscillationCount} sign changes)")
+                if (beforeResult.diagnosis.overshootDetected)
+                    println("    ⚠ Overshoot: ${fmtVal(beforeResult.diagnosis.overshootMagnitude)} mbar")
+            }
+        }
+    }
+}
+
 private fun cmdHelp() {
     println("MxT CLI — Headless analysis harness for ME7Tuner")
     println()
@@ -847,6 +1287,13 @@ private fun cmdHelp() {
     println("  krkte [--displacement cc] [--injector cc]")
     println("                                       Calculate injection constant")
     println("  limits                               Detect mechanical limits (MAF/injector/turbo)")
+    println("  simulate --rpm <n> --load <n> [--baro 1013] [--iat 25]")
+    println("                                       Simulate 4-link chain at an operating point")
+    println("  pid-sim --target <mbar> [--start 1013] [--rpm 4000] [--duration 2.0]")
+    println("                                       Simulate PID boost transient response")
+    println("  batch <filename>                     Execute commands from a file")
+    println("  what-if <map> --cell <x>,<y> --from <val> --to <val>")
+    println("                                       Compare map cell value change impact")
     println("  summary                              Session overview")
     println("  export <map-name> <file.csv>         Export map to CSV")
     println("  set-format <text|json>               Set output format (default: text)")
@@ -869,6 +1316,10 @@ private fun cmdHelp() {
     println("  axis KFZWOP")
     println("  mlhfm-correct --mode closed")
     println("  krkte --displacement 2703 --injector 615")
+    println("  simulate --rpm 5500 --load 280")
+    println("  pid-sim --target 2500 --rpm 4000")
+    println("  what-if KFZWOP --cell 5500,282 --from 30.0 --to 32.0")
+    println("  batch commands.txt")
 }
 
 // ── New Commands ─────────────────────────────────────────────────────
