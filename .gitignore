@@ -9,6 +9,7 @@ CLAUDE.md
 # Private documentation (only calibration-guide.md and images/ are public)
 documentation/*.md
 !documentation/calibration-guide.md
+!documentation/me7-tuning-protocol.md
 technical/
 
 # Private example files

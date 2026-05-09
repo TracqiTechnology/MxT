@@ -1,0 +1,503 @@
+#!/usr/bin/env python3
+"""
+ME7 Tune Copilot — Master orchestrator for AI-driven ECU calibration.
+
+Chains all tuning tools into a single pipeline:
+  analyze → diagnose → simulate → validate → write → converge
+
+Usage:
+  bin/me7-tune-copilot analyze --xdf <xdf> --bin <bin> --logs <dir> [--db-dir <path>]
+      Full 8-phase analysis → structured JSON output
+
+  bin/me7-tune-copilot suggest --xdf <xdf> --bin <bin> --logs <dir>
+      Analyze + suggest corrections (no write)
+
+  bin/me7-tune-copilot apply --xdf <xdf> --bin <bin> --logs <dir> --out <bin>
+      [--version <ver>] [--dry-run] [--safety-check]
+      Full pipeline: analyze → propose → validate → write
+
+  bin/me7-tune-copilot status --db-dir <path>
+      Show convergence status across all databases
+
+  bin/me7-tune-copilot preflight --xdf <xdf> --bin <bin> [--logs <dir>]
+      Run safety checks before any tuning
+
+Options:
+  --db-dir <path>      Database directory (default: /tmp/me7-copilot)
+  --format json|text   Output format
+  --verbose            Show detailed output
+"""
+
+import argparse
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+BIN_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_DIR = os.path.dirname(BIN_DIR)
+
+
+def run_tool(name: str, args: list, capture: bool = True, check: bool = True) -> subprocess.CompletedProcess:
+    """Run a bin/ tool with arguments."""
+    tool_path = os.path.join(BIN_DIR, name)
+    if not os.path.exists(tool_path):
+        raise FileNotFoundError(f"Tool not found: {tool_path}")
+
+    cmd = [sys.executable, tool_path] + args
+    result = subprocess.run(cmd, capture_output=capture, text=True)
+    if check and result.returncode != 0:
+        raise RuntimeError(f"{name} failed (exit {result.returncode}):\n{result.stderr}")
+    return result
+
+
+def run_mxt_cli(commands: list, xdf: str, bin_path: str, logs_dir: str = None,
+                json_output: bool = True) -> str:
+    """Run MxT CLI with a sequence of commands."""
+    cmd_text = ""
+    if json_output:
+        cmd_text += "set-format json\n"
+    cmd_text += f"load-ecu {xdf} {bin_path}\n"
+    if logs_dir:
+        cmd_text += f"load-logs {logs_dir}\n"
+    for c in commands:
+        cmd_text += f"{c}\n"
+    cmd_text += "quit\n"
+
+    gradle_cmd = [
+        os.path.join(PROJECT_DIR, 'gradlew'), '-q', 'cli',
+        '--console=plain'
+    ]
+
+    result = subprocess.run(
+        gradle_cmd, input=cmd_text, capture_output=True, text=True,
+        cwd=PROJECT_DIR, timeout=300
+    )
+    return result.stdout
+
+
+def ensure_db_dir(db_dir: str):
+    """Create database directory if needed."""
+    os.makedirs(db_dir, exist_ok=True)
+
+
+def cmd_preflight(args):
+    """Run safety checks on binary and logs."""
+    print("=" * 60)
+    print("  ME7 TUNE COPILOT — Preflight Check")
+    print("=" * 60)
+
+    errors = []
+    warnings = []
+
+    # 1. Check binary exists
+    if not os.path.exists(args.bin):
+        errors.append(f"Binary not found: {args.bin}")
+    if not os.path.exists(args.xdf):
+        errors.append(f"XDF not found: {args.xdf}")
+
+    if errors:
+        for e in errors:
+            print(f"  ✗ {e}")
+        sys.exit(1)
+
+    # 2. Binary safety check
+    print("\n  Phase 1: Binary Safety Validation")
+    print("  " + "-" * 40)
+    try:
+        safety_args = ['--xdf', args.xdf, '--bin', args.bin, '--all', '--format', 'json']
+        result = run_tool('me7-safety-check', safety_args)
+        safety = json.loads(result.stdout)
+        print(f"  Errors: {safety.get('errors', 0)}, Warnings: {safety.get('warnings', 0)}")
+        if safety.get('errors', 0) > 0:
+            errors.append(f"Safety check found {safety['errors']} errors")
+            for f in safety.get('findings', []):
+                if f['severity'] == 'ERROR':
+                    print(f"    ✗ {f['map']}: {f['message']}")
+        else:
+            print("  ✓ Binary passes safety validation")
+    except Exception as e:
+        warnings.append(f"Safety check unavailable: {e}")
+        print(f"  ⚠ {e}")
+
+    # 3. Log pre-flight (if logs provided)
+    if args.logs and os.path.isdir(args.logs):
+        print("\n  Phase 2: Log Data Quality")
+        print("  " + "-" * 40)
+        csv_files = list(Path(args.logs).glob("*.csv"))
+        print(f"  Log files found: {len(csv_files)}")
+        if len(csv_files) < 3:
+            warnings.append(f"Only {len(csv_files)} log files — may be insufficient data")
+            print(f"  ⚠ Low log count ({len(csv_files)}) — more WOT pulls recommended")
+        else:
+            print(f"  ✓ {len(csv_files)} log files available")
+
+        try:
+            safety_args = ['--xdf', args.xdf, '--bin', args.bin, '--preflight',
+                           '--logs', args.logs, '--format', 'json']
+            result = run_tool('me7-safety-check', safety_args, check=False)
+            if result.returncode == 0:
+                pf = json.loads(result.stdout)
+                pfr = pf.get('preflight', {})
+                if pfr.get('wot_count', 0) < 10:
+                    warnings.append(f"Only {pfr.get('wot_count', 0)} WOT events")
+                else:
+                    print(f"  ✓ {pfr.get('wot_count', 0)} WOT events available")
+        except Exception as e:
+            print(f"  ⚠ Log pre-flight unavailable: {e}")
+
+    # Summary
+    print(f"\n{'=' * 60}")
+    if errors:
+        print(f"  ✗ PREFLIGHT FAILED: {len(errors)} errors")
+        for e in errors:
+            print(f"    ✗ {e}")
+        sys.exit(1)
+    elif warnings:
+        print(f"  ⚠ PREFLIGHT PASSED WITH {len(warnings)} WARNINGS")
+        for w in warnings:
+            print(f"    ⚠ {w}")
+    else:
+        print("  ✓ PREFLIGHT PASSED — ready for analysis")
+
+
+def cmd_analyze(args):
+    """Run full analysis pipeline."""
+    ensure_db_dir(args.db_dir)
+    fmt = getattr(args, 'format', 'text')
+
+    print("=" * 60)
+    print("  ME7 TUNE COPILOT — Full Analysis")
+    print("=" * 60)
+
+    results = {}
+
+    # Phase 1: MxT Optimizer
+    print("\n  Phase 1: Optimizer Analysis")
+    print("  " + "-" * 40)
+    try:
+        mxt_output = run_mxt_cli(
+            ['optimize', 'limits', 'summary'],
+            args.xdf, args.bin, args.logs, json_output=True
+        )
+        # Parse JSON lines from output
+        for line in mxt_output.strip().split('\n'):
+            line = line.strip()
+            if line.startswith('{') or line.startswith('['):
+                try:
+                    parsed = json.loads(line)
+                    if isinstance(parsed, dict):
+                        if 'wot_entries' in parsed:
+                            results['optimizer'] = parsed
+                        elif 'maf_saturated' in parsed or 'injector_saturated' in parsed:
+                            results['limits'] = parsed
+                        elif 'bin_file' in parsed or 'maps_loaded' in parsed:
+                            results['session'] = parsed
+                except json.JSONDecodeError:
+                    pass
+        opt = results.get('optimizer', {})
+        print(f"  WOT entries: {opt.get('wot_entries', 'N/A')}")
+        print(f"  Warnings: {len(opt.get('warnings', []))}")
+        if 'chain_diagnosis' in opt:
+            cd = opt['chain_diagnosis']
+            print(f"  On target: {cd.get('on_target_pct', 'N/A')}%")
+            print(f"  Dominant error: {cd.get('dominant_error', 'N/A')}")
+        print("  ✓ Optimizer complete")
+    except Exception as e:
+        print(f"  ⚠ Optimizer failed: {e}")
+        results['optimizer'] = {'error': str(e)}
+
+    # Phase 2: Safety Validation
+    print("\n  Phase 2: Safety Validation")
+    print("  " + "-" * 40)
+    try:
+        result = run_tool('me7-safety-check',
+                          ['--xdf', args.xdf, '--bin', args.bin, '--all', '--format', 'json'])
+        safety = json.loads(result.stdout)
+        results['safety'] = safety
+        print(f"  Errors: {safety.get('errors', 0)}, Warnings: {safety.get('warnings', 0)}")
+        print(f"  ✓ Safety check complete")
+    except Exception as e:
+        print(f"  ⚠ Safety check failed: {e}")
+        results['safety'] = {'error': str(e)}
+
+    # Phase 3: Knowledge Graph Query
+    print("\n  Phase 3: Knowledge Graph Diagnosis")
+    print("  " + "-" * 40)
+    kuzu_db = os.path.join(args.db_dir, 'knowledge.kuzu')
+    try:
+        if os.path.exists(kuzu_db):
+            result = run_tool('me7-query',
+                              ['--kuzu', kuzu_db, '--format', 'json', 'graph',
+                               "MATCH (m:Map)-[r:FEEDS_INTO*1..2]->(n:Map) RETURN DISTINCT m.name, n.name LIMIT 20"])
+            results['graph_chains'] = json.loads(result.stdout)
+            print(f"  ✓ Graph queries complete ({results['graph_chains'].get('rows', 0)} chains)")
+        else:
+            print(f"  ⚠ Knowledge graph not initialized at {kuzu_db}")
+            print(f"    Run: bin/me7-knowledge-graph init --db {kuzu_db}")
+    except Exception as e:
+        print(f"  ⚠ Graph query failed: {e}")
+
+    # Phase 4: Log Statistics (DuckDB)
+    print("\n  Phase 4: Log Statistics")
+    print("  " + "-" * 40)
+    duckdb_path = os.path.join(args.db_dir, 'logs.duckdb')
+    if os.path.exists(duckdb_path):
+        try:
+            result = run_tool('me7-query',
+                              ['--duckdb', duckdb_path, '--format', 'json', 'ts',
+                               "SELECT COUNT(DISTINCT log_id) as logs, COUNT(*) as samples, "
+                               "ROUND(AVG(density_altitude_ft)) as avg_da_ft "
+                               "FROM samples"])
+            results['log_stats'] = json.loads(result.stdout)
+            data = results['log_stats'].get('data', [{}])[0]
+            print(f"  Logs: {data.get('logs', 'N/A')}, Samples: {data.get('samples', 'N/A')}")
+            print(f"  ✓ Log stats complete")
+        except Exception as e:
+            print(f"  ⚠ Log stats failed: {e}")
+    else:
+        print(f"  ⚠ DuckDB not initialized at {duckdb_path}")
+        print(f"    Run: bin/me7-log-ingest --logs {args.logs} --db {duckdb_path}")
+
+    # Output
+    print(f"\n{'=' * 60}")
+    print("  Analysis Complete")
+    print(f"{'=' * 60}")
+
+    if fmt == 'json':
+        print(json.dumps(results, indent=2, default=str))
+
+
+def cmd_suggest(args):
+    """Analyze and suggest corrections."""
+    print("=" * 60)
+    print("  ME7 TUNE COPILOT — Correction Suggestions")
+    print("=" * 60)
+
+    # Run optimizer
+    print("\n  Running optimizer...")
+    mxt_output = run_mxt_cli(
+        ['optimize'],
+        args.xdf, args.bin, args.logs, json_output=True
+    )
+
+    optimizer_result = None
+    for line in mxt_output.strip().split('\n'):
+        line = line.strip()
+        if line.startswith('{'):
+            try:
+                parsed = json.loads(line)
+                if 'wot_entries' in parsed:
+                    optimizer_result = parsed
+            except json.JSONDecodeError:
+                pass
+
+    if not optimizer_result:
+        print("  ✗ Optimizer returned no results")
+        return
+
+    suggestions = []
+
+    # KFLDRL suggestions
+    kfldrl = optimizer_result.get('suggested_maps', {}).get('kfldrl')
+    if kfldrl:
+        suggestions.append({
+            'map': 'KFLDRL',
+            'action': 'apply_optimizer',
+            'cells_modified': kfldrl.get('cells_modified', 0),
+            'confidence': 85,
+            'reason': 'Boost duty cycle feedforward correction based on pressure errors'
+        })
+
+    # KFLDIMX suggestions
+    kfldimx = optimizer_result.get('suggested_maps', {}).get('kfldimx')
+    if kfldimx:
+        suggestions.append({
+            'map': 'KFLDIMX',
+            'action': 'apply_optimizer',
+            'cells_modified': kfldimx.get('cells_modified', 0),
+            'confidence': 80,
+            'reason': 'PID I-term limiter adjustment for boost convergence'
+        })
+
+    # KFPBRK suggestions
+    kfpbrk = optimizer_result.get('suggested_maps', {}).get('kfpbrk')
+    if kfpbrk:
+        suggestions.append({
+            'map': 'KFPBRK',
+            'action': 'apply_optimizer',
+            'cells_modified': kfpbrk.get('cells_modified', 0),
+            'confidence': 75,
+            'reason': 'VE model correction for pressure-to-load accuracy'
+        })
+
+    # Chain diagnosis recommendations
+    chain = optimizer_result.get('chain_diagnosis', {})
+    if chain.get('dominant_error') == 'TORQUE_CAPPED':
+        suggestions.append({
+            'map': 'KFMIOP',
+            'action': 'check_manual',
+            'confidence': 60,
+            'reason': 'Torque structure limiting requested load — check KFMIOP/KFMIRL alignment'
+        })
+
+    # Display
+    print(f"\n  Found {len(suggestions)} suggestions:\n")
+    for i, s in enumerate(suggestions, 1):
+        conf_bar = "●" * (s['confidence'] // 20) + "○" * (5 - s['confidence'] // 20)
+        print(f"  {i}. {s['map']} [{conf_bar}]")
+        print(f"     Action: {s['action']}")
+        if 'cells_modified' in s:
+            print(f"     Cells: {s['cells_modified']}")
+        print(f"     Reason: {s['reason']}")
+        print()
+
+    if getattr(args, 'format', 'text') == 'json':
+        print(json.dumps({'suggestions': suggestions}, indent=2))
+
+
+def cmd_status(args):
+    """Show convergence status across all databases."""
+    ensure_db_dir(args.db_dir)
+    fmt = getattr(args, 'format', 'text')
+
+    try:
+        run_tool('me7-query', [
+            '--duckdb', os.path.join(args.db_dir, 'logs.duckdb'),
+            '--kuzu', os.path.join(args.db_dir, 'knowledge.kuzu'),
+            '--sqlite', os.path.join(args.db_dir, 'registry.sqlite'),
+            '--format', fmt,
+            'summary'
+        ], check=False)
+    except Exception as e:
+        print(f"Status check failed: {e}")
+
+
+def cmd_apply(args):
+    """Full pipeline: analyze → propose → validate → write."""
+    print("=" * 60)
+    print("  ME7 TUNE COPILOT — Apply Corrections")
+    print("=" * 60)
+
+    # 1. Run optimizer to get suggestions
+    print("\n  Phase 1: Generating corrections...")
+    mxt_output = run_mxt_cli(
+        ['optimize'],
+        args.xdf, args.bin, args.logs, json_output=True
+    )
+
+    # Save optimizer output for me7-bin-write
+    opt_file = tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False, prefix='mxt_opt_')
+    # Extract the text-mode optimizer output for me7-bin-write
+    text_output = run_mxt_cli(
+        ['optimize'],
+        args.xdf, args.bin, args.logs, json_output=False
+    )
+    opt_file.write(text_output)
+    opt_file.close()
+
+    # 2. Write binary
+    print("\n  Phase 2: Writing corrected binary...")
+    write_args = [
+        '--xdf', args.xdf,
+        '--bin', args.bin,
+        '--out', args.out,
+        '--apply-optimizer', opt_file.name,
+        '--verify'
+    ]
+    if args.safety_check:
+        write_args.append('--safety-check')
+    if args.dry_run:
+        write_args.append('--dry-run')
+
+    try:
+        result = run_tool('me7-bin-write', write_args, check=False)
+        print(result.stdout)
+        if result.returncode != 0:
+            print(f"  ✗ Write failed (exit {result.returncode})")
+            if result.stderr:
+                print(result.stderr)
+    except Exception as e:
+        print(f"  ✗ Write error: {e}")
+    finally:
+        os.unlink(opt_file.name)
+
+    # 3. Record in registry
+    if not args.dry_run and args.version:
+        print("\n  Phase 3: Recording in registry...")
+        sqlite_db = os.path.join(args.db_dir, 'registry.sqlite')
+        try:
+            run_tool('me7-registry', [
+                'register', '--db', sqlite_db,
+                '--version', args.version,
+                '--bin', args.out,
+                '--xdf', args.xdf
+            ])
+            print(f"  ✓ Registered as {args.version}")
+        except Exception as e:
+            print(f"  ⚠ Registry update failed: {e}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="ME7 Tune Copilot — AI-driven ECU calibration orchestrator"
+    )
+    parser.add_argument('--db-dir', default='/tmp/me7-copilot',
+                        help='Database directory (default: /tmp/me7-copilot)')
+    parser.add_argument('--format', choices=['text', 'json'], default='text')
+    parser.add_argument('--verbose', action='store_true')
+
+    sub = parser.add_subparsers(dest="command")
+
+    # preflight
+    p = sub.add_parser("preflight", help="Pre-flight safety checks")
+    p.add_argument("--xdf", required=True)
+    p.add_argument("--bin", required=True)
+    p.add_argument("--logs")
+
+    # analyze
+    p = sub.add_parser("analyze", help="Full analysis pipeline")
+    p.add_argument("--xdf", required=True)
+    p.add_argument("--bin", required=True)
+    p.add_argument("--logs", required=True)
+
+    # suggest
+    p = sub.add_parser("suggest", help="Analyze + suggest corrections")
+    p.add_argument("--xdf", required=True)
+    p.add_argument("--bin", required=True)
+    p.add_argument("--logs", required=True)
+
+    # apply
+    p = sub.add_parser("apply", help="Full pipeline → write binary")
+    p.add_argument("--xdf", required=True)
+    p.add_argument("--bin", required=True)
+    p.add_argument("--logs", required=True)
+    p.add_argument("--out", required=True)
+    p.add_argument("--version")
+    p.add_argument("--dry-run", action='store_true')
+    p.add_argument("--safety-check", action='store_true')
+
+    # status
+    p = sub.add_parser("status", help="Convergence status")
+
+    args = parser.parse_args()
+
+    if args.command == "preflight":
+        cmd_preflight(args)
+    elif args.command == "analyze":
+        cmd_analyze(args)
+    elif args.command == "suggest":
+        cmd_suggest(args)
+    elif args.command == "apply":
+        cmd_apply(args)
+    elif args.command == "status":
+        cmd_status(args)
+    else:
+        parser.print_help()
+
+
+if __name__ == '__main__':
+    main()

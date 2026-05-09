@@ -529,6 +529,8 @@ def main():
     parser.add_argument('--changelog', help='Changelog output file (default: <out>.log)')
     parser.add_argument('--dry-run', action='store_true', help='Show changes without writing')
     parser.add_argument('--verify', action='store_true', help='Verify changes after writing')
+    parser.add_argument('--safety-check', action='store_true', help='Run safety validator before writing')
+    parser.add_argument('--safety-strict', action='store_true', help='Block write if safety warnings exist')
     parser.add_argument('--verbose', action='store_true', help='Show per-cell details')
 
     # Action arguments are handled via custom parsing since argparse
@@ -683,6 +685,50 @@ def main():
     total_bytes = sum(1 for a, b in zip(source_data, data) if a != b)
     print(f"\n{'='*60}")
     print(f"Total: {total_bytes} bytes changed across {len(all_records)} maps")
+
+    # Safety check before writing
+    if args.safety_check:
+        print(f"\n--- SAFETY CHECK ---")
+        try:
+            safety_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'me7-safety-check')
+            if os.path.exists(safety_script):
+                import subprocess
+                # Write temp binary for validation
+                import tempfile
+                with tempfile.NamedTemporaryFile(suffix='.bin', delete=False) as tmp:
+                    tmp.write(data)
+                    tmp_path = tmp.name
+
+                safety_args = [sys.executable, safety_script,
+                               '--xdf', args.xdf, '--bin', tmp_path,
+                               '--reference', args.bin, '--all', '--format', 'json']
+                result = subprocess.run(safety_args, capture_output=True, text=True)
+                os.unlink(tmp_path)
+
+                safety_result = json.loads(result.stdout)
+                errors = safety_result.get('errors', 0)
+                warnings = safety_result.get('warnings', 0)
+
+                if errors > 0:
+                    print(f"  ✗ BLOCKED: {errors} safety errors, {warnings} warnings")
+                    for f in safety_result.get('findings', []):
+                        if f['severity'] == 'ERROR':
+                            print(f"    ✗ {f['map']}: {f['message']}")
+                    print("\n  Cannot write binary with safety errors. Use --dry-run to inspect.")
+                    sys.exit(2)
+                elif warnings > 0 and args.safety_strict:
+                    print(f"  ⚠ BLOCKED (strict): {warnings} warnings")
+                    for f in safety_result.get('findings', [])[:10]:
+                        if f['severity'] == 'WARNING':
+                            print(f"    ⚠ {f['map']}: {f['message']}")
+                    print("\n  Strict mode blocks on warnings. Remove --safety-strict to proceed.")
+                    sys.exit(2)
+                else:
+                    print(f"  ✓ PASSED: 0 errors, {warnings} warnings")
+            else:
+                print(f"  WARNING: me7-safety-check not found at {safety_script}, skipping")
+        except Exception as e:
+            print(f"  WARNING: Safety check failed: {e}")
 
     if args.dry_run:
         print("\n*** DRY RUN — no files written ***")
