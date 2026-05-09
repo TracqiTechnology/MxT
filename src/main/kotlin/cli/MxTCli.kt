@@ -8,6 +8,7 @@ import data.parser.xdf.XdfParser
 import domain.math.map.Map3d
 import domain.model.closedloopfueling.ClosedLoopFuelingCorrectionManager
 import domain.model.krkte.KrkteCalculator
+import domain.model.optimizer.MapDelta
 import domain.model.optimizer.OptimizerCalculator
 import domain.model.simulator.Me7Simulator
 import domain.model.simulator.MechanicalLimitDetector
@@ -34,6 +35,7 @@ private var logData: Map<Me7LogFileContract.Header, List<Double>>? = null
 private var logDir: File? = null
 private var binFile: File? = null
 private var xdfFile: File? = null
+private var outputJson = false
 
 // ── Entry Point ──────────────────────────────────────────────────────
 
@@ -48,22 +50,26 @@ fun main(args: Array<String>) {
 // ── REPL ─────────────────────────────────────────────────────────────
 
 private fun repl() {
-    println("MxT CLI — type 'help' for commands, 'quit' to exit")
-    print("mxt> ")
-    System.out.flush()
+    if (!outputJson) {
+        println("MxT CLI — type 'help' for commands, 'quit' to exit")
+        print("mxt> ")
+        System.out.flush()
+    }
 
     BufferedReader(InputStreamReader(System.`in`)).use { reader ->
         var line: String?
         while (reader.readLine().also { line = it } != null) {
             val trimmed = line!!.trim()
             if (trimmed.isEmpty()) {
-                print("mxt> "); System.out.flush(); continue
+                if (!outputJson) { print("mxt> "); System.out.flush() }
+                continue
             }
             if (trimmed == "quit" || trimmed == "exit") {
-                println("Goodbye."); break
+                if (!outputJson) println("Goodbye.")
+                break
             }
             dispatch(tokenize(trimmed))
-            print("mxt> "); System.out.flush()
+            if (!outputJson) { print("mxt> "); System.out.flush() }
         }
     }
 }
@@ -81,23 +87,39 @@ private fun tokenize(line: String): Array<String> {
 
 private fun dispatch(args: Array<String>) {
     if (args.isEmpty()) return
+    // Per-command --json flag
+    val cmdJson = outputJson || args.any { it == "--json" || it == "--format" && args.indexOf(it) + 1 < args.size && args[args.indexOf(it) + 1] == "json" }
+    val cleanArgs = args.filter { it != "--json" }.toMutableList().also { list ->
+        val fmtIdx = list.indexOf("--format")
+        if (fmtIdx >= 0 && fmtIdx + 1 < list.size && list[fmtIdx + 1] == "json") {
+            list.removeAt(fmtIdx + 1); list.removeAt(fmtIdx)
+        }
+    }.toTypedArray()
     try {
-        when (args[0].lowercase()) {
-            "load-ecu"   -> cmdLoadEcu(args)
-            "load-logs"  -> cmdLoadLogs(args)
-            "maps"       -> cmdMaps(args)
-            "map"        -> cmdMap(args)
-            "optimize"   -> cmdOptimize()
-            "mlhfm-correct" -> cmdMlhfmCorrect(args)
-            "krkte"      -> cmdKrkte(args)
-            "limits"     -> cmdLimits()
-            "summary"    -> cmdSummary()
-            "export"     -> cmdExport(args)
+        when (cleanArgs[0].lowercase()) {
+            "load-ecu"   -> cmdLoadEcu(cleanArgs)
+            "load-logs"  -> cmdLoadLogs(cleanArgs)
+            "maps"       -> cmdMaps(cleanArgs, cmdJson)
+            "map"        -> cmdMap(cleanArgs, cmdJson)
+            "optimize"   -> cmdOptimize(cmdJson)
+            "mlhfm-correct" -> cmdMlhfmCorrect(cleanArgs)
+            "krkte"      -> cmdKrkte(cleanArgs, cmdJson)
+            "limits"     -> cmdLimits(cmdJson)
+            "summary"    -> cmdSummary(cmdJson)
+            "export"     -> cmdExport(cleanArgs)
+            "cell"       -> cmdCell(cleanArgs, cmdJson)
+            "lookup"     -> cmdLookup(cleanArgs, cmdJson)
+            "axis"       -> cmdAxis(cleanArgs, cmdJson)
+            "set-format" -> cmdSetFormat(cleanArgs)
             "help"       -> cmdHelp()
-            else         -> println("Unknown command: ${args[0]} — type 'help' for commands")
+            else         -> {
+                if (cmdJson) println("""{"error":${jsonStr("Unknown command: ${cleanArgs[0]}")}}""")
+                else println("Unknown command: ${cleanArgs[0]} — type 'help' for commands")
+            }
         }
     } catch (e: Exception) {
-        println("Error: ${e.message}")
+        if (cmdJson) println("""{"error":${jsonStr(e.message ?: "Unknown error")}}""")
+        else println("Error: ${e.message}")
     }
 }
 
@@ -184,8 +206,12 @@ private fun cmdLoadLogs(args: Array<String>) {
     println("Columns: ${available.joinToString(", ")}")
 }
 
-private fun cmdMaps(args: Array<String>) {
-    if (mapList.isEmpty()) { println("No ECU loaded. Use 'load-ecu <xdf> <bin>' first."); return }
+private fun cmdMaps(args: Array<String>, json: Boolean) {
+    if (mapList.isEmpty()) {
+        if (json) println("""{"error":"No ECU loaded. Use load-ecu first."}""")
+        else println("No ECU loaded. Use 'load-ecu <xdf> <bin>' first.")
+        return
+    }
 
     val filter = if (args.size > 1) args[1].lowercase() else null
 
@@ -195,62 +221,100 @@ private fun cmdMaps(args: Array<String>) {
         mapList
     }
 
-    println("=== Maps${if (filter != null) " matching '$filter'" else ""} (${filtered.size}) ===")
-    for ((def, map) in filtered) {
-        val dims = "${map.yAxis.size}×${map.xAxis.size}"
-        val desc = if (def.tableDescription.isNotBlank()) " — ${def.tableDescription}" else ""
-        println("  %-25s %8s%s".format(def.tableName, dims, desc))
+    if (json) {
+        val sb = StringBuilder("[")
+        for ((i, pair) in filtered.withIndex()) {
+            val (def, map) = pair
+            if (i > 0) sb.append(",")
+            sb.append("{")
+            sb.append("\"name\":${jsonStr(def.tableName)}")
+            sb.append(",\"rows\":${map.yAxis.size}")
+            sb.append(",\"cols\":${map.xAxis.size}")
+            sb.append(",\"description\":${jsonStr(def.tableDescription)}")
+            sb.append("}")
+        }
+        sb.append("]")
+        println(sb)
+    } else {
+        println("=== Maps${if (filter != null) " matching '$filter'" else ""} (${filtered.size}) ===")
+        for ((def, map) in filtered) {
+            val dims = "${map.yAxis.size}×${map.xAxis.size}"
+            val desc = if (def.tableDescription.isNotBlank()) " — ${def.tableDescription}" else ""
+            println("  %-25s %8s%s".format(def.tableName, dims, desc))
+        }
     }
 }
 
-private fun cmdMap(args: Array<String>) {
-    if (args.size < 2) { println("Usage: map <name>"); return }
-    if (mapList.isEmpty()) { println("No ECU loaded."); return }
+private fun cmdMap(args: Array<String>, json: Boolean) {
+    if (args.size < 2) {
+        if (json) println("""{"error":"Usage: map <name>"}""")
+        else println("Usage: map <name>")
+        return
+    }
+    if (mapList.isEmpty()) {
+        if (json) println("""{"error":"No ECU loaded."}""")
+        else println("No ECU loaded.")
+        return
+    }
 
     val match = findMap(args[1])
-    if (match == null) { println("Map '${args[1]}' not found. Use 'maps' to list."); return }
-
-    val (def, map) = match
-    println("=== ${def.tableName} ===")
-    if (def.tableDescription.isNotBlank()) println(def.tableDescription)
-    println("Dimensions: ${map.yAxis.size} rows × ${map.xAxis.size} columns")
-
-    if (map.xAxis.isNotEmpty()) {
-        println("X-axis: ${map.xAxis.joinToString("  ") { fmtVal(it) }}")
+    if (match == null) {
+        if (json) println("""{"error":${jsonStr("Map '${args[1]}' not found.")}}""")
+        else println("Map '${args[1]}' not found. Use 'maps' to list.")
+        return
     }
 
-    if (map.yAxis.isEmpty() && map.xAxis.isEmpty()) {
-        // Scalar or 1D
-        if (map.zAxis.isNotEmpty() && map.zAxis[0].isNotEmpty()) {
-            if (map.zAxis[0].size == 1) {
-                println("Value: ${fmtVal(map.zAxis[0][0])}")
-            } else {
-                println("Values: ${map.zAxis[0].joinToString("  ") { fmtVal(it) }}")
-            }
-        }
-    } else {
-        // 2D table
-        // Header row
-        val colWidth = 10
-        print("%${colWidth}s".format(""))
-        for (x in map.xAxis) print("%${colWidth}s".format(fmtVal(x)))
-        println()
+    val (def, map) = match
 
-        for (row in map.yAxis.indices) {
-            if (row < map.zAxis.size) {
-                print("%${colWidth}s".format(fmtVal(map.yAxis[row])))
-                for (col in map.zAxis[row].indices) {
-                    print("%${colWidth}s".format(fmtVal(map.zAxis[row][col])))
+    if (json) {
+        println(jsonMapFull(def.tableName, def.tableDescription, map))
+    } else {
+        println("=== ${def.tableName} ===")
+        if (def.tableDescription.isNotBlank()) println(def.tableDescription)
+        println("Dimensions: ${map.yAxis.size} rows × ${map.xAxis.size} columns")
+
+        if (map.xAxis.isNotEmpty()) {
+            println("X-axis: ${map.xAxis.joinToString("  ") { fmtVal(it) }}")
+        }
+
+        if (map.yAxis.isEmpty() && map.xAxis.isEmpty()) {
+            if (map.zAxis.isNotEmpty() && map.zAxis[0].isNotEmpty()) {
+                if (map.zAxis[0].size == 1) {
+                    println("Value: ${fmtVal(map.zAxis[0][0])}")
+                } else {
+                    println("Values: ${map.zAxis[0].joinToString("  ") { fmtVal(it) }}")
                 }
-                println()
+            }
+        } else {
+            val colWidth = 10
+            print("%${colWidth}s".format(""))
+            for (x in map.xAxis) print("%${colWidth}s".format(fmtVal(x)))
+            println()
+
+            for (row in map.yAxis.indices) {
+                if (row < map.zAxis.size) {
+                    print("%${colWidth}s".format(fmtVal(map.yAxis[row])))
+                    for (col in map.zAxis[row].indices) {
+                        print("%${colWidth}s".format(fmtVal(map.zAxis[row][col])))
+                    }
+                    println()
+                }
             }
         }
     }
 }
 
-private fun cmdOptimize() {
-    if (mapList.isEmpty()) { println("No ECU loaded. Use 'load-ecu' first."); return }
-    if (logData == null) { println("No logs loaded. Use 'load-logs' first."); return }
+private fun cmdOptimize(json: Boolean) {
+    if (mapList.isEmpty()) {
+        if (json) println("""{"error":"No ECU loaded. Use load-ecu first."}""")
+        else println("No ECU loaded. Use 'load-ecu' first.")
+        return
+    }
+    if (logData == null) {
+        if (json) println("""{"error":"No logs loaded. Use load-logs first."}""")
+        else println("No logs loaded. Use 'load-logs' first.")
+        return
+    }
 
     val kfldrl = findMap("KFLDRL")?.second
     val kfldimx = findMap("KFLDIMX")?.second
@@ -259,10 +323,11 @@ private fun cmdOptimize() {
     val kfmirl = findMap("KFMIRL")?.second
     val kfurlMap = findMap("KFURL")?.second
 
-    if (kfldrl == null) println("⚠ KFLDRL not found — boost duty suggestions unavailable")
-    if (kfpbrk == null) println("⚠ KFPBRK not found — VE correction unavailable")
-
-    print("Running optimizer... "); System.out.flush()
+    if (!json) {
+        if (kfldrl == null) println("⚠ KFLDRL not found — boost duty suggestions unavailable")
+        if (kfpbrk == null) println("⚠ KFPBRK not found — VE correction unavailable")
+        print("Running optimizer... "); System.out.flush()
+    }
 
     val result = OptimizerCalculator.analyze(
         values = logData!!,
@@ -273,6 +338,11 @@ private fun cmdOptimize() {
         kfmirlMap = kfmirl,
         kfurlMap = kfurlMap
     )
+
+    if (json) {
+        println(jsonOptimize(result))
+        return
+    }
 
     println("done (${result.wotEntries.size} WOT entries)")
     println()
@@ -501,7 +571,7 @@ private fun cmdMlhfmCorrect(args: Array<String>) {
     }
 }
 
-private fun cmdKrkte(args: Array<String>) {
+private fun cmdKrkte(args: Array<String>, json: Boolean) {
     // Defaults for Audi 2.7T B5 S4
     var displacement = 0.4505  // single cylinder dm³ (2703cc / 6)
     var injectorSize = 6.15    // 615cc injector in cm³
@@ -533,39 +603,65 @@ private fun cmdKrkte(args: Array<String>) {
         stoichiometricAirFuelRatio = stoichAFR
     )
 
-    println("=== KRKTE Calculation ===")
-    println("  Cylinder displacement: ${fmtVal(displacement)} dm³ (${fmtVal(displacement * 1000)} cc)")
-    println("  Injector size:         ${fmtVal(injectorSize)} cm³")
-    println("  Air density:           ${fmtVal(airDensity)} g/dm³")
-    println("  Gasoline density:      ${fmtVal(gasDensity)} g/cm³")
-    println("  Stoich AFR:            ${fmtVal(stoichAFR)}")
-    println()
-    println("  KRKTE = ${fmtVal(krkte)} ms/%")
-
-    // Compare with loaded BIN if available
-    val binKrkte = findMap("KRKTE")
-    if (binKrkte != null) {
-        val binVal = binKrkte.second.zAxis.firstOrNull()?.firstOrNull()
+    if (json) {
+        val sb = StringBuilder("{")
+        sb.append("\"calculated_krkte\":${fmtJsonNum(krkte)}")
+        val binKrkte = findMap("KRKTE")
+        val binVal = binKrkte?.second?.zAxis?.firstOrNull()?.firstOrNull()
         if (binVal != null) {
+            sb.append(",\"bin_krkte\":${fmtJsonNum(binVal)}")
             val diff = ((krkte - binVal) / binVal) * 100
-            println("  BIN value = ${fmtVal(binVal)} ms/% (Δ${fmtPct(diff)})")
+            sb.append(",\"delta_pct\":${fmtJsonNum(diff)}")
+        } else {
+            sb.append(",\"bin_krkte\":null,\"delta_pct\":null")
+        }
+        sb.append(",\"parameters\":{")
+        sb.append("\"displacement_dm3\":${fmtJsonNum(displacement)}")
+        sb.append(",\"injector_cm3\":${fmtJsonNum(injectorSize)}")
+        sb.append(",\"air_density_g_dm3\":${fmtJsonNum(airDensity)}")
+        sb.append(",\"gas_density_g_cm3\":${fmtJsonNum(gasDensity)}")
+        sb.append(",\"stoich_afr\":${fmtJsonNum(stoichAFR)}")
+        sb.append("}}")
+        println(sb)
+    } else {
+        println("=== KRKTE Calculation ===")
+        println("  Cylinder displacement: ${fmtVal(displacement)} dm³ (${fmtVal(displacement * 1000)} cc)")
+        println("  Injector size:         ${fmtVal(injectorSize)} cm³")
+        println("  Air density:           ${fmtVal(airDensity)} g/dm³")
+        println("  Gasoline density:      ${fmtVal(gasDensity)} g/cm³")
+        println("  Stoich AFR:            ${fmtVal(stoichAFR)}")
+        println()
+        println("  KRKTE = ${fmtVal(krkte)} ms/%")
+
+        // Compare with loaded BIN if available
+        val binKrkte = findMap("KRKTE")
+        if (binKrkte != null) {
+            val binVal = binKrkte.second.zAxis.firstOrNull()?.firstOrNull()
+            if (binVal != null) {
+                val diff = ((krkte - binVal) / binVal) * 100
+                println("  BIN value = ${fmtVal(binVal)} ms/% (Δ${fmtPct(diff)})")
+            }
         }
     }
 }
 
-private fun cmdLimits() {
-    if (logData == null) { println("No logs loaded."); return }
+private fun cmdLimits(json: Boolean) {
+    if (logData == null) {
+        if (json) println("""{"error":"No logs loaded."}""")
+        else println("No logs loaded.")
+        return
+    }
 
     // Build WOT entries from log data
     val filtered = OptimizerCalculator.filterWotEntriesWithOptionalData(logData!!)
     if (filtered.wotEntries.isEmpty()) {
-        println("No WOT entries found in log data.")
-        println("  Logs may need required columns: nmot, wdkba, ldtvm, pus_w, pvdks_w, pssol_w, rlsol_w, rl_w")
+        if (json) println("""{"error":"No WOT entries found in log data."}""")
+        else {
+            println("No WOT entries found in log data.")
+            println("  Logs may need required columns: nmot, wdkba, ldtvm, pus_w, pvdks_w, pssol_w, rlsol_w, rl_w")
+        }
         return
     }
-
-    println("=== Mechanical Limit Detection (${filtered.wotEntries.size} WOT samples) ===")
-    println()
 
     val limits = MechanicalLimitDetector.detect(
         wotEntries = filtered.wotEntries,
@@ -575,79 +671,131 @@ private fun cmdLimits() {
         mafVoltages = filtered.mafVoltages
     )
 
-    println("  MAF saturated:      ${if (limits.mafMaxed) "⚠ YES — max ${fmtVal(limits.mafMaxValue)} g/s" else "✓ No (max ${fmtVal(limits.mafMaxValue)} g/s)"}")
-    println("  MAF voltage:        ${if (limits.mafVoltageMaxed) "⚠ YES — max ${fmtVal(limits.mafMaxVoltage)}V (sensor clipping)" else "✓ No (max ${fmtVal(limits.mafMaxVoltage)}V)"}")
-    println("  Injector duty:      ${if (limits.injectorMaxed) "⚠ YES — max ${fmtVal(limits.injectorMaxDutyCycle)}% (fuel starvation risk)" else "✓ No (max ${fmtVal(limits.injectorMaxDutyCycle)}%)"}")
-    println("  Turbo WGDC:         ${if (limits.turboMaxed) "⚠ YES — max ${fmtVal(limits.turboMaxWgdc)}% (boost target unreachable)" else "✓ No (max ${fmtVal(limits.turboMaxWgdc)}%)"}")
-    println("  MAP sensor:         ${if (limits.mapSensorMaxed) "⚠ YES — max ${fmtVal(limits.mapSensorMaxValue)} mBar" else "✓ No (max ${fmtVal(limits.mapSensorMaxValue)} mBar)"}")
-    println("  MAP sensor type:    ${limits.mapSensorType}")
-
-    if (limits.dataReliabilityCompromised) {
+    if (json) {
+        println(jsonLimits(limits))
+    } else {
+        println("=== Mechanical Limit Detection (${filtered.wotEntries.size} WOT samples) ===")
         println()
-        println("  ⚠ DATA RELIABILITY COMPROMISED: ${limits.dataReliabilityDetail}")
-    }
 
-    if (limits.warnings.isNotEmpty()) {
-        println()
-        println("  Additional warnings:")
-        limits.warnings.forEach { println("    ⚠ $it") }
-    }
+        println("  MAF saturated:      ${if (limits.mafMaxed) "⚠ YES — max ${fmtVal(limits.mafMaxValue)} g/s" else "✓ No (max ${fmtVal(limits.mafMaxValue)} g/s)"}")
+        println("  MAF voltage:        ${if (limits.mafVoltageMaxed) "⚠ YES — max ${fmtVal(limits.mafMaxVoltage)}V (sensor clipping)" else "✓ No (max ${fmtVal(limits.mafMaxVoltage)}V)"}")
+        println("  Injector duty:      ${if (limits.injectorMaxed) "⚠ YES — max ${fmtVal(limits.injectorMaxDutyCycle)}% (fuel starvation risk)" else "✓ No (max ${fmtVal(limits.injectorMaxDutyCycle)}%)"}")
+        println("  Turbo WGDC:         ${if (limits.turboMaxed) "⚠ YES — max ${fmtVal(limits.turboMaxWgdc)}% (boost target unreachable)" else "✓ No (max ${fmtVal(limits.turboMaxWgdc)}%)"}")
+        println("  MAP sensor:         ${if (limits.mapSensorMaxed) "⚠ YES — max ${fmtVal(limits.mapSensorMaxValue)} mBar" else "✓ No (max ${fmtVal(limits.mapSensorMaxValue)} mBar)"}")
+        println("  MAP sensor type:    ${limits.mapSensorType}")
 
-    if (limits.sensorSaturationWarnings.isNotEmpty()) {
-        println()
-        println("  Sensor saturation details:")
-        limits.sensorSaturationWarnings.forEach {
-            println("    ⚠ ${it.sensorName}: ${it.recommendation}")
+        if (limits.dataReliabilityCompromised) {
+            println()
+            println("  ⚠ DATA RELIABILITY COMPROMISED: ${limits.dataReliabilityDetail}")
+        }
+
+        if (limits.warnings.isNotEmpty()) {
+            println()
+            println("  Additional warnings:")
+            limits.warnings.forEach { println("    ⚠ $it") }
+        }
+
+        if (limits.sensorSaturationWarnings.isNotEmpty()) {
+            println()
+            println("  Sensor saturation details:")
+            limits.sensorSaturationWarnings.forEach {
+                println("    ⚠ ${it.sensorName}: ${it.recommendation}")
+            }
         }
     }
 }
 
-private fun cmdSummary() {
-    println("=== Session Summary ===")
-    println()
+private fun cmdSummary(json: Boolean) {
+    if (json) {
+        val sb = StringBuilder("{")
+        // ECU
+        sb.append("\"ecu\":{")
+        if (mapList.isNotEmpty()) {
+            sb.append("\"xdf\":${jsonStr(xdfFile?.name ?: "unknown")}")
+            sb.append(",\"bin\":${jsonStr(binFile?.name ?: "unknown")}")
+            sb.append(",\"map_count\":${mapList.size}")
+        } else {
+            sb.append("\"xdf\":null,\"bin\":null,\"map_count\":0")
+        }
+        sb.append("}")
+        // Logs
+        sb.append(",\"logs\":{")
+        if (logData != null) {
+            val rows = logData!!.entries
+                .filter { it.key != Me7LogFileContract.Header.START_TIME_HEADER }
+                .firstOrNull()?.value?.size ?: 0
+            sb.append("\"directory\":${jsonStr(logDir?.name ?: "unknown")}")
+            sb.append(",\"rows\":$rows")
 
-    // ECU
-    if (mapList.isNotEmpty()) {
-        println("ECU: ${xdfFile?.name ?: "unknown"} + ${binFile?.name ?: "unknown"}")
-        println("  ${mapList.size} maps loaded")
+            logData!![Me7LogFileContract.Header.RPM_COLUMN_HEADER]?.let { rpms ->
+                if (rpms.isNotEmpty()) {
+                    sb.append(",\"rpm_range\":[${rpms.min().toInt()},${rpms.max().toInt()}]")
+                }
+            }
+            logData!![Me7LogFileContract.Header.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER]?.let { boost ->
+                if (boost.isNotEmpty()) {
+                    sb.append(",\"boost_range\":[${boost.min().toInt()},${boost.max().toInt()}]")
+                }
+            }
+            logData!![Me7LogFileContract.Header.MAF_GRAMS_PER_SECOND_HEADER]?.let { maf ->
+                if (maf.isNotEmpty()) {
+                    sb.append(",\"maf_range\":[${fmtJsonNum(maf.min())},${fmtJsonNum(maf.max())}]")
+                }
+            }
+            val filtered = OptimizerCalculator.filterWotEntriesWithOptionalData(logData!!)
+            sb.append(",\"wot_entries\":${filtered.wotEntries.size}")
+        } else {
+            sb.append("\"directory\":null,\"rows\":0,\"wot_entries\":0")
+        }
+        sb.append("}}")
+        println(sb)
     } else {
-        println("ECU: not loaded")
-    }
-    println()
+        println("=== Session Summary ===")
+        println()
 
-    // Logs
-    if (logData != null) {
-        val rows = logData!!.entries
-            .filter { it.key != Me7LogFileContract.Header.START_TIME_HEADER }
-            .firstOrNull()?.value?.size ?: 0
-        println("Logs: ${logDir?.name ?: "unknown"} ($rows data rows)")
-
-        // RPM range
-        logData!![Me7LogFileContract.Header.RPM_COLUMN_HEADER]?.let { rpms ->
-            if (rpms.isNotEmpty()) {
-                println("  RPM range: ${rpms.min().toInt()} – ${rpms.max().toInt()}")
-            }
+        // ECU
+        if (mapList.isNotEmpty()) {
+            println("ECU: ${xdfFile?.name ?: "unknown"} + ${binFile?.name ?: "unknown"}")
+            println("  ${mapList.size} maps loaded")
+        } else {
+            println("ECU: not loaded")
         }
+        println()
 
-        // Boost range
-        logData!![Me7LogFileContract.Header.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER]?.let { boost ->
-            if (boost.isNotEmpty()) {
-                println("  Boost range: ${boost.min().toInt()} – ${boost.max().toInt()} mBar (abs)")
+        // Logs
+        if (logData != null) {
+            val rows = logData!!.entries
+                .filter { it.key != Me7LogFileContract.Header.START_TIME_HEADER }
+                .firstOrNull()?.value?.size ?: 0
+            println("Logs: ${logDir?.name ?: "unknown"} ($rows data rows)")
+
+            // RPM range
+            logData!![Me7LogFileContract.Header.RPM_COLUMN_HEADER]?.let { rpms ->
+                if (rpms.isNotEmpty()) {
+                    println("  RPM range: ${rpms.min().toInt()} – ${rpms.max().toInt()}")
+                }
             }
-        }
 
-        // MAF range
-        logData!![Me7LogFileContract.Header.MAF_GRAMS_PER_SECOND_HEADER]?.let { maf ->
-            if (maf.isNotEmpty()) {
-                println("  MAF range: ${fmtVal(maf.min())} – ${fmtVal(maf.max())} g/s")
+            // Boost range
+            logData!![Me7LogFileContract.Header.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER]?.let { boost ->
+                if (boost.isNotEmpty()) {
+                    println("  Boost range: ${boost.min().toInt()} – ${boost.max().toInt()} mBar (abs)")
+                }
             }
-        }
 
-        // WOT entries
-        val filtered = OptimizerCalculator.filterWotEntriesWithOptionalData(logData!!)
-        println("  WOT entries: ${filtered.wotEntries.size}")
-    } else {
-        println("Logs: not loaded")
+            // MAF range
+            logData!![Me7LogFileContract.Header.MAF_GRAMS_PER_SECOND_HEADER]?.let { maf ->
+                if (maf.isNotEmpty()) {
+                    println("  MAF range: ${fmtVal(maf.min())} – ${fmtVal(maf.max())} g/s")
+                }
+            }
+
+            // WOT entries
+            val filtered = OptimizerCalculator.filterWotEntriesWithOptionalData(logData!!)
+            println("  WOT entries: ${filtered.wotEntries.size}")
+        } else {
+            println("Logs: not loaded")
+        }
     }
 }
 
@@ -691,6 +839,9 @@ private fun cmdHelp() {
     println("  load-logs <dir> [--type optimizer]   Load ME7Logger CSV logs")
     println("  maps [filter]                        List maps (optional name filter)")
     println("  map <name>                           Display a specific map's values")
+    println("  cell <map> <x> <y>                   Get cell value at nearest axis coordinates")
+    println("  lookup <map> <x> <y>                 Get bilinear-interpolated value")
+    println("  axis <map>                           Show axis breakpoints for a map")
     println("  optimize                             Run 6-phase boost/load optimizer")
     println("  mlhfm-correct [--mode closed|open]   Correct MAF linearization")
     println("  krkte [--displacement cc] [--injector cc]")
@@ -698,15 +849,341 @@ private fun cmdHelp() {
     println("  limits                               Detect mechanical limits (MAF/injector/turbo)")
     println("  summary                              Session overview")
     println("  export <map-name> <file.csv>         Export map to CSV")
+    println("  set-format <text|json>               Set output format (default: text)")
     println("  help                                 This message")
     println("  quit / exit                          Exit REPL")
+    println()
+    println("JSON output:")
+    println("  set-format json                      Enable JSON output globally")
+    println("  <command> --json                     JSON output for a single command")
+    println("  <command> --format json              Same as --json")
     println()
     println("Examples:")
     println("  load-ecu 8D0907551M.xdf 8D0907551M.bin")
     println("  load-logs /path/to/me7logger/logs/")
     println("  optimize")
+    println("  maps --json")
+    println("  map KFZWOP --json")
+    println("  cell KFZWOP 5500 282")
+    println("  lookup KFZWOP 5500 280")
+    println("  axis KFZWOP")
     println("  mlhfm-correct --mode closed")
     println("  krkte --displacement 2703 --injector 615")
+}
+
+// ── New Commands ─────────────────────────────────────────────────────
+
+private fun cmdCell(args: Array<String>, json: Boolean) {
+    if (args.size < 4) {
+        if (json) println("""{"error":"Usage: cell <map> <x> <y>"}""")
+        else println("Usage: cell <map> <x> <y>")
+        return
+    }
+    if (mapList.isEmpty()) {
+        if (json) println("""{"error":"No ECU loaded."}""")
+        else println("No ECU loaded.")
+        return
+    }
+
+    val match = findMap(args[1])
+    if (match == null) {
+        if (json) println("""{"error":${jsonStr("Map '${args[1]}' not found.")}}""")
+        else println("Map '${args[1]}' not found. Use 'maps' to list.")
+        return
+    }
+
+    val x = args[2].toDoubleOrNull()
+    val y = args[3].toDoubleOrNull()
+    if (x == null || y == null) {
+        if (json) println("""{"error":"x and y must be numbers"}""")
+        else println("x and y must be numbers")
+        return
+    }
+
+    val (def, map) = match
+    val nearestXIdx = findNearestIndex(map.xAxis, x)
+    val nearestYIdx = findNearestIndex(map.yAxis, y)
+    val nearestX = if (map.xAxis.isNotEmpty()) map.xAxis[nearestXIdx] else 0.0
+    val nearestY = if (map.yAxis.isNotEmpty()) map.yAxis[nearestYIdx] else 0.0
+    val value = if (nearestYIdx < map.zAxis.size && nearestXIdx < map.zAxis[nearestYIdx].size)
+        map.zAxis[nearestYIdx][nearestXIdx] else Double.NaN
+
+    if (json) {
+        val sb = StringBuilder("{")
+        sb.append("\"map\":${jsonStr(def.tableName)}")
+        sb.append(",\"x\":${fmtJsonNum(x)}")
+        sb.append(",\"y\":${fmtJsonNum(y)}")
+        sb.append(",\"value\":${fmtJsonNum(value)}")
+        sb.append(",\"nearest_x\":${fmtJsonNum(nearestX)}")
+        sb.append(",\"nearest_y\":${fmtJsonNum(nearestY)}")
+        sb.append("}")
+        println(sb)
+    } else {
+        println("${def.tableName}[x=${fmtVal(nearestX)}, y=${fmtVal(nearestY)}] = ${fmtVal(value)}")
+        if (nearestX != x || nearestY != y) {
+            println("  (snapped from x=${fmtVal(x)}, y=${fmtVal(y)})")
+        }
+    }
+}
+
+private fun cmdLookup(args: Array<String>, json: Boolean) {
+    if (args.size < 4) {
+        if (json) println("""{"error":"Usage: lookup <map> <x> <y>"}""")
+        else println("Usage: lookup <map> <x> <y>")
+        return
+    }
+    if (mapList.isEmpty()) {
+        if (json) println("""{"error":"No ECU loaded."}""")
+        else println("No ECU loaded.")
+        return
+    }
+
+    val match = findMap(args[1])
+    if (match == null) {
+        if (json) println("""{"error":${jsonStr("Map '${args[1]}' not found.")}}""")
+        else println("Map '${args[1]}' not found. Use 'maps' to list.")
+        return
+    }
+
+    val x = args[2].toDoubleOrNull()
+    val y = args[3].toDoubleOrNull()
+    if (x == null || y == null) {
+        if (json) println("""{"error":"x and y must be numbers"}""")
+        else println("x and y must be numbers")
+        return
+    }
+
+    val (def, map) = match
+    val interpolated = map.lookup(x, y)
+
+    if (json) {
+        val sb = StringBuilder("{")
+        sb.append("\"map\":${jsonStr(def.tableName)}")
+        sb.append(",\"x\":${fmtJsonNum(x)}")
+        sb.append(",\"y\":${fmtJsonNum(y)}")
+        sb.append(",\"interpolated_value\":${fmtJsonNum(interpolated)}")
+        sb.append("}")
+        println(sb)
+    } else {
+        println("${def.tableName}.lookup(x=${fmtVal(x)}, y=${fmtVal(y)}) = ${fmtVal(interpolated)}")
+    }
+}
+
+private fun cmdAxis(args: Array<String>, json: Boolean) {
+    if (args.size < 2) {
+        if (json) println("""{"error":"Usage: axis <map>"}""")
+        else println("Usage: axis <map>")
+        return
+    }
+    if (mapList.isEmpty()) {
+        if (json) println("""{"error":"No ECU loaded."}""")
+        else println("No ECU loaded.")
+        return
+    }
+
+    val match = findMap(args[1])
+    if (match == null) {
+        if (json) println("""{"error":${jsonStr("Map '${args[1]}' not found.")}}""")
+        else println("Map '${args[1]}' not found. Use 'maps' to list.")
+        return
+    }
+
+    val (def, map) = match
+
+    if (json) {
+        val sb = StringBuilder("{")
+        sb.append("\"map\":${jsonStr(def.tableName)}")
+        sb.append(",\"x_axis\":{\"count\":${map.xAxis.size},\"values\":${jsonArr(map.xAxis)}}")
+        sb.append(",\"y_axis\":{\"count\":${map.yAxis.size},\"values\":${jsonArr(map.yAxis)}}")
+        sb.append("}")
+        println(sb)
+    } else {
+        println("=== ${def.tableName} Axes ===")
+        println("X-axis (${map.xAxis.size}): ${map.xAxis.joinToString("  ") { fmtVal(it) }}")
+        println("Y-axis (${map.yAxis.size}): ${map.yAxis.joinToString("  ") { fmtVal(it) }}")
+    }
+}
+
+private fun cmdSetFormat(args: Array<String>) {
+    if (args.size < 2) {
+        println(if (outputJson) "json" else "text")
+        return
+    }
+    when (args[1].lowercase()) {
+        "json" -> { outputJson = true; println("Output format: json") }
+        "text" -> { outputJson = false; println("Output format: text") }
+        else -> println("Unknown format '${args[1]}'. Use 'text' or 'json'.")
+    }
+}
+
+// ── JSON Helpers ─────────────────────────────────────────────────────
+
+private fun jsonStr(s: String): String =
+    "\"${s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t")}\""
+
+private fun fmtJsonNum(v: Double): String = when {
+    v.isNaN() || v.isInfinite() -> "null"
+    v == v.toLong().toDouble() -> v.toLong().toString()
+    else -> "%.6f".format(v).trimEnd('0').trimEnd('.')
+}
+
+private fun jsonArr(vals: Array<Double>): String =
+    "[${vals.joinToString(",") { fmtJsonNum(it) }}]"
+
+private fun jsonArr2d(vals: Array<Array<Double>>): String =
+    "[${vals.joinToString(",") { row -> "[${row.joinToString(",") { fmtJsonNum(it) }}]" }}]"
+
+private fun jsonStrArr(vals: List<String>): String =
+    "[${vals.joinToString(",") { jsonStr(it) }}]"
+
+private fun jsonMapFull(name: String, description: String, map: Map3d): String {
+    val sb = StringBuilder("{")
+    sb.append("\"name\":${jsonStr(name)}")
+    sb.append(",\"description\":${jsonStr(description)}")
+    sb.append(",\"dimensions\":[${map.yAxis.size},${map.xAxis.size}]")
+    sb.append(",\"x_axis\":${jsonArr(map.xAxis)}")
+    sb.append(",\"y_axis\":${jsonArr(map.yAxis)}")
+    sb.append(",\"z_data\":${jsonArr2d(map.zAxis)}")
+    sb.append("}")
+    return sb.toString()
+}
+
+private fun jsonMapDelta(name: String, delta: MapDelta): String {
+    val sb = StringBuilder("{")
+    sb.append("\"cells_modified\":${delta.cellsModified}")
+    sb.append(",\"total_cells\":${delta.totalCells}")
+    sb.append(",\"coverage\":${fmtJsonNum(delta.coverage)}")
+    sb.append(",\"x_axis\":${jsonArr(delta.suggested.xAxis)}")
+    sb.append(",\"y_axis\":${jsonArr(delta.suggested.yAxis)}")
+    sb.append(",\"z_data\":${jsonArr2d(delta.suggested.zAxis)}")
+    sb.append("}")
+    return sb.toString()
+}
+
+private fun jsonSuggestedMap(delta: MapDelta?, fallback: Map3d?): String {
+    if (delta != null) return jsonMapDelta(delta.mapName, delta)
+    if (fallback != null) {
+        val sb = StringBuilder("{")
+        sb.append("\"x_axis\":${jsonArr(fallback.xAxis)}")
+        sb.append(",\"y_axis\":${jsonArr(fallback.yAxis)}")
+        sb.append(",\"z_data\":${jsonArr2d(fallback.zAxis)}")
+        sb.append("}")
+        return sb.toString()
+    }
+    return "null"
+}
+
+private fun jsonOptimize(result: OptimizerCalculator.OptimizerResult): String {
+    val sb = StringBuilder("{")
+    sb.append("\"wot_entries\":${result.wotEntries.size}")
+    sb.append(",\"warnings\":${jsonStrArr(result.warnings)}")
+
+    // Mechanical limits
+    val lim = result.mechanicalLimits
+    sb.append(",\"mechanical_limits\":{")
+    sb.append("\"maf_saturated\":${lim.mafMaxed}")
+    sb.append(",\"injector_maxed\":${lim.injectorMaxed}")
+    sb.append(",\"turbo_maxed\":${lim.turboMaxed}")
+    sb.append(",\"map_sensor_maxed\":${lim.mapSensorMaxed}")
+    sb.append(",\"map_sensor_type\":${jsonStr(lim.mapSensorType)}")
+    sb.append("}")
+
+    // Pressure errors
+    if (result.pressureErrors.isNotEmpty()) {
+        val grouped = result.pressureErrors.groupBy { (it.first / 500).toInt() * 500 }
+        sb.append(",\"pressure_errors\":[")
+        var first = true
+        for ((rpmBin, errors) in grouped.toSortedMap()) {
+            val errs = errors.map { it.second }
+            if (!first) sb.append(",")
+            first = false
+            sb.append("{\"rpm_bin\":$rpmBin")
+            sb.append(",\"mean_error\":${fmtJsonNum(errs.average())}")
+            sb.append(",\"max_error\":${fmtJsonNum(errs.maxOrNull() ?: 0.0)}")
+            sb.append(",\"count\":${errs.size}}")
+        }
+        sb.append("]")
+    } else {
+        sb.append(",\"pressure_errors\":[]")
+    }
+
+    // Suggested maps
+    sb.append(",\"suggested_kfldrl\":${jsonSuggestedMap(result.suggestedMaps.kfldrl, result.suggestedKfldrl)}")
+    sb.append(",\"suggested_kfldimx\":${jsonSuggestedMap(result.suggestedMaps.kfldimx, result.suggestedKfldimx)}")
+    sb.append(",\"suggested_kfpbrk\":${jsonSuggestedMap(result.suggestedMaps.kfpbrk, result.kfpbrkMultipliers)}")
+
+    // Chain diagnosis
+    val diag = result.chainDiagnosis
+    sb.append(",\"chain_diagnosis\":{")
+    sb.append("\"on_target_pct\":${fmtJsonNum(diag.onTargetPercent)}")
+    sb.append(",\"torque_capped_pct\":${fmtJsonNum(diag.torqueCappedPercent)}")
+    sb.append(",\"pssol_error_pct\":${fmtJsonNum(diag.pssolErrorPercent)}")
+    sb.append(",\"boost_shortfall_pct\":${fmtJsonNum(diag.boostShortfallPercent)}")
+    sb.append(",\"dominant_error\":${jsonStr(diag.dominantError.name)}")
+    sb.append(",\"recommendations\":${jsonStrArr(diag.recommendations)}")
+    sb.append("}")
+
+    // Safety modes
+    val safety = result.safetyModes
+    sb.append(",\"safety_modes\":{")
+    if (safety != null) {
+        sb.append("\"overload_count\":${safety.overloadCount}")
+        sb.append(",\"fallback_count\":${safety.fallbackCount}")
+        sb.append(",\"regulation_error_count\":${safety.regulationErrorCount}")
+        sb.append(",\"excluded_samples\":${safety.excludedSamples.size}")
+    } else {
+        sb.append("\"overload_count\":0,\"fallback_count\":0,\"regulation_error_count\":0,\"excluded_samples\":0")
+    }
+    sb.append("}")
+
+    // Environmental
+    val env = result.environmental
+    sb.append(",\"environmental\":{")
+    if (env != null) {
+        sb.append("\"avg_baro_mbar\":${fmtJsonNum(env.avgBaroPressure)}")
+        sb.append(",\"avg_iat_c\":${if (env.avgIntakeTemp != null) fmtJsonNum(env.avgIntakeTemp) else "null"}")
+        sb.append(",\"estimated_altitude_m\":${fmtJsonNum(env.estimatedAltitudeM)}")
+    } else {
+        sb.append("\"avg_baro_mbar\":null,\"avg_iat_c\":null,\"estimated_altitude_m\":null")
+    }
+    sb.append("}")
+
+    sb.append("}")
+    return sb.toString()
+}
+
+private fun jsonLimits(limits: MechanicalLimitDetector.MechanicalLimits): String {
+    val sb = StringBuilder("{")
+    sb.append("\"maf_saturated\":${limits.mafMaxed}")
+    sb.append(",\"maf_max_gs\":${fmtJsonNum(limits.mafMaxValue)}")
+    sb.append(",\"maf_voltage_maxed\":${limits.mafVoltageMaxed}")
+    sb.append(",\"maf_max_voltage\":${fmtJsonNum(limits.mafMaxVoltage)}")
+    sb.append(",\"injector_maxed\":${limits.injectorMaxed}")
+    sb.append(",\"injector_max_duty_pct\":${fmtJsonNum(limits.injectorMaxDutyCycle)}")
+    sb.append(",\"turbo_maxed\":${limits.turboMaxed}")
+    sb.append(",\"turbo_max_wgdc_pct\":${fmtJsonNum(limits.turboMaxWgdc)}")
+    sb.append(",\"map_sensor_maxed\":${limits.mapSensorMaxed}")
+    sb.append(",\"map_sensor_max_mbar\":${fmtJsonNum(limits.mapSensorMaxValue)}")
+    sb.append(",\"map_sensor_type\":${jsonStr(limits.mapSensorType)}")
+    sb.append(",\"data_reliability_compromised\":${limits.dataReliabilityCompromised}")
+    sb.append(",\"sensor_warnings\":[")
+    for ((i, w) in limits.sensorSaturationWarnings.withIndex()) {
+        if (i > 0) sb.append(",")
+        sb.append("{\"sensor\":${jsonStr(w.sensorName)},\"recommendation\":${jsonStr(w.recommendation)}}")
+    }
+    sb.append("]}")
+    return sb.toString()
+}
+
+private fun findNearestIndex(axis: Array<Double>, value: Double): Int {
+    if (axis.isEmpty()) return 0
+    var bestIdx = 0
+    var bestDist = kotlin.math.abs(axis[0] - value)
+    for (i in 1 until axis.size) {
+        val dist = kotlin.math.abs(axis[i] - value)
+        if (dist < bestDist) { bestDist = dist; bestIdx = i }
+    }
+    return bestIdx
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
