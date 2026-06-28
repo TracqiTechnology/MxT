@@ -11,6 +11,8 @@ enum class ToolsTab(
     LOGGER("Data Logger"),
     A2L_GENERATOR("A2L \u2192 ECU Generator",
         platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9, EcuPlatform.MED17)),
+    XDF_GENERATOR("A2L \u2192 XDF Generator",
+        platforms = setOf(EcuPlatform.MED9)),
     RAM_SNIFFER("RAM Sniffer",
         platforms = setOf(EcuPlatform.ME7, EcuPlatform.MOTRONIC, EcuPlatform.MED9)),
     AXIS_RESCALER("Axis Rescaler", stability = StabilityLevel.STABLE)

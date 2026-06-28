@@ -23,6 +23,8 @@ import data.parser.xdf.TableDefinition
 import data.parser.xdf.XdfParser
 import data.preferences.MapPreference
 import data.preferences.MapPreferenceManager
+import data.parser.a2l.A2lCalibrationParser
+import data.preferences.a2l.A2lFilePreferences
 import data.preferences.bin.BinFilePreferences
 import data.preferences.filechooser.BinFileChooserPreferences
 import data.preferences.filechooser.XdfFileChooserPreferences
@@ -89,13 +91,16 @@ private val allMapDefinitions = listOf(
     // Shared — boost PID linearization
     MapDefinitionEntry("KFLDRL", KfldrlPreferences),
     MapDefinitionEntry("KFLDIMX", KfldimxPreferences),
-    // ME7 + MED9 — VE model maps (MED17 uses adaptive fupsrl_w / pbrint_w)
-    MapDefinitionEntry("KFPBRK", KfpbrkPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
-    MapDefinitionEntry("KFPBRKNW", KfpbrknwPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
-    MapDefinitionEntry("KFPRG", KfprgPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
+    // ME7-only — VE model maps (residual gas / combustion pressure correction)
+    // These maps do not exist in MED9.1; the MED9.1 firmware uses a different VE model.
+    MapDefinitionEntry("KFPBRK",   KfpbrkPreferences,   platforms = setOf(EcuPlatform.ME7)),
+    MapDefinitionEntry("KFPBRKNW", KfpbrknwPreferences, platforms = setOf(EcuPlatform.ME7)),
+    MapDefinitionEntry("KFPRG",    KfprgPreferences,    platforms = setOf(EcuPlatform.ME7)),
     // v4: Environmental correction maps
     MapDefinitionEntry("KFLDIOPU", KfldioPuPreferences),
-    MapDefinitionEntry("KFFWTBR", KffwtbrPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
+    // Charge temperature blending factor — different name in ME7 vs MED9.1
+    MapDefinitionEntry("KFFWTBR", KffwtbrPreferences, platforms = setOf(EcuPlatform.ME7)),
+    MapDefinitionEntry("KFWTBR",  KffwtbrPreferences, platforms = setOf(EcuPlatform.MED9)),
     // v4: PID gain maps
     MapDefinitionEntry("KFLDRQ0", Kfldrq0Preferences),
     MapDefinitionEntry("KFLDRQ1", Kfldrq1Preferences),
@@ -148,10 +153,12 @@ fun ConfigurationScreen(
 
     val xdfFile by XdfFilePreferences.file.collectAsState()
     val binFile by BinFilePreferences.file.collectAsState()
+    val a2lFile by A2lFilePreferences.file.collectAsState()
 
     val xdfLoaded = xdfFile.exists() && xdfFile.isFile
     val binLoaded = binFile.exists() && binFile.isFile
-    val filesLoaded = xdfLoaded && binLoaded
+    val a2lLoaded = a2lFile.exists() && a2lFile.isFile
+    val filesLoaded = binLoaded && (xdfLoaded || a2lLoaded)
 
     Column(
         modifier = Modifier
@@ -159,7 +166,7 @@ fun ConfigurationScreen(
             .padding(16.dp)
             .verticalScroll(scrollState)
     ) {
-        FileLoadSection(xdfFile, xdfLoaded, binFile, binLoaded)
+        FileLoadSection(xdfFile, xdfLoaded, binFile, binLoaded, a2lFile, a2lLoaded)
 
         // Show XDF parse error if present
         val xdfParseError by XdfParser.parseError.collectAsState()
@@ -172,6 +179,24 @@ fun ConfigurationScreen(
             ) {
                 Text(
                     "⚠ XDF parse error: $error",
+                    modifier = Modifier.padding(12.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onErrorContainer
+                )
+            }
+        }
+
+        // Show A2L parse error if present
+        val a2lParseError by A2lCalibrationParser.parseError.collectAsState()
+        a2lParseError?.let { error ->
+            Spacer(modifier = Modifier.height(8.dp))
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.errorContainer,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    "⚠ A2L parse error: $error",
                     modifier = Modifier.padding(12.dp),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onErrorContainer
@@ -214,7 +239,13 @@ fun ConfigurationScreen(
 }
 
 @Composable
-private fun FileLoadSection(xdfFile: File, xdfLoaded: Boolean, binFile: File, binLoaded: Boolean) {
+private fun FileLoadSection(
+    xdfFile: File, xdfLoaded: Boolean,
+    binFile: File, binLoaded: Boolean,
+    a2lFile: File, a2lLoaded: Boolean
+) {
+    val a2lCharCount by A2lCalibrationParser.characteristicCount.collectAsState()
+
     Text(
         text = "Load Files",
         style = MaterialTheme.typography.titleMedium,
@@ -263,6 +294,34 @@ private fun FileLoadSection(xdfFile: File, xdfLoaded: Boolean, binFile: File, bi
                     val selected = File(dir, file)
                     BinFilePreferences.setFile(selected)
                     BinFileChooserPreferences.lastDirectory = selected.parent
+                }
+            },
+            modifier = Modifier.weight(1f)
+        )
+
+        // A2L as an alternative map definition source (MED9: use instead of or alongside XDF)
+        FileCard(
+            label = "A2L Calibration File (MED9)",
+            fileName = when {
+                a2lLoaded && a2lCharCount > 0 -> "${a2lFile.name}  ($a2lCharCount maps)"
+                a2lLoaded -> a2lFile.name
+                else -> "Optional — use without XDF"
+            },
+            isLoaded = a2lLoaded,
+            onOpen = {
+                val dialog = FileDialog(null as Frame?, "Select A2L File", FileDialog.LOAD)
+                dialog.setFilenameFilter { _, name ->
+                    name.endsWith(".a2l", ignoreCase = true) || name.endsWith(".A2L")
+                }
+                val lastDir = XdfFileChooserPreferences.lastDirectory
+                if (lastDir.isNotEmpty()) dialog.directory = lastDir
+                dialog.isVisible = true
+                val dir = dialog.directory
+                val file = dialog.file
+                if (dir != null && file != null) {
+                    val selected = File(dir, file)
+                    A2lFilePreferences.setFile(selected)
+                    XdfFileChooserPreferences.lastDirectory = selected.parent
                 }
             },
             modifier = Modifier.weight(1f)

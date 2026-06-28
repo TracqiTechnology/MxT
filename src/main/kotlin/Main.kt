@@ -4,6 +4,7 @@ import androidx.compose.ui.window.MenuBar
 import androidx.compose.ui.window.Window
 import androidx.compose.ui.window.application
 import androidx.compose.ui.window.rememberWindowState
+import data.parser.a2l.A2lCalibrationParser
 import data.parser.bin.BinParser
 import data.parser.csv.WinOlsCsvParser
 import data.parser.kp.KpHintParser
@@ -42,6 +43,7 @@ fun main() {
 
     // Initialize data layer flows
     XdfParser.init()
+    A2lCalibrationParser.init()
     BinParser.init()
     KpHintParser.init()
     WinOlsCsvParser.init()

@@ -84,14 +84,20 @@ fun KfmiopScreen() {
     val kfmiopPair = remember(mapList, mapVersion) { findMap(mapList, KfmiopPreferences) }
     val inputKfmiop = kfmiopPair?.second
 
+    // MED9 KFMIOP stores xAxis=RPM, yAxis=load — opposite of the algorithm convention.
+    // Normalize to xAxis=load, yAxis=RPM before any calculation or display.
+    val normalizedKfmiop = remember(inputKfmiop) {
+        if (inputKfmiop != null) normalizeKfmiopAxes(inputKfmiop) else null
+    }
+
     // Detect scalar KFMIOP (MED17/DS1: 1×1 map with empty axes)
-    val isScalar = inputKfmiop != null && inputKfmiop.xAxis.isEmpty() && inputKfmiop.yAxis.isEmpty()
+    val isScalar = normalizedKfmiop != null && normalizedKfmiop.xAxis.isEmpty() && normalizedKfmiop.yAxis.isEmpty()
     val platform = EcuPlatformPreference.platform
     val mapLabel = CalibrationTab.KFMIOP.labelFor(platform)
 
     // --- Scalar mode state (MED17/DS1) ---
     val currentScalarValue = if (isScalar) {
-        inputKfmiop!!.zAxis.firstOrNull()?.firstOrNull() ?: 0.0
+        normalizedKfmiop!!.zAxis.firstOrNull()?.firstOrNull() ?: 0.0
     } else 0.0
 
     var editedScalarValue by remember(currentScalarValue) {
@@ -113,22 +119,22 @@ fun KfmiopScreen() {
         mutableStateOf(KfmiopPreferences.maxBoostPressure.toString())
     }
 
-    val kfmiopResult = remember(inputKfmiop, desiredMaxMapPressure, desiredMaxBoostPressure, isScalar) {
-        if (!isScalar && inputKfmiop != null) {
+    val kfmiopResult = remember(normalizedKfmiop, desiredMaxMapPressure, desiredMaxBoostPressure, isScalar) {
+        if (!isScalar && normalizedKfmiop != null) {
             val maxMapPressureVal = desiredMaxMapPressure.toDoubleOrNull() ?: KfmiopPreferences.maxMapPressure
             val maxBoostPressureVal = desiredMaxBoostPressure.toDoubleOrNull() ?: KfmiopPreferences.maxBoostPressure
 
             val maxMapSensorLoad = Rlsol.rlsol(1030.0, maxMapPressureVal, 0.0, 96.0, 0.106, maxMapPressureVal)
             val maxBoostPressureLoad = Rlsol.rlsol(1030.0, maxBoostPressureVal, 0.0, 96.0, 0.106, maxBoostPressureVal)
-            Kfmiop.calculateKfmiop(inputKfmiop, maxMapSensorLoad, maxBoostPressureLoad)
+            Kfmiop.calculateKfmiop(normalizedKfmiop, maxMapSensorLoad, maxBoostPressureLoad)
         } else null
     }
 
     // Editable Y-axis (RPM breakpoints) for output KFMIOP
-    var editedYAxis by remember(inputKfmiop, isScalar) {
+    var editedYAxis by remember(normalizedKfmiop, isScalar) {
         mutableStateOf(
-            if (!isScalar && inputKfmiop != null && inputKfmiop.yAxis.isNotEmpty())
-                arrayOf(inputKfmiop.yAxis.copyOf())
+            if (!isScalar && normalizedKfmiop != null && normalizedKfmiop.yAxis.isNotEmpty())
+                arrayOf(normalizedKfmiop.yAxis.copyOf())
             else arrayOf(emptyArray<Double>())
         )
     }
@@ -235,9 +241,14 @@ fun KfmiopScreen() {
                     showWriteConfirmation = false
                     val outputMap = if (isScalar) scalarOutputMap else finalOutputKfmiop
                     val tableDef = kfmiopPair?.first
-                    if (outputMap != null && tableDef != null) {
+                    // For MED9: restore the original axis layout (RPM→x, load→y)
+                    // before writing, since the binary expects the swapped convention.
+                    val writeMap = if (outputMap != null && !isScalar && inputKfmiop != null) {
+                        denormalizeKfmiopAxes(outputMap, inputKfmiop)
+                    } else outputMap
+                    if (writeMap != null && tableDef != null) {
                         try {
-                            BinWriter.write(BinFilePreferences.file.value, tableDef, outputMap)
+                            BinWriter.write(BinFilePreferences.file.value, tableDef, writeMap)
                             writeStatus = WriteStatus.Success
                         } catch (e: Exception) {
                             e.printStackTrace()
@@ -327,7 +338,7 @@ fun KfmiopScreen() {
                 modifier = Modifier.weight(1f),
                 selectedTab = selectedTab,
                 onTabSelected = { selectedTab = it },
-                inputKfmiop = inputKfmiop,
+                inputKfmiop = normalizedKfmiop,
                 kfmiopResult = kfmiopResult,
                 finalOutputKfmiop = finalOutputKfmiop,
                 currentPeakBoost = boostChartData.first,
@@ -988,6 +999,49 @@ private fun WriteToBinarySection(
             }
         }
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// KFMIOP axis normalization helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Normalize KFMIOP to algorithm convention: xAxis=load(%), yAxis=RPM.
+ *
+ * MED9 binary stores KFMIOP with xAxis=nmot_w (RPM, typically 16 pts),
+ * yAxis=rl_w (load, 11 pts) — the inverse of what [Kfmiop.calculateKfmiop] expects.
+ * ME7 already has xAxis=load, yAxis=RPM and passes through unchanged.
+ *
+ * Detection heuristic: last x-axis value > 500 → RPM axis, not load %.
+ */
+private fun normalizeKfmiopAxes(map: Map3d): Map3d {
+    if (map.xAxis.isEmpty() || map.xAxis.last() <= 500.0) return map
+    val rows = map.zAxis.size
+    val cols = if (rows > 0) map.zAxis[0].size else 0
+    if (rows == 0 || cols == 0) return map
+    // Swap xAxis↔yAxis; transpose zAxis [load_rows × rpm_cols] → [rpm_rows × load_cols]
+    return Map3d(
+        xAxis = map.yAxis,
+        yAxis = map.xAxis,
+        zAxis = Array(cols) { j -> Array(rows) { i -> map.zAxis[i][j] } }
+    )
+}
+
+/**
+ * Inverse of [normalizeKfmiopAxes] — restores the original binary layout before
+ * writing to file. [original] is used only for the RPM-heuristic check.
+ */
+private fun denormalizeKfmiopAxes(normalized: Map3d, original: Map3d): Map3d {
+    if (original.xAxis.isEmpty() || original.xAxis.last() <= 500.0) return normalized
+    val rows = normalized.zAxis.size
+    val cols = if (rows > 0) normalized.zAxis[0].size else 0
+    if (rows == 0 || cols == 0) return normalized
+    // Transpose [rpm_rows × load_cols] → [load_rows × rpm_cols]; swap axes back
+    return Map3d(
+        xAxis = normalized.yAxis,
+        yAxis = normalized.xAxis,
+        zAxis = Array(cols) { j -> Array(rows) { i -> normalized.zAxis[i][j] } }
+    )
 }
 
 @Composable

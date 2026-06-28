@@ -40,9 +40,21 @@ object BinWriter {
             }
 
             tableDefinition.zAxis.takeIf { it.address != INVALID_ADDRESS }?.let { axis ->
-                val zFlat = DoubleArray(maxOf(axis.rowCount, 1) * maxOf(axis.columnCount, 1))
+                val rows = maxOf(axis.rowCount, 1)
+                val cols = maxOf(axis.columnCount, 1)
+                val zFlat = DoubleArray(rows * cols)
                 var index = 0
-                for (i in map.zAxis.indices) for (j in map.zAxis[i].indices) zFlat[index++] = map.zAxis[i][j]
+                if (axis.isColumnMajor) {
+                    // COLUMN_DIR: write column-by-column so the binary layout matches
+                    // what BinParser reads back (column-major storage)
+                    for (j in 0 until cols) {
+                        for (i in 0 until rows) {
+                            zFlat[index++] = if (i < map.zAxis.size && j < map.zAxis[i].size) map.zAxis[i][j] else 0.0
+                        }
+                    }
+                } else {
+                    for (i in map.zAxis.indices) for (j in map.zAxis[i].indices) zFlat[index++] = map.zAxis[i][j]
+                }
                 write(raf, axis, zFlat)
             }
         }

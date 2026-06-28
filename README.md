@@ -89,7 +89,7 @@ The physics doesn't change between platforms. The ECU's opinion about how to man
 | **Fuel Trim** | Closed Loop (narrowband O2 + trims) / Open Loop (wideband) → correct MLHFM | `rk_w` STFT/LTFT → correct base fuel mass map | Closed Loop / Open Loop → correct KFLF (scaling factor) | Closed Loop / Open Loop → generate MAF correction (apply externally) |
 | **Log Format** | ME7Logger CSV (K-line serial) | Dyno Spectrum (DS1) CSV. MxT adapter translates automatically. | ME7Logger CSV (K-line serial) | VCDS / NefMoto (CAN CCP/KWP2000) |
 | **Optimizer** | 3-phase: boost → VE (KFPBRK) → intervention. MAF saturation detection + MAP auto-classification. | 3-phase: boost → VE (adaptive validation) → intervention. Persistent errors → mechanical issue. | 3-phase: boost → VE → intervention. Load in ms/rev, no MAP sensor. | 3-phase: boost → VE (KFPBRK) → intervention. Same as ME7. |
-| **Architecture** | C166 16-bit, 512 KB–1 MB BIN | TriCore 32-bit, large BIN | C166 16-bit | TriCore 32-bit, 2 MB BIN |
+| **Architecture** | C166 16-bit, 512 KB–1 MB BIN | TriCore 32-bit, large BIN | C166 16-bit | MPC562 (PowerPC 32-bit BE), 2 MB BIN |
 
 MxT automatically shows only the tabs relevant to your platform. Switch platforms in the Configuration tab — ME7, MED17, Motronic, or MED9.
 
@@ -133,7 +133,7 @@ The fuel constant is KRKATE (ms/%, same physics as KRKTE but with fuel pressure 
 
 MED9 has three KFZW variants (_0_A, _1_A, _2_A) and two KFZWOP variants for knock management — more ignition maps than ME7's single set, fewer than MED17's DS1 multi-switch mode. The throttle transition map is KFVPDKLD (same concept as ME7's KFVPDKSD). The static VE model (KFURL/KFPBRK) works like ME7's, not MED17's adaptive model.
 
-MED9 runs on a TriCore 32-bit processor with a 2 MB BIN (vs ME7's 512 KB–1 MB). Logging uses VCDS or NefMoto over CAN (CCP/KWP2000), not K-line serial.
+MED9 runs on a **Motorola MPC562 (PowerPC 32-bit, Big-Endian)** with a 2 MB BIN (vs ME7's 512 KB–1 MB). Logging uses KWP2000 over K-line (same physical connection as ME7) or CAN/CCP depending on the variant.
 
 # Workflow Overview
 
@@ -266,7 +266,7 @@ MxT implements the **full** TunerPro XDF format. This means any ECU binary that 
 | **MED17.1 (4.0T)** | Audi RS6/RS7/S6/S7 4.0T TFSI | Compatible when XDF is available |
 | **MED17.1 (5.2 V10)** | Audi R8 / Lamborghini Huracán 5.2 V10 | Compatible when XDF is available |
 | **Motronic 3.8x–5.9x** | VW/Audi 1.8T (AGU, AEB, etc.) | Alpha — C166 16-bit, MAF-based (256-pt MLHFM), load in ms/rev, FGAT0/KHFM fueling, K-line logging |
-| **MED9.x** | VW Golf GTI 2.0 TFSI, Audi A4 2.0 TFSI | Alpha — TriCore 32-bit, 2 MB BIN, direct injection (HDEV), period-based MAF, KRKATE fueling, CAN logging |
+| **MED9.x** | VW Golf GTI 2.0 TFSI, Audi A4 2.0 TFSI, SEAT Leon 2.0 TFSI | Alpha — MPC562 (PowerPC 32-bit BE), 2 MB BIN, direct injection (HDEV), period-based MAF, KRKATE fueling, KWP2000/K-line logging |
 
 XDF files for many of these can be found at [files.s4wiki.com/defs/](https://files.s4wiki.com/defs/) and the [Nefarious Motorsports forums](http://nefariousmotorsports.com/forum).
 
@@ -573,7 +573,7 @@ The RAM Sniffer discovers RAM variable addresses in unknown ECU binaries using b
 |----------|-------------|--------------|
 | Motronic 3.8x–5.9x | C166/C167 (16-bit) | 2 bytes |
 | ME7 | C166/C167 (16-bit) | 2 bytes |
-| MED9 | TriCore (32-bit) | 4 bytes |
+| MED9 | MPC562 (PowerPC 32-bit BE) | 4 bytes |
 | MED17 | TriCore (32-bit) | 4 bytes |
 
 ### Confidence Scoring
