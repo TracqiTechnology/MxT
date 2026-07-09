@@ -111,12 +111,20 @@ jobs:
           VERSION=${{ needs.check-version.outputs.version }}
           mv build/compose/jars/*.jar "build/compose/jars/MxT-${VERSION}-windows-x64.jar"
 
+      - name: Create portable ZIP (bundled runtime, no Java required)
+        shell: pwsh
+        run: |
+          ./gradlew createDistributable "-Papp.version=${{ needs.check-version.outputs.version }}"
+          $Version = "${{ needs.check-version.outputs.version }}"
+          Compress-Archive -Path build/compose/binaries/main/app/MxT -DestinationPath "MxT-$Version-windows-x64.zip"
+
       - uses: actions/upload-artifact@v4
         with:
           name: windows-packages
           path: |
             build/compose/binaries/main/msi/*.msi
             build/compose/jars/*.jar
+            MxT-*-windows-x64.zip
 
   build-linux:
     needs: [check-version, test]
@@ -162,7 +170,7 @@ jobs:
       - name: Flatten artifacts
         run: |
           mkdir -p flat
-          find artifacts -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.deb' -o -name '*.jar' -o -name '*.tar.gz' \) -exec cp {} flat/ \;
+          find artifacts -type f \( -name '*.dmg' -o -name '*.msi' -o -name '*.deb' -o -name '*.jar' -o -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} flat/ \;
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
