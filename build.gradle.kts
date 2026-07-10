@@ -131,6 +131,10 @@ compose.desktop {
             windows {
                 upgradeUuid = "e4a5b6c7-d8e9-4f0a-b1c2-d3e4f5a6b7c8"
                 iconFile.set(project.file("src/main/resources/icons/icon.ico"))
+                // jpackage creates no launcher shortcuts by default — opt in explicitly.
+                menu = true          // Start Menu entry
+                menuGroup = "MxT"    // grouped under a MxT folder
+                shortcut = true      // Desktop shortcut
             }
 
             linux {
