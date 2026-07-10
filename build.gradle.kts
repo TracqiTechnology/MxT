@@ -139,6 +139,10 @@ compose.desktop {
 
             linux {
                 iconFile.set(project.file("src/main/resources/icons/icon.png"))
+                // Like Windows, the .deb registers no app-menu entry unless opted in.
+                shortcut = true
+                menuGroup = "MxT"
+                appCategory = "Utility"
             }
         }
     }
