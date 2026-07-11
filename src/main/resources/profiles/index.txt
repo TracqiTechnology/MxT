@@ -7,4 +7,5 @@ ME7_18T_TT_225hp.mxtprofile.json
 ME7_18T_Golf.mxtprofile.json
 MED9_Golf_GTI_2_0_TFSI.mxtprofile.json
 MED17_162_RS3_TTRS_2_5T.mxtprofile.json
+MED17_162_RS3_TTRS_2_5T_DAZA.mxtprofile.json
 Motronic_18T_AGU.mxtprofile.json

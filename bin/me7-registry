@@ -1,0 +1,485 @@
+#!/usr/bin/env python3
+"""
+ME7 Tune Registry & Convergence Tracker — SQLite metadata for tuning iterations.
+
+Tracks tune versions, links them to logs, records calibration decisions,
+and measures convergence across iterations.
+
+Usage:
+  bin/me7-registry init --db <path>
+      Create the SQLite schema
+
+  bin/me7-registry register --db <path> --version <ver> --bin <bin> [--xdf <xdf>]
+      [--parent <ver>] [--notes "text"] [--fuel <pump|e85|race>]
+      Register a tune version
+
+  bin/me7-registry log-link --db <path> --version <ver> --log <csv_or_dir>
+      Link log file(s) to a tune version
+
+  bin/me7-registry record --db <path> --version <ver> --map <name>
+      --action <action> --reason "why" [--confidence <0-100>]
+      Record a calibration decision
+
+  bin/me7-registry converge --db <path> --version <ver>
+      [--knock <total_deg>] [--pressure-error <pct>] [--ltft <pct>]
+      [--torque-intervention <pct>] [--wot-lambda-min <val>]
+      [--boost-stability <pct>] [--maf-error <pct>]
+      Record convergence metrics for a version
+
+  bin/me7-registry status --db <path> [--version <ver>]
+      Show current convergence status
+
+  bin/me7-registry history --db <path> [--map <name>] [--last <n>]
+      Show calibration history
+
+  bin/me7-registry export --db <path> [--format json|csv]
+      Export full registry
+
+Options:
+  --format json   Machine-readable output
+  --verbose       Show details
+"""
+
+import argparse
+import hashlib
+import json
+import os
+import sqlite3
+import sys
+from datetime import datetime
+from pathlib import Path
+
+
+def init_db(db_path: str) -> sqlite3.Connection:
+    """Create the SQLite schema."""
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS tune_versions (
+            version TEXT PRIMARY KEY,
+            parent_version TEXT,
+            bin_path TEXT NOT NULL,
+            bin_sha256 TEXT NOT NULL,
+            bin_size INTEGER NOT NULL,
+            xdf_path TEXT,
+            fuel_type TEXT DEFAULT 'pump',
+            notes TEXT,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (parent_version) REFERENCES tune_versions(version)
+        );
+
+        CREATE TABLE IF NOT EXISTS log_links (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            version TEXT NOT NULL,
+            log_path TEXT NOT NULL,
+            log_type TEXT,
+            sample_count INTEGER,
+            wot_count INTEGER,
+            da_mean_ft REAL,
+            linked_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (version) REFERENCES tune_versions(version)
+        );
+
+        CREATE TABLE IF NOT EXISTS calibration_decisions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            version TEXT NOT NULL,
+            map_name TEXT NOT NULL,
+            action TEXT NOT NULL,
+            reason TEXT NOT NULL,
+            confidence INTEGER DEFAULT 50,
+            agent TEXT DEFAULT 'human',
+            decided_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (version) REFERENCES tune_versions(version)
+        );
+
+        CREATE TABLE IF NOT EXISTS convergence_metrics (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            version TEXT NOT NULL,
+            knock_total_deg REAL,
+            pressure_error_pct REAL,
+            ltft_mean_pct REAL,
+            torque_intervention_pct REAL,
+            wot_lambda_min REAL,
+            boost_stability_pct REAL,
+            maf_error_pct REAL,
+            convergence_score REAL,
+            measured_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (version) REFERENCES tune_versions(version)
+        );
+
+        CREATE TABLE IF NOT EXISTS safety_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            version TEXT NOT NULL,
+            errors INTEGER NOT NULL DEFAULT 0,
+            warnings INTEGER NOT NULL DEFAULT 0,
+            passed BOOLEAN NOT NULL DEFAULT 1,
+            findings_json TEXT,
+            checked_at TEXT NOT NULL DEFAULT (datetime('now')),
+            FOREIGN KEY (version) REFERENCES tune_versions(version)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_decisions_version ON calibration_decisions(version);
+        CREATE INDEX IF NOT EXISTS idx_decisions_map ON calibration_decisions(map_name);
+        CREATE INDEX IF NOT EXISTS idx_convergence_version ON convergence_metrics(version);
+        CREATE INDEX IF NOT EXISTS idx_log_links_version ON log_links(version);
+    """)
+
+    conn.commit()
+    return conn
+
+
+def compute_convergence_score(metrics: dict) -> float:
+    """Compute a 0-100 convergence score from individual metrics.
+
+    Weights reflect safety priority:
+      knock (25%), lambda (20%), pressure error (15%), LTFT (15%),
+      torque intervention (10%), boost stability (10%), MAF error (5%)
+    """
+    score = 100.0
+    penalties = {
+        'knock_total_deg':        (25.0, 0.0, 8.0),     # 0=perfect, 8+=critical (big turbo has more retard)
+        'wot_lambda_min':         (20.0, 0.82, 0.72),    # 0.82=ok (λ=0.82 ≈ 10.7 AFR), 0.72=danger
+        'pressure_error_pct':     (15.0, 0.0, 20.0),     # 0=perfect, 20%+=bad
+        'ltft_mean_pct':          (15.0, 0.0, 12.0),     # 0=perfect, 12%+=bad
+        'torque_intervention_pct': (10.0, 0.0, 25.0),    # 0=perfect, 25%+=bad (5180 mod → higher tolerance)
+        'boost_stability_pct':    (10.0, 100.0, 80.0),   # 100=perfect, 80=bad (inverted)
+        'maf_error_pct':          (5.0, 0.0, 15.0),      # 0=perfect, 15%+=bad
+    }
+
+    for key, (weight, good, bad) in penalties.items():
+        val = metrics.get(key)
+        if val is None:
+            continue
+
+        if key in ('wot_lambda_min', 'boost_stability_pct'):
+            # Inverted: higher is better
+            if val >= good:
+                penalty = 0
+            elif val <= bad:
+                penalty = weight
+            else:
+                penalty = weight * (good - val) / (good - bad)
+        else:
+            # Normal: lower is better
+            if val <= good:
+                penalty = 0
+            elif val >= bad:
+                penalty = weight
+            else:
+                penalty = weight * (val - good) / (bad - good)
+
+        score -= penalty
+
+    return max(0.0, min(100.0, round(score, 1)))
+
+
+def cmd_register(conn, args):
+    """Register a new tune version."""
+    bin_path = os.path.abspath(args.bin_path)
+    with open(bin_path, 'rb') as f:
+        data = f.read()
+
+    sha = hashlib.sha256(data).hexdigest()
+
+    conn.execute(
+        """INSERT OR REPLACE INTO tune_versions
+           (version, parent_version, bin_path, bin_sha256, bin_size, xdf_path, fuel_type, notes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+        (args.version, args.parent, bin_path, sha, len(data),
+         os.path.abspath(args.xdf) if args.xdf else None,
+         args.fuel or 'pump', args.notes)
+    )
+    conn.commit()
+
+    print(f"Registered {args.version}")
+    print(f"  Binary: {bin_path} ({len(data):,} bytes)")
+    print(f"  SHA256: {sha[:16]}...")
+    if args.parent:
+        print(f"  Parent: {args.parent}")
+
+
+def cmd_log_link(conn, args):
+    """Link log files to a tune version."""
+    log_path = Path(args.log)
+    if log_path.is_dir():
+        logs = sorted(log_path.glob("*.csv"))
+    else:
+        logs = [log_path]
+
+    count = 0
+    for log in logs:
+        conn.execute(
+            """INSERT INTO log_links (version, log_path, log_type)
+               VALUES (?, ?, ?)""",
+            (args.version, str(log), log.stem.split('_')[0] if '_' in log.stem else 'unknown')
+        )
+        count += 1
+
+    conn.commit()
+    print(f"Linked {count} log files to {args.version}")
+
+
+def cmd_record(conn, args):
+    """Record a calibration decision."""
+    conn.execute(
+        """INSERT INTO calibration_decisions
+           (version, map_name, action, reason, confidence, agent)
+           VALUES (?, ?, ?, ?, ?, ?)""",
+        (args.version, args.map, args.action, args.reason,
+         args.confidence or 50, args.agent or 'copilot')
+    )
+    conn.commit()
+    print(f"Recorded decision: {args.map} {args.action} in {args.version}")
+
+
+def cmd_converge(conn, args):
+    """Record convergence metrics."""
+    metrics = {}
+    if args.knock is not None: metrics['knock_total_deg'] = args.knock
+    if args.pressure_error is not None: metrics['pressure_error_pct'] = args.pressure_error
+    if args.ltft is not None: metrics['ltft_mean_pct'] = args.ltft
+    if args.torque_intervention is not None: metrics['torque_intervention_pct'] = args.torque_intervention
+    if args.wot_lambda_min is not None: metrics['wot_lambda_min'] = args.wot_lambda_min
+    if args.boost_stability is not None: metrics['boost_stability_pct'] = args.boost_stability
+    if args.maf_error is not None: metrics['maf_error_pct'] = args.maf_error
+
+    score = compute_convergence_score(metrics)
+
+    conn.execute(
+        """INSERT INTO convergence_metrics
+           (version, knock_total_deg, pressure_error_pct, ltft_mean_pct,
+            torque_intervention_pct, wot_lambda_min, boost_stability_pct,
+            maf_error_pct, convergence_score)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (args.version,
+         metrics.get('knock_total_deg'), metrics.get('pressure_error_pct'),
+         metrics.get('ltft_mean_pct'), metrics.get('torque_intervention_pct'),
+         metrics.get('wot_lambda_min'), metrics.get('boost_stability_pct'),
+         metrics.get('maf_error_pct'), score)
+    )
+    conn.commit()
+
+    # Display
+    print(f"\nConvergence for {args.version}: {score}/100")
+    if score >= 90:
+        print("  ✓ CONVERGED — tune is stable")
+    elif score >= 70:
+        print("  ⚠ PROGRESSING — some metrics need work")
+    elif score >= 50:
+        print("  ⚠ DEVELOPING — significant issues remain")
+    else:
+        print("  ✗ DIVERGENT — major calibration problems")
+
+    for key, val in sorted(metrics.items()):
+        print(f"  {key}: {val}")
+
+
+def cmd_status(conn, args, format_type='text'):
+    """Show convergence status."""
+    if args.version:
+        rows = conn.execute(
+            """SELECT * FROM convergence_metrics
+               WHERE version = ? ORDER BY measured_at DESC LIMIT 1""",
+            (args.version,)
+        ).fetchall()
+    else:
+        # Latest version's latest metrics
+        rows = conn.execute(
+            """SELECT cm.* FROM convergence_metrics cm
+               JOIN tune_versions tv ON cm.version = tv.version
+               ORDER BY tv.created_at DESC, cm.measured_at DESC
+               LIMIT 1"""
+        ).fetchall()
+
+    if not rows:
+        print("No convergence data found.")
+        return
+
+    row = rows[0]
+
+    if format_type == 'json':
+        print(json.dumps(dict(row), indent=2))
+        return
+
+    print(f"\n{'='*50}")
+    print(f"  Convergence Status: {row['version']}")
+    print(f"  Score: {row['convergence_score']}/100")
+    print(f"  Measured: {row['measured_at']}")
+    print(f"{'='*50}")
+
+    metrics = [
+        ('Knock total', row['knock_total_deg'], '°', 'lower is better'),
+        ('Pressure error', row['pressure_error_pct'], '%', 'lower is better'),
+        ('LTFT mean', row['ltft_mean_pct'], '%', 'closer to 0 is better'),
+        ('Torque intervention', row['torque_intervention_pct'], '%', 'lower is better'),
+        ('WOT lambda min', row['wot_lambda_min'], '', 'above 0.80 is safe'),
+        ('Boost stability', row['boost_stability_pct'], '%', 'higher is better'),
+        ('MAF error', row['maf_error_pct'], '%', 'lower is better'),
+    ]
+
+    for label, val, unit, note in metrics:
+        if val is not None:
+            print(f"  {label}: {val}{unit} ({note})")
+
+    # Show trend if multiple measurements exist
+    trend = conn.execute(
+        """SELECT convergence_score, measured_at FROM convergence_metrics
+           WHERE version = ? ORDER BY measured_at""",
+        (row['version'],)
+    ).fetchall()
+
+    if len(trend) > 1:
+        scores = [t['convergence_score'] for t in trend]
+        delta = scores[-1] - scores[-2]
+        arrow = "↑" if delta > 0 else "↓" if delta < 0 else "→"
+        print(f"\n  Trend: {arrow} {abs(delta):.1f} from previous measurement")
+
+
+def cmd_history(conn, args, format_type='text'):
+    """Show calibration decision history."""
+    query = "SELECT * FROM calibration_decisions"
+    params = []
+
+    if args.map:
+        query += " WHERE map_name = ?"
+        params.append(args.map)
+
+    query += " ORDER BY decided_at DESC"
+
+    if args.last:
+        query += f" LIMIT {args.last}"
+
+    rows = conn.execute(query, params).fetchall()
+
+    if format_type == 'json':
+        print(json.dumps([dict(r) for r in rows], indent=2))
+        return
+
+    print(f"\nCalibration History ({len(rows)} decisions):")
+    print(f"{'='*70}")
+
+    for row in rows:
+        conf_bar = "●" * (row['confidence'] // 20) + "○" * (5 - row['confidence'] // 20)
+        print(f"  {row['decided_at'][:10]} {row['version']:>8} | {row['map_name']:<12} "
+              f"{row['action']:<15} [{conf_bar}] {row['agent']}")
+        print(f"    {row['reason']}")
+        print()
+
+
+def cmd_export(conn, args, format_type='text'):
+    """Export full registry."""
+    data = {
+        "tune_versions": [dict(r) for r in conn.execute("SELECT * FROM tune_versions ORDER BY created_at").fetchall()],
+        "log_links": [dict(r) for r in conn.execute("SELECT * FROM log_links ORDER BY linked_at").fetchall()],
+        "decisions": [dict(r) for r in conn.execute("SELECT * FROM calibration_decisions ORDER BY decided_at").fetchall()],
+        "convergence": [dict(r) for r in conn.execute("SELECT * FROM convergence_metrics ORDER BY measured_at").fetchall()],
+        "safety": [dict(r) for r in conn.execute("SELECT * FROM safety_results ORDER BY checked_at").fetchall()],
+    }
+
+    if format_type == 'json':
+        print(json.dumps(data, indent=2))
+    else:
+        print(f"Tune versions: {len(data['tune_versions'])}")
+        print(f"Log links: {len(data['log_links'])}")
+        print(f"Decisions: {len(data['decisions'])}")
+        print(f"Convergence measurements: {len(data['convergence'])}")
+        print(f"Safety checks: {len(data['safety'])}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ME7 Tune Registry & Convergence Tracker")
+    sub = parser.add_subparsers(dest="command")
+
+    # init
+    p = sub.add_parser("init")
+    p.add_argument("--db", required=True)
+
+    # register
+    p = sub.add_parser("register")
+    p.add_argument("--db", required=True)
+    p.add_argument("--version", required=True)
+    p.add_argument("--bin", dest='bin_path', required=True)
+    p.add_argument("--xdf")
+    p.add_argument("--parent")
+    p.add_argument("--notes")
+    p.add_argument("--fuel", choices=['pump', 'e85', 'race'])
+
+    # log-link
+    p = sub.add_parser("log-link")
+    p.add_argument("--db", required=True)
+    p.add_argument("--version", required=True)
+    p.add_argument("--log", required=True)
+
+    # record
+    p = sub.add_parser("record")
+    p.add_argument("--db", required=True)
+    p.add_argument("--version", required=True)
+    p.add_argument("--map", required=True)
+    p.add_argument("--action", required=True)
+    p.add_argument("--reason", required=True)
+    p.add_argument("--confidence", type=int)
+    p.add_argument("--agent", default='copilot')
+
+    # converge
+    p = sub.add_parser("converge")
+    p.add_argument("--db", required=True)
+    p.add_argument("--version", required=True)
+    p.add_argument("--knock", type=float)
+    p.add_argument("--pressure-error", type=float)
+    p.add_argument("--ltft", type=float)
+    p.add_argument("--torque-intervention", type=float)
+    p.add_argument("--wot-lambda-min", type=float)
+    p.add_argument("--boost-stability", type=float)
+    p.add_argument("--maf-error", type=float)
+
+    # status
+    p = sub.add_parser("status")
+    p.add_argument("--db", required=True)
+    p.add_argument("--version")
+    p.add_argument("--format", choices=['text', 'json'], default='text')
+
+    # history
+    p = sub.add_parser("history")
+    p.add_argument("--db", required=True)
+    p.add_argument("--map")
+    p.add_argument("--last", type=int, default=20)
+    p.add_argument("--format", choices=['text', 'json'], default='text')
+
+    # export
+    p = sub.add_parser("export")
+    p.add_argument("--db", required=True)
+    p.add_argument("--format", choices=['text', 'json'], default='text')
+
+    args = parser.parse_args()
+
+    if args.command == "init":
+        conn = init_db(args.db)
+        print(f"Registry initialized at {args.db}")
+        conn.close()
+    elif args.command in ("register", "log-link", "record", "converge", "status", "history", "export"):
+        conn = init_db(args.db)  # idempotent
+        fmt = getattr(args, 'format', 'text')
+        if args.command == "register":
+            cmd_register(conn, args)
+        elif args.command == "log-link":
+            cmd_log_link(conn, args)
+        elif args.command == "record":
+            cmd_record(conn, args)
+        elif args.command == "converge":
+            cmd_converge(conn, args)
+        elif args.command == "status":
+            cmd_status(conn, args, fmt)
+        elif args.command == "history":
+            cmd_history(conn, args, fmt)
+        elif args.command == "export":
+            cmd_export(conn, args, fmt)
+        conn.close()
+    else:
+        parser.print_help()
+
+
+if __name__ == '__main__':
+    main()

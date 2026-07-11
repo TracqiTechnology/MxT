@@ -1,0 +1,417 @@
+#!/usr/bin/env python3
+"""
+ME7 Binary Comparator — compares two ME7 ECU binaries using XDF map definitions.
+
+Reports per-map deltas with physical values, identifies changed/unchanged maps,
+and highlights cells with the largest differences.
+
+Usage:
+  bin/me7-bin-compare --xdf <xdf> --base <base.bin> --target <target.bin> [options]
+
+Options:
+  --maps <name,...>   Only compare specified maps (comma-separated)
+  --changed-only      Only show maps that differ (default)
+  --all               Show all maps including identical ones
+  --summary           One-line-per-map summary (no cell details)
+  --cells             Show every changed cell's old/new values
+  --json              Output machine-readable JSON
+  --output <file>     Write output to file (default: stdout)
+  --threshold <pct>   Only report cells with > N% change (default: 0)
+
+Examples:
+  # Compare Denver vs Washington (changed maps only)
+  bin/me7-bin-compare \\
+    --xdf 8D0907551M-20190711.xdf \\
+    --base v2.7.4/mmodified_v274.bin \\
+    --target v3.2.1/mmodified_v321.bin
+
+  # Full cell-level diff of specific maps
+  bin/me7-bin-compare \\
+    --xdf 8D0907551M-20190711.xdf \\
+    --base v3.2.1/mmodified_v321.bin \\
+    --target v3.2.2/mmodified_v322.bin \\
+    --maps KFLAMKRL,KFZWWLNM,KFZWOP,KFLDRL,KFLDIMX,KFTARX \\
+    --cells
+
+  # JSON output for programmatic use
+  bin/me7-bin-compare --xdf def.xdf --base a.bin --target b.bin --json
+"""
+
+import argparse
+import json
+import os
+import re
+import struct
+import sys
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
+
+
+# ── Shared XDF/Binary parsing (same as me7-bin-write) ────────────────────────
+
+@dataclass
+class AxisDef:
+    address: int
+    size_bits: int
+    count: int
+    rows: int
+    cols: int
+    equation_scale: float
+    equation_offset: float
+    lsb_first: bool
+
+@dataclass
+class MapDef:
+    name: str
+    description: str
+    x_axis: AxisDef
+    y_axis: AxisDef
+    z_axis: AxisDef
+    rows: int
+    cols: int
+
+
+def parse_equation(eq_str: str) -> Tuple[float, float]:
+    eq_str = eq_str.strip()
+    m = re.match(r'^([-+]?\d*\.?\d+)\s*\*\s*X\s*([+-]\s*[-+]?\d*\.?\d+)?$', eq_str)
+    if m:
+        scale = float(m.group(1))
+        if m.group(2):
+            offset_str = m.group(2).replace(' ', '')
+            if offset_str.startswith('+-') or offset_str.startswith('-+'):
+                offset_str = '-' + offset_str[2:]
+            elif offset_str.startswith('--'):
+                offset_str = offset_str[2:]
+            elif offset_str.startswith('++'):
+                offset_str = '+' + offset_str[2:]
+            offset = float(offset_str)
+        else:
+            offset = 0.0
+        return scale, offset
+    m = re.match(r'^X\s*\*\s*([-+]?\d*\.?\d+)$', eq_str)
+    if m:
+        return float(m.group(1)), 0.0
+    if eq_str.strip() == 'X':
+        return 1.0, 0.0
+    return 1.0, 0.0
+
+
+def parse_axis(axis_el, default_lsb_first: bool) -> AxisDef:
+    embedded = axis_el.find('EMBEDDEDDATA')
+    if embedded is None:
+        return AxisDef(0, 8, 1, 1, 1, 1.0, 0.0, default_lsb_first)
+
+    addr = int(embedded.get('mmedaddress', '0x0'), 0)
+    size_bits = int(embedded.get('mmedelementsizebits', '8'))
+    rows = int(embedded.get('mmedrowcount', '1'))
+    cols = int(embedded.get('mmedcolcount', '1'))
+
+    count_el = axis_el.find('indexcount')
+    count = int(count_el.text) if count_el is not None else max(rows * cols, 1)
+
+    type_flags = int(embedded.get('mmedtypeflags', '0x0'), 0)
+    lsb_first = bool(type_flags & 0x02) if type_flags else default_lsb_first
+
+    math_el = axis_el.find('MATH')
+    if math_el is not None:
+        eq = math_el.get('equation', 'X')
+        scale, offset = parse_equation(eq)
+    else:
+        scale, offset = 1.0, 0.0
+
+    return AxisDef(addr, size_bits, count, rows, cols, scale, offset, lsb_first)
+
+
+def parse_xdf(xdf_path: str) -> Tuple[Dict[str, MapDef], bool]:
+    tree = ET.parse(xdf_path)
+    root = tree.getroot()
+
+    header = root.find('.//XDFHEADER')
+    default_lsb_first = True
+    if header is not None:
+        defaults = header.find('DEFAULTS')
+        if defaults is not None:
+            default_lsb_first = defaults.get('lsbfirst', '1') == '1'
+
+    maps = {}
+    for table in root.iter('XDFTABLE'):
+        title_el = table.find('title')
+        if title_el is None or not title_el.text:
+            continue
+
+        name = title_el.text.strip()
+        desc_el = table.find('description')
+        desc = desc_el.text.strip() if desc_el is not None and desc_el.text else ''
+
+        axes = {}
+        for axis_el in table.findall('XDFAXIS'):
+            axis_id = axis_el.get('id', '')
+            axes[axis_id] = parse_axis(axis_el, default_lsb_first)
+
+        x = axes.get('x', AxisDef(0, 8, 1, 1, 1, 1.0, 0.0, default_lsb_first))
+        y = axes.get('y', AxisDef(0, 8, 1, 1, 1, 1.0, 0.0, default_lsb_first))
+        z = axes.get('z', AxisDef(0, 8, 1, 1, 1, 1.0, 0.0, default_lsb_first))
+
+        rows = z.rows if z.rows > 1 else y.count
+        cols = z.cols if z.cols > 1 else x.count
+
+        if name not in maps:
+            maps[name] = MapDef(name, desc, x, y, z, rows, cols)
+
+    return maps, default_lsb_first
+
+
+def read_raw(data: bytes, addr: int, size_bits: int, index: int, lsb_first: bool) -> int:
+    if size_bits == 8:
+        return data[addr + index]
+    elif size_bits == 16:
+        fmt = '<H' if lsb_first else '>H'
+        return struct.unpack_from(fmt, data, addr + index * 2)[0]
+    elif size_bits == 32:
+        fmt = '<I' if lsb_first else '>I'
+        return struct.unpack_from(fmt, data, addr + index * 4)[0]
+    return data[addr + index]
+
+
+def raw_to_phys(raw: int, scale: float, offset: float) -> float:
+    return scale * raw + offset
+
+
+def read_map_physical(data: bytes, map_def: MapDef) -> List[List[float]]:
+    z = map_def.z_axis
+    result = []
+    for r in range(map_def.rows):
+        row = []
+        for c in range(map_def.cols):
+            raw = read_raw(data, z.address, z.size_bits, r * map_def.cols + c, z.lsb_first)
+            row.append(round(raw_to_phys(raw, z.equation_scale, z.equation_offset), 6))
+        result.append(row)
+    return result
+
+
+def read_axis_physical(data: bytes, axis: AxisDef) -> List[float]:
+    result = []
+    for i in range(axis.count):
+        raw = read_raw(data, axis.address, axis.size_bits, i, axis.lsb_first)
+        result.append(round(raw_to_phys(raw, axis.equation_scale, axis.equation_offset), 4))
+    return result
+
+
+# ── Comparison ───────────────────────────────────────────────────────────────
+
+@dataclass
+class MapDiff:
+    name: str
+    description: str
+    rows: int
+    cols: int
+    cells_changed: int
+    total_cells: int
+    max_abs_delta: float
+    max_pct_delta: float
+    changed_cells: List[dict] = field(default_factory=list)
+    x_axis: List[float] = field(default_factory=list)
+    y_axis: List[float] = field(default_factory=list)
+
+
+def compare_map(base_data: bytes, target_data: bytes, map_def: MapDef,
+                threshold_pct: float = 0.0) -> MapDiff:
+    """Compare a single map between two binaries."""
+    base_vals = read_map_physical(base_data, map_def)
+    target_vals = read_map_physical(target_data, map_def)
+
+    diff = MapDiff(
+        name=map_def.name,
+        description=map_def.description,
+        rows=map_def.rows,
+        cols=map_def.cols,
+        cells_changed=0,
+        total_cells=map_def.rows * map_def.cols,
+        max_abs_delta=0.0,
+        max_pct_delta=0.0
+    )
+
+    # Read axes
+    diff.x_axis = read_axis_physical(base_data, map_def.x_axis)
+    diff.y_axis = read_axis_physical(base_data, map_def.y_axis)
+
+    for r in range(map_def.rows):
+        for c in range(map_def.cols):
+            base_v = base_vals[r][c]
+            target_v = target_vals[r][c]
+            delta = target_v - base_v
+
+            if abs(delta) < 1e-8:
+                continue
+
+            pct = abs(delta / base_v * 100) if abs(base_v) > 1e-8 else float('inf')
+
+            if threshold_pct > 0 and pct < threshold_pct:
+                continue
+
+            diff.cells_changed += 1
+            diff.max_abs_delta = max(diff.max_abs_delta, abs(delta))
+            if pct != float('inf'):
+                diff.max_pct_delta = max(diff.max_pct_delta, pct)
+
+            x_label = diff.x_axis[c] if c < len(diff.x_axis) else c
+            y_label = diff.y_axis[r] if r < len(diff.y_axis) else r
+
+            diff.changed_cells.append({
+                'row': r, 'col': c,
+                'x': x_label, 'y': y_label,
+                'base': base_v, 'target': target_v,
+                'delta': round(delta, 6),
+                'pct': round(pct, 2) if pct != float('inf') else None
+            })
+
+    return diff
+
+
+def format_diff_text(diff: MapDiff, show_cells: bool = False) -> str:
+    """Format a map diff as human-readable text."""
+    lines = []
+    status = "CHANGED" if diff.cells_changed > 0 else "IDENTICAL"
+    lines.append(f"{diff.name:30s} {diff.rows:>3}×{diff.cols:<3} "
+                 f"{status:>10} "
+                 f"({diff.cells_changed}/{diff.total_cells} cells)")
+
+    if diff.cells_changed > 0 and diff.description:
+        lines.append(f"  {diff.description}")
+
+    if diff.cells_changed > 0:
+        lines.append(f"  Max Δ: {diff.max_abs_delta:.4f} abs"
+                      f"  {diff.max_pct_delta:.1f}% rel")
+
+    if show_cells and diff.changed_cells:
+        # Sort by absolute delta descending
+        sorted_cells = sorted(diff.changed_cells, key=lambda c: abs(c['delta']), reverse=True)
+        for cell in sorted_cells[:50]:  # Cap at 50 cells
+            pct_str = f" ({cell['pct']:+.1f}%)" if cell['pct'] is not None else ""
+            lines.append(
+                f"    [{cell['y']}, {cell['x']}]: "
+                f"{cell['base']:.4f} -> {cell['target']:.4f} "
+                f"(Δ{cell['delta']:+.4f}{pct_str})"
+            )
+        if len(diff.changed_cells) > 50:
+            lines.append(f"    ... and {len(diff.changed_cells) - 50} more cells")
+
+    return '\n'.join(lines)
+
+
+def format_diff_json(diffs: List[MapDiff]) -> str:
+    """Format all diffs as JSON."""
+    result = {
+        'maps': [],
+        'summary': {
+            'total_maps': len(diffs),
+            'changed_maps': sum(1 for d in diffs if d.cells_changed > 0),
+            'identical_maps': sum(1 for d in diffs if d.cells_changed == 0),
+            'total_cells_changed': sum(d.cells_changed for d in diffs),
+        }
+    }
+
+    for diff in diffs:
+        entry = {
+            'name': diff.name,
+            'description': diff.description,
+            'dimensions': f"{diff.rows}×{diff.cols}",
+            'cells_changed': diff.cells_changed,
+            'total_cells': diff.total_cells,
+            'max_abs_delta': diff.max_abs_delta,
+            'max_pct_delta': diff.max_pct_delta,
+        }
+        if diff.cells_changed > 0:
+            entry['changed_cells'] = diff.changed_cells
+        result['maps'].append(entry)
+
+    return json.dumps(result, indent=2)
+
+
+# ── Main ─────────────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description='ME7 Binary Comparator — compare ECU binaries using XDF definitions.',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    parser.add_argument('--xdf', required=True, help='XDF definition file')
+    parser.add_argument('--base', required=True, help='Base binary (reference)')
+    parser.add_argument('--target', required=True, help='Target binary (to compare)')
+    parser.add_argument('--maps', help='Comma-separated map names to compare')
+    parser.add_argument('--all', action='store_true', help='Show all maps including identical')
+    parser.add_argument('--summary', action='store_true', help='One-line summary per map')
+    parser.add_argument('--cells', action='store_true', help='Show per-cell deltas')
+    parser.add_argument('--json', action='store_true', help='Output JSON')
+    parser.add_argument('--output', help='Output file (default: stdout)')
+    parser.add_argument('--threshold', type=float, default=0.0,
+                        help='Minimum %% change to report a cell (default: 0)')
+
+    args = parser.parse_args()
+
+    # Parse XDF
+    maps, _ = parse_xdf(args.xdf)
+
+    # Read binaries
+    with open(args.base, 'rb') as f:
+        base_data = f.read()
+    with open(args.target, 'rb') as f:
+        target_data = f.read()
+
+    if len(base_data) != len(target_data):
+        print(f"WARNING: Binary sizes differ ({len(base_data)} vs {len(target_data)})",
+              file=sys.stderr)
+
+    # Filter maps if requested
+    if args.maps:
+        filter_names = {n.strip() for n in args.maps.split(',')}
+        selected = {k: v for k, v in maps.items() if k in filter_names}
+        missing = filter_names - set(selected.keys())
+        if missing:
+            print(f"WARNING: Maps not found in XDF: {missing}", file=sys.stderr)
+        maps = selected
+
+    # Compare
+    diffs = []
+    for name in sorted(maps.keys()):
+        map_def = maps[name]
+        try:
+            diff = compare_map(base_data, target_data, map_def, args.threshold)
+            diffs.append(diff)
+        except (struct.error, IndexError) as e:
+            print(f"WARNING: Could not compare {name}: {e}", file=sys.stderr)
+
+    # Filter to changed-only unless --all
+    if not args.all:
+        diffs = [d for d in diffs if d.cells_changed > 0]
+
+    # Output
+    out = open(args.output, 'w') if args.output else sys.stdout
+
+    if args.json:
+        out.write(format_diff_json(diffs))
+    else:
+        # Raw byte diff
+        raw_diff = sum(1 for a, b in zip(base_data, target_data) if a != b)
+        out.write(f"ME7 Binary Comparison\n")
+        out.write(f"{'='*60}\n")
+        out.write(f"Base:   {os.path.basename(args.base)}\n")
+        out.write(f"Target: {os.path.basename(args.target)}\n")
+        out.write(f"Raw bytes different: {raw_diff}\n")
+        out.write(f"Maps compared: {len(maps)}\n")
+        out.write(f"Maps changed:  {sum(1 for d in diffs if d.cells_changed > 0)}\n")
+        out.write(f"{'='*60}\n\n")
+
+        for diff in diffs:
+            out.write(format_diff_text(diff, show_cells=args.cells and not args.summary))
+            out.write('\n\n')
+
+    if args.output:
+        out.close()
+        print(f"Output written to {args.output}", file=sys.stderr)
+
+
+if __name__ == '__main__':
+    main()

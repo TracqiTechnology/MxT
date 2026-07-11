@@ -1,0 +1,804 @@
+#!/usr/bin/env python3
+"""
+ME7 Log Ingest — loads ME7Logger CSV time-series data into DuckDB for analytics.
+
+Creates a columnar analytics database from ME7Logger CSV files, enabling:
+- Window-function queries (rolling knock averages, boost ramps)
+- Cross-log aggregation (density altitude vs knock correlation)
+- WOT event detection and indexing
+- SAE-correctable power estimation
+
+Usage:
+  bin/me7-log-ingest --logs <directory> --db <tuning.duckdb> [options]
+
+Options:
+  --incremental    Only ingest new/changed files (track by file hash)
+  --verbose        Show per-file progress
+  --stats          Print summary statistics after ingest
+  --help           This message
+
+Examples:
+  # Full ingest of all logs
+  bin/me7-log-ingest \\
+    --logs ~/Dropbox/S4/ME7Logger/logs/ \\
+    --db tuning.duckdb
+
+  # Incremental update (only new files)
+  bin/me7-log-ingest \\
+    --logs ~/Dropbox/S4/ME7Logger/logs/ \\
+    --db tuning.duckdb --incremental
+
+  # After ingest, query with DuckDB:
+  python3 -c "
+  import duckdb
+  db = duckdb.connect('tuning.duckdb')
+  # Knock vs density altitude
+  print(db.sql('''
+    SELECT ROUND(density_altitude_ft / 1000) * 1000 AS da_bin,
+           AVG(knock_total) AS avg_knock, COUNT(*) AS n
+    FROM wot_events GROUP BY da_bin ORDER BY da_bin
+  ''').df())
+  "
+"""
+
+import argparse
+import csv
+import hashlib
+import math
+import os
+import re
+import sys
+from datetime import datetime
+from pathlib import Path
+
+try:
+    import duckdb
+except ImportError:
+    print("Error: duckdb package required. Install with: pip install duckdb", file=sys.stderr)
+    sys.exit(1)
+
+
+# ── ME7Logger column name mappings ──────────────────────────────────────
+
+# All known ME7Logger short names → canonical names
+# We normalize to a common schema regardless of which .ecu config was used
+COLUMN_MAP = {
+    # Time
+    "TimeStamp": "timestamp_s",
+    # Engine
+    "nmot": "rpm",
+    "nmot_w": "rpm",
+    "rl_w": "engine_load",
+    "rl": "engine_load_raw",
+    "rlmax_w": "load_corrected",
+    "rlmx_w": "load_specified",
+    "rlsol_w": "load_requested",
+    # Boost/pressure
+    "pvdks_w": "boost_actual_kpa",
+    "pssol_w": "boost_requested_kpa",
+    "plsol_w": "boost_desired_kpa",
+    "plsol": "boost_desired_kpa",
+    "ps_w": "manifold_pressure_kpa",
+    "pus_w": "baro_kpa",
+    # Temperature
+    "tans": "iat_c",
+    "tans_w": "iat_c",
+    "tanslin": "iat_linearized_c",
+    "tmot": "coolant_c",
+    "tabgm": "egt_model_c",
+    # Throttle
+    "wdkba": "throttle_pct",
+    "wped_w": "accel_pedal_pct",
+    # Airflow
+    "mshfm_w": "maf_gs",
+    "msdk_w": "maf_throttle_gs",
+    "uhfm_w": "maf_voltage",
+    # Fueling
+    "ti_b1": "injector_on_time_ms",
+    "ti_b2": "injector_on_time_b2_ms",
+    "fr_w": "stft",
+    "fra_w": "ltft",
+    "lamsbg_w": "lambda_requested",
+    # Boost control
+    "ldtvm": "wgdc",
+    "ldimxak_w": "pid_i_term",
+    # Torque
+    "mifa_w": "torque_desired",
+    "misolv_w": "torque_before_limit",
+    "mizsolv_w": "torque_intervention",
+    "mimax_w": "torque_limit",
+    "miszul_w": "torque_timing_limit",
+    "mibas_w": "torque_base",
+    "B_lr": "lambda_control_active",
+    # Ignition
+    "zwout": "timing_actual",
+    # Knock — per-cylinder retard
+    "dwkrz_0": "knock_cyl1",
+    "dwkrz_1": "knock_cyl5",
+    "dwkrz_2": "knock_cyl3",
+    "dwkrz_3": "knock_cyl2",
+    "dwkrz_4": "knock_cyl6",
+    "dwkrz_5": "knock_cyl4",
+    "dwkrz_6": "knock_cyl1_alt",
+    # _w suffix variants
+    "dwkrz1_w": "knock_cyl5",
+    "dwkrz2_w": "knock_cyl3",
+    "dwkrz3_w": "knock_cyl2",
+    "dwkrz4_w": "knock_cyl6",
+    "dwkrz5_w": "knock_cyl4",
+    "dwkrz6_w": "knock_cyl1_alt",
+    # Knock sensor voltages
+    "rkrn_w_0": "knock_voltage_cyl1",
+    "rkrn_w_1": "knock_voltage_cyl5",
+    "rkrn_w_2": "knock_voltage_cyl3",
+    "rkrn_w_3": "knock_voltage_cyl2",
+    # Vehicle
+    "vfil_w": "vehicle_speed_kph",
+    "gangi": "gear",
+}
+
+# All columns we want in the samples table (superset)
+SAMPLE_COLUMNS = [
+    "timestamp_s", "rpm", "engine_load", "engine_load_raw",
+    "load_corrected", "load_specified", "load_requested",
+    "boost_actual_kpa", "boost_requested_kpa", "boost_desired_kpa",
+    "manifold_pressure_kpa", "baro_kpa",
+    "iat_c", "iat_linearized_c", "coolant_c", "egt_model_c",
+    "throttle_pct", "accel_pedal_pct",
+    "maf_gs", "maf_throttle_gs", "maf_voltage",
+    "injector_on_time_ms", "injector_on_time_b2_ms",
+    "stft", "ltft", "lambda_requested", "lambda_control_active",
+    "wgdc", "pid_i_term",
+    "torque_desired", "torque_before_limit", "torque_intervention",
+    "torque_limit", "torque_timing_limit", "torque_base",
+    "timing_actual",
+    "knock_cyl1", "knock_cyl2", "knock_cyl3",
+    "knock_cyl4", "knock_cyl5", "knock_cyl6",
+    "knock_voltage_cyl1", "knock_voltage_cyl5",
+    "knock_voltage_cyl3", "knock_voltage_cyl2",
+    "vehicle_speed_kph", "gear",
+    "density_altitude_ft",
+]
+
+
+# ── Density altitude calculation ─────────────────────────────────────
+
+def density_altitude(baro_kpa, iat_c):
+    """Compute density altitude from barometric pressure and IAT.
+
+    Uses the ICAO standard atmosphere model:
+      PA (pressure altitude) from barometric pressure
+      DA = PA + (120 * (OAT - ISA_temp_at_PA))
+
+    For in-car use, IAT approximates OAT at idle/cruise (post-intercooler
+    it's higher under boost, but baro_kpa is atmospheric).
+    """
+    if baro_kpa is None or iat_c is None or baro_kpa <= 0:
+        return None
+    try:
+        # Pressure altitude in feet: PA = 145366 * (1 - (P/1013.25)^0.190284)
+        pa_ft = 145366.0 * (1.0 - (baro_kpa / 1013.25) ** 0.190284)
+        # ISA temperature at this pressure altitude
+        isa_temp_c = 15.0 - (0.001981 * pa_ft)
+        # Density altitude correction for non-standard temperature
+        da_ft = pa_ft + (120.0 * (iat_c - isa_temp_c))
+        return da_ft
+    except (ValueError, OverflowError):
+        return None
+
+
+# ── ME7Logger CSV parsing ────────────────────────────────────────────
+
+def parse_header_metadata(lines):
+    """Extract metadata from ME7Logger CSV header comments."""
+    meta = {
+        "ecu_definition": None,
+        "part_number": None,
+        "engine_id": None,
+        "sample_rate_hz": 20,
+        "log_start": None,
+    }
+    for line in lines:
+        line = line.strip()
+        if "EcuDefinition file:" in line:
+            meta["ecu_definition"] = line.split(":")[-1].strip()
+        elif line.startswith("PartNumber"):
+            m = re.match(r"PartNumber\s*=\s*(\S+)", line)
+            if m:
+                meta["part_number"] = m.group(1)
+        elif line.startswith("EngineId"):
+            m = re.match(r"EngineId\s*=\s*(.+?)(?:\s*\(|$)", line)
+            if m:
+                meta["engine_id"] = m.group(1).strip()
+        elif "samples/second" in line:
+            m = re.match(r".*?(\d+)\s+samples/second", line)
+            if m:
+                meta["sample_rate_hz"] = int(m.group(1))
+        elif "Log started at:" in line:
+            m = re.match(r".*Log started at:\s*(.+)", line)
+            if m:
+                ts_str = m.group(1).strip()
+                for fmt in ["%d.%m.%Y %H:%M:%S.%f", "%d.%m.%Y %H:%M:%S",
+                            "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"]:
+                    try:
+                        meta["log_start"] = datetime.strptime(ts_str, fmt)
+                        break
+                    except ValueError:
+                        continue
+    return meta
+
+
+def find_header_row(lines):
+    """Find the data header row index in ME7Logger CSV."""
+    for i, line in enumerate(lines):
+        stripped = line.strip().replace("\r", "")
+        if "TimeStamp" in stripped and "," in stripped:
+            return i
+        if stripped.startswith("TimeStamp,") or stripped.startswith('"TimeStamp"'):
+            return i
+    # Fallback: look for nmot
+    for i, line in enumerate(lines):
+        stripped = line.strip().replace("\r", "")
+        if "nmot" in stripped.lower() and "," in stripped:
+            return i
+    return None
+
+
+def parse_log_file(filepath, verbose=False):
+    """Parse a ME7Logger CSV into a list of dicts with normalized column names.
+
+    Returns: (metadata_dict, list_of_row_dicts) or (None, None) on failure.
+    """
+    encodings = ["latin-1", "utf-8", "cp1252"]
+
+    for enc in encodings:
+        try:
+            with open(filepath, "r", encoding=enc) as f:
+                raw_lines = f.readlines()
+            break
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    else:
+        return None, None
+
+    header_idx = find_header_row(raw_lines)
+    if header_idx is None:
+        return None, None
+
+    meta = parse_header_metadata(raw_lines[:header_idx])
+
+    # Parse column headers
+    header_line = raw_lines[header_idx].replace("\r", "").strip()
+    raw_fields = header_line.split(",")
+    fields = [f.strip().strip('"') for f in raw_fields]
+
+    # Map raw field names to canonical names
+    col_indices = {}  # canonical_name → column_index
+    for idx, field in enumerate(fields):
+        canonical = COLUMN_MAP.get(field)
+        if canonical and canonical not in col_indices:
+            col_indices[canonical] = idx
+
+    if "rpm" not in col_indices and "timestamp_s" not in col_indices:
+        return None, None  # Not a usable log
+
+    # Find data start (skip units + English name lines)
+    data_start = header_idx + 1
+    while data_start < len(raw_lines):
+        test_line = raw_lines[data_start].strip().replace("\r", "")
+        if not test_line:
+            data_start += 1
+            continue
+        if test_line.startswith('"') or "sec.ms" in test_line or "°" in test_line:
+            data_start += 1
+            continue
+        stripped = test_line.lstrip()
+        if stripped and (stripped[0].isdigit() or stripped[0] == "-"):
+            break
+        data_start += 1
+
+    # Parse data rows
+    rows = []
+    for line_idx in range(data_start, len(raw_lines)):
+        line = raw_lines[line_idx].replace("\r", "").strip()
+        if not line:
+            continue
+        parts = line.split(",")
+        row = {}
+        for canonical, col_idx in col_indices.items():
+            if col_idx < len(parts):
+                val_str = parts[col_idx].strip()
+                try:
+                    row[canonical] = float(val_str)
+                except ValueError:
+                    row[canonical] = None
+            else:
+                row[canonical] = None
+
+        # Compute density altitude if we have baro + IAT
+        baro = row.get("baro_kpa")
+        iat = row.get("iat_c")
+        row["density_altitude_ft"] = density_altitude(baro, iat)
+
+        rows.append(row)
+
+    meta["available_columns"] = list(col_indices.keys())
+    meta["sample_count"] = len(rows)
+    return meta, rows
+
+
+def file_hash(filepath):
+    """Compute SHA256 of file for incremental tracking."""
+    h = hashlib.sha256()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+# ── WOT event detection ────────────────────────────────────────────
+
+def detect_wot_events(rows, log_id, throttle_min=95.0, rpm_min=2500, min_duration_samples=10):
+    """Detect WOT (wide-open throttle) events from sample data.
+
+    A WOT event is a contiguous run of samples where throttle > throttle_min
+    and RPM > rpm_min, lasting at least min_duration_samples.
+    """
+    events = []
+    in_wot = False
+    start_idx = 0
+
+    for i, row in enumerate(rows):
+        throttle = row.get("throttle_pct")
+        rpm = row.get("rpm")
+        is_wot = (throttle is not None and throttle > throttle_min and
+                  rpm is not None and rpm > rpm_min)
+
+        if is_wot and not in_wot:
+            start_idx = i
+            in_wot = True
+        elif not is_wot and in_wot:
+            if i - start_idx >= min_duration_samples:
+                events.append(_build_wot_event(rows, log_id, start_idx, i - 1))
+            in_wot = False
+
+    # Handle WOT at end of log
+    if in_wot and len(rows) - start_idx >= min_duration_samples:
+        events.append(_build_wot_event(rows, log_id, start_idx, len(rows) - 1))
+
+    return events
+
+
+def _build_wot_event(rows, log_id, start, end):
+    """Build a WOT event summary from a range of samples."""
+    wot_rows = rows[start:end + 1]
+
+    rpms = [r.get("rpm", 0) for r in wot_rows if r.get("rpm")]
+    boosts = [r.get("boost_actual_kpa", 0) for r in wot_rows if r.get("boost_actual_kpa")]
+    iats = [r.get("iat_c") for r in wot_rows if r.get("iat_c") is not None]
+    das = [r.get("density_altitude_ft") for r in wot_rows if r.get("density_altitude_ft") is not None]
+
+    # Per-cylinder knock
+    knock_cols = ["knock_cyl1", "knock_cyl2", "knock_cyl3",
+                  "knock_cyl4", "knock_cyl5", "knock_cyl6"]
+    knock_total = 0.0
+    knock_max = 0.0
+    for r in wot_rows:
+        for kc in knock_cols:
+            kv = r.get(kc)
+            if kv is not None and kv > 0:
+                knock_total += abs(kv)
+                knock_max = max(knock_max, abs(kv))
+
+    ts_start = wot_rows[0].get("timestamp_s", 0) or 0
+    ts_end = wot_rows[-1].get("timestamp_s", 0) or 0
+    duration = ts_end - ts_start
+
+    # Estimate gear from RPM ramp rate
+    gear = _estimate_gear(rpms, duration) if rpms and duration > 0.5 else None
+
+    return {
+        "log_id": log_id,
+        "start_idx": start,
+        "end_idx": end,
+        "duration_s": round(duration, 2),
+        "rpm_start": int(rpms[0]) if rpms else 0,
+        "rpm_end": int(rpms[-1]) if rpms else 0,
+        "gear": gear,
+        "boost_max_kpa": round(max(boosts), 1) if boosts else 0,
+        "iat_mean_c": round(sum(iats) / len(iats), 1) if iats else None,
+        "da_mean_ft": round(sum(das) / len(das), 0) if das else None,
+        "knock_total_deg": round(knock_total, 2),
+        "knock_max_deg": round(knock_max, 2),
+        "sample_count": len(wot_rows),
+    }
+
+
+def _estimate_gear(rpms, duration):
+    """Rough gear estimate from RPM ramp rate (RPM/sec)."""
+    if len(rpms) < 2 or duration <= 0:
+        return None
+    ramp = (rpms[-1] - rpms[0]) / duration
+    # Typical ramp rates (RPM/sec) for Audi S4 2.7T:
+    # 1st: ~3000+, 2nd: ~1800-3000, 3rd: ~1000-1800, 4th: ~600-1000, 5th: ~400-600
+    if ramp > 3000:
+        return 1
+    elif ramp > 1800:
+        return 2
+    elif ramp > 1000:
+        return 3
+    elif ramp > 600:
+        return 4
+    elif ramp > 300:
+        return 5
+    else:
+        return 6
+
+
+# ── DuckDB schema ───────────────────────────────────────────────────
+
+def create_schema(db):
+    """Create the DuckDB tables for log data."""
+
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS log_metadata (
+            id TEXT PRIMARY KEY,
+            filename TEXT,
+            path TEXT,
+            file_hash TEXT,
+            capture_date TIMESTAMP,
+            sample_count INTEGER,
+            sample_rate_hz INTEGER,
+            ecu_definition TEXT,
+            part_number TEXT,
+            engine_id TEXT,
+            available_columns TEXT,
+            baro_mean_kpa DOUBLE,
+            iat_mean_c DOUBLE,
+            iat_max_c DOUBLE,
+            boost_max_kpa DOUBLE,
+            rpm_max INTEGER,
+            wot_seconds DOUBLE,
+            knock_total DOUBLE,
+            stft_mean DOUBLE,
+            ltft_mean DOUBLE,
+            da_mean_ft DOUBLE,
+            tune_version TEXT,
+            ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Samples table — all time-series data
+    col_defs = ",\n            ".join(
+        f"{c} DOUBLE" for c in SAMPLE_COLUMNS
+    )
+    db.execute(f"""
+        CREATE TABLE IF NOT EXISTS samples (
+            log_id TEXT,
+            sample_idx INTEGER,
+            {col_defs}
+        )
+    """)
+
+    # WOT events
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS wot_events (
+            id INTEGER PRIMARY KEY,
+            log_id TEXT,
+            start_idx INTEGER,
+            end_idx INTEGER,
+            duration_s DOUBLE,
+            rpm_start INTEGER,
+            rpm_end INTEGER,
+            gear INTEGER,
+            boost_max_kpa DOUBLE,
+            iat_mean_c DOUBLE,
+            da_mean_ft DOUBLE,
+            knock_total_deg DOUBLE,
+            knock_max_deg DOUBLE,
+            sample_count INTEGER
+        )
+    """)
+
+    # File tracking for incremental ingest
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS ingested_files (
+            filepath TEXT PRIMARY KEY,
+            file_hash TEXT,
+            ingested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+
+def infer_tune_version(filepath):
+    """Try to infer tune version from file path."""
+    path_str = str(filepath)
+    # Look for vX.Y.Z pattern in path
+    m = re.search(r'v(\d+\.\d+(?:\.\d+)?(?:_\w+)?)', path_str)
+    if m:
+        return "v" + m.group(1)
+    return None
+
+
+# ── Main ingest logic ───────────────────────────────────────────────
+
+def ingest_logs(log_dir, db_path, incremental=False, verbose=False, stats=True):
+    """Ingest all ME7Logger CSVs from a directory into DuckDB."""
+
+    log_dir = Path(log_dir)
+    if not log_dir.exists():
+        print(f"Error: directory not found: {log_dir}", file=sys.stderr)
+        return False
+
+    # Find all CSV files
+    csv_files = sorted(log_dir.glob("*.csv"))
+    # Exclude _excel variants and VisualME7Logger
+    csv_files = [f for f in csv_files
+                 if "_excel" not in f.name and f.name != "VisualME7Logger.csv"]
+
+    if not csv_files:
+        print(f"No CSV log files found in {log_dir}", file=sys.stderr)
+        return False
+
+    print(f"Found {len(csv_files)} log files in {log_dir.name}")
+
+    # Connect to DuckDB
+    db = duckdb.connect(str(db_path))
+    create_schema(db)
+
+    # Get already-ingested files for incremental mode
+    already_ingested = set()
+    if incremental:
+        try:
+            result = db.execute("SELECT filepath, file_hash FROM ingested_files").fetchall()
+            already_ingested = {row[0]: row[1] for row in result}
+        except Exception:
+            pass
+
+    ingested = 0
+    skipped = 0
+    failed = 0
+    total_samples = 0
+    total_wot_events = 0
+    wot_id_counter = db.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM wot_events"
+    ).fetchone()[0]
+
+    for i, csv_file in enumerate(csv_files):
+        filepath_str = str(csv_file)
+
+        # Incremental: skip if already ingested with same hash
+        if incremental and filepath_str in already_ingested:
+            fhash = file_hash(csv_file)
+            if fhash == already_ingested[filepath_str]:
+                skipped += 1
+                continue
+
+        if verbose:
+            print(f"  [{i+1}/{len(csv_files)}] {csv_file.name}...", end="", flush=True)
+
+        meta, rows = parse_log_file(csv_file, verbose=verbose)
+        if meta is None or not rows:
+            failed += 1
+            if verbose:
+                print(" SKIP (parse error)")
+            continue
+
+        fhash = file_hash(csv_file)
+        log_id = fhash[:16]  # Short hash as log ID
+
+        # Delete any existing data for this log (re-ingest)
+        db.execute("DELETE FROM samples WHERE log_id = ?", [log_id])
+        db.execute("DELETE FROM wot_events WHERE log_id = ?", [log_id])
+        db.execute("DELETE FROM log_metadata WHERE id = ?", [log_id])
+
+        # Compute aggregate stats
+        rpms = [r.get("rpm") for r in rows if r.get("rpm")]
+        boosts = [r.get("boost_actual_kpa") for r in rows if r.get("boost_actual_kpa")]
+        iats = [r.get("iat_c") for r in rows if r.get("iat_c") is not None]
+        baros = [r.get("baro_kpa") for r in rows if r.get("baro_kpa") is not None]
+        stfts = [r.get("stft") for r in rows if r.get("stft") is not None]
+        ltfts = [r.get("ltft") for r in rows if r.get("ltft") is not None]
+        das = [r.get("density_altitude_ft") for r in rows if r.get("density_altitude_ft") is not None]
+
+        knock_cols = ["knock_cyl1", "knock_cyl2", "knock_cyl3",
+                      "knock_cyl4", "knock_cyl5", "knock_cyl6"]
+        knock_total = sum(
+            abs(r.get(kc, 0) or 0) for r in rows for kc in knock_cols
+            if r.get(kc) is not None and r.get(kc) > 0
+        )
+
+        # WOT seconds
+        wot_samples = sum(
+            1 for r in rows
+            if r.get("throttle_pct") is not None and r.get("throttle_pct") > 95
+        )
+        wot_seconds = wot_samples / max(meta.get("sample_rate_hz", 20), 1)
+
+        tune_version = infer_tune_version(csv_file)
+
+        # Insert log metadata
+        db.execute("""
+            INSERT INTO log_metadata
+            (id, filename, path, file_hash, capture_date, sample_count, sample_rate_hz,
+             ecu_definition, part_number, engine_id, available_columns,
+             baro_mean_kpa, iat_mean_c, iat_max_c, boost_max_kpa, rpm_max,
+             wot_seconds, knock_total, stft_mean, ltft_mean, da_mean_ft, tune_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, [
+            log_id, csv_file.name, filepath_str, fhash,
+            meta.get("log_start"), meta["sample_count"], meta.get("sample_rate_hz", 20),
+            meta.get("ecu_definition"), meta.get("part_number"), meta.get("engine_id"),
+            ",".join(meta.get("available_columns", [])),
+            round(sum(baros) / len(baros), 2) if baros else None,
+            round(sum(iats) / len(iats), 1) if iats else None,
+            round(max(iats), 1) if iats else None,
+            round(max(boosts), 1) if boosts else None,
+            int(max(rpms)) if rpms else None,
+            round(wot_seconds, 1),
+            round(knock_total, 2),
+            round(sum(stfts) / len(stfts), 4) if stfts else None,
+            round(sum(ltfts) / len(ltfts), 4) if ltfts else None,
+            round(sum(das) / len(das), 0) if das else None,
+            tune_version,
+        ])
+
+        # Insert samples in batch
+        if rows:
+            # Build values list for batch insert
+            batch_size = 5000
+            for batch_start in range(0, len(rows), batch_size):
+                batch = rows[batch_start:batch_start + batch_size]
+                values = []
+                for idx, row in enumerate(batch):
+                    sample_idx = batch_start + idx
+                    vals = [log_id, sample_idx]
+                    for col in SAMPLE_COLUMNS:
+                        vals.append(row.get(col))
+                    values.append(vals)
+
+                placeholders = ", ".join(["?"] * (2 + len(SAMPLE_COLUMNS)))
+                col_names = ", ".join(["log_id", "sample_idx"] + SAMPLE_COLUMNS)
+                db.executemany(
+                    f"INSERT INTO samples ({col_names}) VALUES ({placeholders})",
+                    values
+                )
+
+        # Detect and insert WOT events
+        wot_events = detect_wot_events(rows, log_id)
+        for evt in wot_events:
+            wot_id_counter += 1
+            db.execute("""
+                INSERT INTO wot_events
+                (id, log_id, start_idx, end_idx, duration_s,
+                 rpm_start, rpm_end, gear, boost_max_kpa, iat_mean_c,
+                 da_mean_ft, knock_total_deg, knock_max_deg, sample_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, [
+                wot_id_counter, evt["log_id"], evt["start_idx"], evt["end_idx"],
+                evt["duration_s"], evt["rpm_start"], evt["rpm_end"], evt["gear"],
+                evt["boost_max_kpa"], evt["iat_mean_c"], evt["da_mean_ft"],
+                evt["knock_total_deg"], evt["knock_max_deg"], evt["sample_count"],
+            ])
+
+        # Track file for incremental
+        db.execute("""
+            INSERT OR REPLACE INTO ingested_files (filepath, file_hash)
+            VALUES (?, ?)
+        """, [filepath_str, fhash])
+
+        ingested += 1
+        total_samples += len(rows)
+        total_wot_events += len(wot_events)
+
+        if verbose:
+            print(f" {len(rows)} samples, {len(wot_events)} WOT events")
+        elif (i + 1) % 50 == 0:
+            print(f"  Progress: {i+1}/{len(csv_files)} files...")
+
+    db.close()
+
+    print(f"\nIngest complete:")
+    print(f"  Ingested: {ingested} files ({total_samples:,} samples, {total_wot_events} WOT events)")
+    if skipped:
+        print(f"  Skipped:  {skipped} (unchanged)")
+    if failed:
+        print(f"  Failed:   {failed} (parse errors)")
+
+    if stats and ingested > 0:
+        print_stats(db_path)
+
+    return True
+
+
+def print_stats(db_path):
+    """Print summary statistics from the ingested data."""
+    db = duckdb.connect(str(db_path), read_only=True)
+
+    print("\n── Database Statistics ──")
+
+    # Log counts
+    result = db.execute("""
+        SELECT COUNT(*) as logs,
+               SUM(sample_count) as total_samples,
+               MIN(capture_date) as earliest,
+               MAX(capture_date) as latest
+        FROM log_metadata
+    """).fetchone()
+    print(f"  Logs: {result[0]}, Samples: {result[1]:,}")
+    print(f"  Date range: {result[2]} → {result[3]}")
+
+    # WOT events
+    result = db.execute("""
+        SELECT COUNT(*) as events,
+               AVG(knock_max_deg) as avg_max_knock,
+               MAX(knock_max_deg) as worst_knock,
+               AVG(boost_max_kpa) as avg_boost
+        FROM wot_events
+    """).fetchone()
+    print(f"  WOT events: {result[0]}")
+    if result[0] > 0:
+        print(f"  Avg max knock: {result[1]:.1f}°, Worst: {result[2]:.1f}°")
+        print(f"  Avg max boost: {result[3]:.0f} kPa ({result[3] * 0.0145038:.1f} PSI abs)")
+
+    # DA distribution
+    result = db.execute("""
+        SELECT ROUND(da_mean_ft / 1000) * 1000 AS da_bin,
+               COUNT(*) as n,
+               AVG(knock_max_deg) as avg_knock
+        FROM wot_events
+        WHERE da_mean_ft IS NOT NULL
+        GROUP BY da_bin
+        ORDER BY da_bin
+    """).fetchall()
+    if result:
+        print("  DA distribution (ft → WOT events, avg knock):")
+        for row in result:
+            print(f"    {row[0]:>7.0f} ft: {row[1]:>4} events, {row[2]:.1f}° avg knock")
+
+    # Column availability
+    result = db.execute("""
+        SELECT available_columns, COUNT(*) as n
+        FROM log_metadata
+        GROUP BY available_columns
+        ORDER BY n DESC
+        LIMIT 5
+    """).fetchall()
+    if result:
+        print("  Column profiles (top 5):")
+        for row in result:
+            cols = row[0].split(",") if row[0] else []
+            print(f"    {row[1]:>4} logs: {len(cols)} columns")
+
+    db.close()
+
+
+# ── CLI ─────────────────────────────────────────────────────────────
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Ingest ME7Logger CSV data into DuckDB for analytics"
+    )
+    parser.add_argument("--logs", required=True, help="ME7Logger log directory")
+    parser.add_argument("--db", required=True, help="DuckDB database path")
+    parser.add_argument("--incremental", action="store_true",
+                        help="Only ingest new/changed files")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Show per-file progress")
+    parser.add_argument("--stats", action="store_true", default=True,
+                        help="Print summary statistics (default: true)")
+    parser.add_argument("--stats-only", action="store_true",
+                        help="Print stats from existing DB without ingesting")
+
+    args = parser.parse_args()
+
+    if args.stats_only:
+        print_stats(args.db)
+        return
+
+    ingest_logs(args.logs, args.db, incremental=args.incremental,
+                verbose=args.verbose, stats=args.stats)
+
+
+if __name__ == "__main__":
+    main()

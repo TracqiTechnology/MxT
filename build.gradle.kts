@@ -80,6 +80,20 @@ tasks.register<JavaExec>("screenshots") {
     workingDir = projectDir
 }
 
+tasks.register<JavaExec>("cli") {
+    mainClass.set("cli.MxTCliKt")
+    classpath = sourceSets["main"].runtimeClasspath
+    workingDir = projectDir
+    standardInput = System.`in`
+    // GraalVM Truffle needs module opens for XDF formula evaluation
+    jvmArgs = listOf(
+        "--add-opens", "java.base/java.lang=ALL-UNNAMED",
+        "--add-opens", "java.base/java.nio=ALL-UNNAMED",
+        "--add-opens", "java.base/java.io=ALL-UNNAMED",
+        "--add-opens", "java.base/java.util=ALL-UNNAMED"
+    )
+}
+
 tasks.register("generateVersionFile") {
     val outputFile = file("src/main/resources/version.txt")
     inputs.property("appVersion", appVersion)
@@ -117,10 +131,18 @@ compose.desktop {
             windows {
                 upgradeUuid = "e4a5b6c7-d8e9-4f0a-b1c2-d3e4f5a6b7c8"
                 iconFile.set(project.file("src/main/resources/icons/icon.ico"))
+                // jpackage creates no launcher shortcuts by default — opt in explicitly.
+                menu = true          // Start Menu entry
+                menuGroup = "MxT"    // grouped under a MxT folder
+                shortcut = true      // Desktop shortcut
             }
 
             linux {
                 iconFile.set(project.file("src/main/resources/icons/icon.png"))
+                // Like Windows, the .deb registers no app-menu entry unless opted in.
+                shortcut = true
+                menuGroup = "MxT"
+                appCategory = "Utility"
             }
         }
     }

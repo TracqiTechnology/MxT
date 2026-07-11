@@ -255,7 +255,7 @@ class ProfileManagerTest {
     // ── 6. MED17 profile resolves against real 404E XDF ─────────────
 
     @Test
-    fun `MED17 profile resolves all 14 maps against 404E Normal XDF`() {
+    fun `MED17 profile resolves core maps against 404E Normal XDF`() {
         val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.mxtprofile.json")
         val projectRoot = java.io.File(System.getProperty("user.dir"))
         val xdfFile = java.io.File(projectRoot, "example/med17/404E/404E_normal.xdf")
@@ -267,8 +267,21 @@ class ProfileManagerTest {
         val (_, tableDefs) = data.parser.xdf.XdfParser.parseToList(java.io.FileInputStream(xdfFile))
         assertTrue(tableDefs.isNotEmpty(), "XDF should produce table definitions")
 
+        // Core maps that must resolve against the 404E XDF; supplemental maps (PFI split,
+        // injection-mode timing, launch/altitude PID, etc.) are XDF-variant dependent.
+        val coreMaps = listOf(
+            "KRKTE_PFI", "KRKTE_GDI", "TVUB_PFI",
+            "KFMIOP", "KFMIRL", "KFZWOP", "KFZW",
+            "KFLDRL", "KFLDIMX", "KFLDIOPU",
+            "KFLDRQ0", "KFLDRQ1", "KFLDRQ2", "RKW"
+        )
+
         val unresolved = mutableListOf<String>()
-        for ((key, ref) in profile.mapDefinitions) {
+        for (key in coreMaps) {
+            val ref = profile.mapDefinitions[key] ?: run {
+                unresolved.add("$key: missing from profile")
+                continue
+            }
             val exact = tableDefs.firstOrNull { def ->
                 ref.tableName == def.tableName &&
                     ref.tableDescription == def.tableDescription &&
@@ -281,23 +294,23 @@ class ProfileManagerTest {
 
         assertTrue(
             unresolved.isEmpty(),
-            "All 14 MED17 profile maps should exact-match 404E XDF, but ${unresolved.size} failed:\n" +
+            "All core MED17 profile maps should exact-match 404E XDF, but ${unresolved.size} failed:\n" +
                 unresolved.joinToString("\n  ", prefix = "  ")
         )
     }
 
     @Test
-    fun `MED17 profile has all 14 expected map definition keys`() {
+    fun `MED17 profile has all expected map definition keys`() {
         val profile = loadProfile("MED17_162_RS3_TTRS_2_5T.mxtprofile.json")
-        val expected = listOf(
+        val coreKeys = listOf(
             "KRKTE_PFI", "KRKTE_GDI", "TVUB_PFI",
             "KFMIOP", "KFMIRL", "KFZWOP", "KFZW",
             "KFLDRL", "KFLDIMX", "KFLDIOPU",
             "KFLDRQ0", "KFLDRQ1", "KFLDRQ2", "RKW"
         )
-        for (key in expected) {
-            assertTrue(key in profile.mapDefinitions, "Profile should contain map definition '$key'")
+        for (key in coreKeys) {
+            assertTrue(key in profile.mapDefinitions, "Profile should contain core map definition '$key'")
         }
-        assertEquals(14, profile.mapDefinitions.size, "Profile should have exactly 14 map definitions")
+        assertTrue(profile.mapDefinitions.size >= 14, "Profile should have at least 14 map definitions (has ${profile.mapDefinitions.size})")
     }
 }

@@ -384,6 +384,8 @@ object Me7Simulator {
         // Uses RPM-dependent KFURL, KFPRG, and KFPBRK from calibration maps.
         // Previously used scalar overload with hardcoded kfprg=70.0 / fpbrkds=1.016.
         val effectiveKfurl = calibration.kfurlAt(entry.rpm)
+        // Guard: use baro as fallback if actualMap is zero/invalid (log initialization)
+        val psPrevious = if (entry.actualMap > 100.0) entry.actualMap else entry.barometricPressure
         val simulatedPssol = computePssol(
             rlsol = entry.requestedLoad,
             op = op,
@@ -391,7 +393,7 @@ object Me7Simulator {
             // Use actual pressure for rfagr iteration — at WOT under boost,
             // manifold pressure >> baro, and rfagr = max(pbr-pirg,0)*fupsrl*psagr/ps.
             // Using baro (~1013) when actual is ~2000 makes rfagr ~2x too large.
-            previousPressure = entry.actualMap
+            previousPressure = psPrevious
         )
         val pssolError = simulatedPssol - entry.requestedMap
 
@@ -420,7 +422,7 @@ object Me7Simulator {
             op = op,
             calibration = calibration,
             // Use actual pressure for rfagr — same reasoning as Link 2.
-            previousPressure = entry.actualMap
+            previousPressure = psPrevious
         )
 
         // KFPBRK correction: how to scale VE model to match reality

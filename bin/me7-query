@@ -1,0 +1,341 @@
+#!/usr/bin/env python3
+"""
+ME7 Unified Query Tool — query across DuckDB, Kùzu, and SQLite databases.
+
+Provides a single interface to the three-database architecture:
+  ts    → DuckDB (time-series log analytics)
+  graph → Kùzu (causal knowledge graph)
+  reg   → SQLite (tune metadata & convergence)
+  cross → Cross-database joins
+
+Usage:
+  bin/me7-query ts "SELECT * FROM wot_events ORDER BY knock_max_deg DESC LIMIT 5"
+  bin/me7-query graph "MATCH (m:Map)-[:FEEDS_INTO]->(n:Map) RETURN m.name, n.name"
+  bin/me7-query reg "SELECT * FROM convergence_metrics ORDER BY measured_at DESC"
+  bin/me7-query cross --version v3.2.2 --metric knock --by rpm
+  bin/me7-query summary [--version <ver>]
+  bin/me7-query diagnose --symptom "knock at 5000-6000 rpm"
+
+Options:
+  --duckdb <path>    DuckDB database (default: /tmp/test_tuning.duckdb)
+  --kuzu <path>      Kùzu database (default: /tmp/me7_knowledge.kuzu)
+  --sqlite <path>    SQLite database (default: /tmp/me7_registry.sqlite)
+  --format json|text Output format
+  --limit <n>        Max rows to return (default: 50)
+"""
+
+import argparse
+import json
+import sys
+import os
+
+
+def query_duckdb(db_path: str, sql: str, limit: int = 50, fmt: str = 'text'):
+    """Execute a SQL query against DuckDB."""
+    try:
+        import duckdb
+    except ImportError:
+        print("ERROR: duckdb not installed. Run: pip install duckdb", file=sys.stderr)
+        sys.exit(1)
+
+    conn = duckdb.connect(db_path, read_only=True)
+    try:
+        result = conn.execute(sql).fetchdf()
+        if len(result) > limit:
+            result = result.head(limit)
+            truncated = True
+        else:
+            truncated = False
+
+        if fmt == 'json':
+            records = result.to_dict(orient='records')
+            output = {"source": "duckdb", "rows": len(records), "truncated": truncated, "data": records}
+            print(json.dumps(output, indent=2, default=str))
+        else:
+            print(result.to_string(index=False))
+            if truncated:
+                print(f"\n(truncated to {limit} rows)")
+    except Exception as e:
+        print(f"DuckDB error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def query_kuzu(db_path: str, cypher: str, limit: int = 50, fmt: str = 'text'):
+    """Execute a Cypher query against Kùzu."""
+    try:
+        import kuzu
+    except ImportError:
+        print("ERROR: kuzu not installed. Run: pip install kuzu", file=sys.stderr)
+        sys.exit(1)
+
+    db = kuzu.Database(db_path)
+    conn = kuzu.Connection(db)
+    try:
+        result = conn.execute(cypher)
+        rows = []
+        columns = result.get_column_names()
+        while result.has_next():
+            row = result.get_next()
+            rows.append(dict(zip(columns, row)))
+            if len(rows) >= limit:
+                break
+
+        if fmt == 'json':
+            output = {"source": "kuzu", "rows": len(rows), "columns": columns, "data": rows}
+            print(json.dumps(output, indent=2, default=str))
+        else:
+            if not rows:
+                print("(no results)")
+                return
+            # Simple table format
+            col_widths = {}
+            for col in columns:
+                col_widths[col] = max(len(str(col)), max((len(str(r.get(col, ''))) for r in rows), default=0))
+            header = "  ".join(f"{col:<{col_widths[col]}}" for col in columns)
+            print(header)
+            print("-" * len(header))
+            for row in rows:
+                print("  ".join(f"{str(row.get(col, '')):<{col_widths[col]}}" for col in columns))
+    except Exception as e:
+        print(f"Kùzu error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def query_sqlite(db_path: str, sql: str, limit: int = 50, fmt: str = 'text'):
+    """Execute a SQL query against SQLite."""
+    import sqlite3
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(sql).fetchmany(limit + 1)
+        truncated = len(rows) > limit
+        if truncated:
+            rows = rows[:limit]
+
+        if fmt == 'json':
+            data = [dict(r) for r in rows]
+            output = {"source": "sqlite", "rows": len(data), "truncated": truncated, "data": data}
+            print(json.dumps(output, indent=2, default=str))
+        else:
+            if not rows:
+                print("(no results)")
+                return
+            columns = rows[0].keys()
+            col_widths = {}
+            for col in columns:
+                col_widths[col] = max(len(str(col)),
+                                      max((len(str(r[col])) for r in rows), default=0))
+            header = "  ".join(f"{col:<{col_widths[col]}}" for col in columns)
+            print(header)
+            print("-" * len(header))
+            for row in rows:
+                print("  ".join(f"{str(row[col]):<{col_widths[col]}}" for col in columns))
+            if truncated:
+                print(f"\n(truncated to {limit} rows)")
+    except Exception as e:
+        print(f"SQLite error: {e}", file=sys.stderr)
+        sys.exit(1)
+    finally:
+        conn.close()
+
+
+def cmd_summary(duckdb_path: str, kuzu_path: str, sqlite_path: str, version: str = None, fmt: str = 'text'):
+    """Cross-database summary combining log stats, graph info, and convergence."""
+    summary = {}
+
+    # DuckDB: log stats
+    try:
+        import duckdb
+        conn = duckdb.connect(duckdb_path, read_only=True)
+        stats = conn.execute("""
+            SELECT COUNT(DISTINCT log_id) as log_count,
+                   COUNT(*) as sample_count,
+                   MIN(density_altitude_ft) as da_min,
+                   MAX(density_altitude_ft) as da_max
+            FROM samples
+        """).fetchone()
+        summary['logs'] = {
+            'count': stats[0], 'samples': stats[1],
+            'da_range_ft': [round(stats[2] or 0), round(stats[3] or 0)]
+        }
+
+        wot = conn.execute("SELECT COUNT(*), SUM(knock_total_deg) FROM wot_events").fetchone()
+        summary['wot'] = {'events': wot[0], 'total_knock_deg': round(wot[1] or 0, 1)}
+        conn.close()
+    except Exception as e:
+        summary['logs'] = {'error': str(e)}
+
+    # Kùzu: graph stats
+    try:
+        import kuzu
+        db = kuzu.Database(kuzu_path)
+        conn = kuzu.Connection(db)
+        maps_r = conn.execute("MATCH (m:Map) RETURN COUNT(m) AS n")
+        maps_r.has_next()
+        map_count = maps_r.get_next()[0]
+        tunes_r = conn.execute("MATCH (t:TuneVersion) RETURN COUNT(t) AS n")
+        tunes_r.has_next()
+        tune_count = tunes_r.get_next()[0]
+        summary['graph'] = {'maps': map_count, 'tune_versions': tune_count}
+    except Exception as e:
+        summary['graph'] = {'error': str(e)}
+
+    # SQLite: convergence
+    try:
+        import sqlite3
+        conn = sqlite3.connect(sqlite_path)
+        conn.row_factory = sqlite3.Row
+        if version:
+            row = conn.execute(
+                "SELECT * FROM convergence_metrics WHERE version = ? ORDER BY measured_at DESC LIMIT 1",
+                (version,)
+            ).fetchone()
+        else:
+            row = conn.execute(
+                "SELECT * FROM convergence_metrics ORDER BY measured_at DESC LIMIT 1"
+            ).fetchone()
+
+        if row:
+            summary['convergence'] = dict(row)
+        else:
+            summary['convergence'] = {'status': 'no data'}
+
+        cnt = conn.execute("SELECT COUNT(*) FROM tune_versions").fetchone()[0]
+        summary['registry'] = {'registered_versions': cnt}
+        conn.close()
+    except Exception as e:
+        summary['convergence'] = {'error': str(e)}
+
+    if fmt == 'json':
+        print(json.dumps(summary, indent=2, default=str))
+    else:
+        print(f"\n{'='*50}")
+        print(f"  ME7 Tuning Status")
+        print(f"{'='*50}")
+
+        logs = summary.get('logs', {})
+        if 'error' not in logs:
+            print(f"\n  Logs: {logs.get('count', 0)} files, {logs.get('samples', 0):,} samples")
+            da = logs.get('da_range_ft', [0, 0])
+            print(f"  Density altitude: {da[0]:,} ft to {da[1]:,} ft")
+
+        wot = summary.get('wot', {})
+        print(f"  WOT events: {wot.get('events', 0)}, total knock: {wot.get('total_knock_deg', 0)}°")
+
+        graph = summary.get('graph', {})
+        if 'error' not in graph:
+            print(f"\n  Knowledge graph: {graph.get('maps', 0)} maps, {graph.get('tune_versions', 0)} versions")
+
+        conv = summary.get('convergence', {})
+        if 'status' in conv:
+            print(f"\n  Convergence: {conv['status']}")
+        elif 'error' in conv:
+            print(f"\n  Convergence: {conv['error']}")
+        else:
+            score = conv.get('convergence_score', '?')
+            ver = conv.get('version', '?')
+            print(f"\n  Latest convergence: {ver} → {score}/100")
+
+
+def cmd_diagnose(kuzu_path: str, symptom: str, fmt: str = 'text'):
+    """Use the knowledge graph to diagnose a symptom."""
+    try:
+        import kuzu
+    except ImportError:
+        print("ERROR: kuzu not installed", file=sys.stderr)
+        sys.exit(1)
+
+    db = kuzu.Database(kuzu_path)
+    conn = kuzu.Connection(db)
+
+    # Find matching symptoms
+    result = conn.execute(
+        "MATCH (s:Symptom) WHERE s.name CONTAINS $keyword RETURN s.name, s.description",
+        {"keyword": symptom.split()[0] if symptom else "knock"}
+    )
+
+    matches = []
+    while result.has_next():
+        row = result.get_next()
+        matches.append({"symptom": row[0], "description": row[1]})
+
+    # Follow causal chain from symptom → diagnosis → map
+    chains = []
+    for m in matches:
+        r2 = conn.execute(
+            """MATCH (s:Symptom {name: $name})-[e:AFFECTS]->(target:Map)
+               RETURN s.name, target.name, e.description""",
+            {"name": m['symptom']}
+        )
+        while r2.has_next():
+            row = r2.get_next()
+            chains.append({
+                "symptom": row[0],
+                "affected_map": row[1],
+                "mechanism": row[2]
+            })
+
+    if fmt == 'json':
+        print(json.dumps({"symptoms": matches, "causal_chains": chains}, indent=2))
+    else:
+        print(f"\nDiagnosis for: {symptom}")
+        print("=" * 50)
+        if not matches:
+            print(f"  No matching symptoms for '{symptom}'")
+        for m in matches:
+            print(f"  Symptom: {m['symptom']}")
+            print(f"    {m['description']}")
+        if chains:
+            print(f"\n  Causal chains:")
+            for c in chains:
+                print(f"    {c['symptom']} → {c['affected_map']}: {c['mechanism']}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="ME7 Unified Query Tool")
+    parser.add_argument("--duckdb", default="/tmp/test_tuning.duckdb",
+                        help="DuckDB database path")
+    parser.add_argument("--kuzu", default="/tmp/me7_knowledge.kuzu",
+                        help="Kùzu database path")
+    parser.add_argument("--sqlite", default="/tmp/me7_registry.sqlite",
+                        help="SQLite database path")
+    parser.add_argument("--format", choices=['text', 'json'], default='text')
+    parser.add_argument("--limit", type=int, default=50)
+
+    sub = parser.add_subparsers(dest="command")
+
+    p = sub.add_parser("ts", help="Query DuckDB time-series")
+    p.add_argument("sql", help="SQL query")
+
+    p = sub.add_parser("graph", help="Query Kùzu knowledge graph")
+    p.add_argument("cypher", help="Cypher query")
+
+    p = sub.add_parser("reg", help="Query SQLite registry")
+    p.add_argument("sql", help="SQL query")
+
+    p = sub.add_parser("summary", help="Cross-database status summary")
+    p.add_argument("--version")
+
+    p = sub.add_parser("diagnose", help="Diagnose a symptom using knowledge graph")
+    p.add_argument("symptom", help="Symptom description (e.g. 'knock at high load')")
+
+    args = parser.parse_args()
+
+    if args.command == "ts":
+        query_duckdb(args.duckdb, args.sql, args.limit, args.format)
+    elif args.command == "graph":
+        query_kuzu(args.kuzu, args.cypher, args.limit, args.format)
+    elif args.command == "reg":
+        query_sqlite(args.sqlite, args.sql, args.limit, args.format)
+    elif args.command == "summary":
+        cmd_summary(args.duckdb, args.kuzu, args.sqlite, args.version, args.format)
+    elif args.command == "diagnose":
+        cmd_diagnose(args.kuzu, args.symptom, args.format)
+    else:
+        parser.print_help()
+
+
+if __name__ == '__main__':
+    main()

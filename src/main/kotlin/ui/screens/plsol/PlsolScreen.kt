@@ -41,13 +41,16 @@ fun PlsolScreen(initialTab: Int = 0) {
     var selectedTab by remember { mutableStateOf(initialTab) }
     val tabTitles = listOf("Load", "Airflow", "Power")
     val isMed17 = EcuPlatformPreference.platform == EcuPlatform.MED17
+    var showMbar by remember { mutableStateOf(false) }
 
     // Log overlay state
     var loggedPoints by remember { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
+    var loggedPointsMbar by remember { mutableStateOf<List<Pair<Double, Double>>>(emptyList()) }
     var progressValue by remember { mutableStateOf(0) }
     var progressMax by remember { mutableStateOf(1) }
     var showProgress by remember { mutableStateOf(false) }
     var logDirName by remember { mutableStateOf("No Directory Selected") }
+    var parseDiagnostics by remember { mutableStateOf<Med17LogParser.ParseDiagnostics?>(null) }
 
     val scope = rememberCoroutineScope()
 
@@ -62,9 +65,11 @@ fun PlsolScreen(initialTab: Int = 0) {
 
             val plsol = Plsol(pu, tans, kfurlVal)
 
-            // Pressure/Load chart: absolute and relative (boost) PSI
-            val absolutePoints = plsol.points.map { p -> Pair(p.x, p.y * 0.0145038) }
-            val relativePoints = plsol.points.map { p -> Pair(p.x, (p.y - pu) * 0.0145038) }
+            // Pressure/Load chart: both PSI and mbar absolute
+            val absolutePointsPsi = plsol.points.map { p -> Pair(p.x, p.y * 0.0145038) }
+            val relativePointsPsi = plsol.points.map { p -> Pair(p.x, (p.y - pu) * 0.0145038) }
+            val absolutePointsMbar = plsol.points.map { p -> Pair(p.x, p.y) }
+            val relativePointsMbar = plsol.points.map { p -> Pair(p.x, p.y - pu) }
 
             // Airflow chart
             val airflow = Airflow(plsol.points, dispVal, rpmVal)
@@ -74,7 +79,7 @@ fun PlsolScreen(initialTab: Int = 0) {
             val horsepower = Horsepower(airflow.points)
             val horsepowerPoints = horsepower.points.map { p -> Pair(p.x, p.y) }
 
-            PlsolChartData(absolutePoints, relativePoints, airflowPoints, horsepowerPoints)
+            PlsolChartData(absolutePointsPsi, relativePointsPsi, absolutePointsMbar, relativePointsMbar, airflowPoints, horsepowerPoints)
         }
     }
 
@@ -123,6 +128,7 @@ fun PlsolScreen(initialTab: Int = 0) {
                                         progressMax = max
                                         showProgress = value < max - 1
                                     }
+                                    parseDiagnostics = parser.lastDiagnostics
                                     loadValues = values[Med17LogFileContract.Header.ENGINE_LOAD_HEADER] ?: emptyList()
                                     pressureValues = values[Med17LogFileContract.Header.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER] ?: emptyList()
                                     baroValues = values[Med17LogFileContract.Header.BAROMETRIC_PRESSURE_HEADER] ?: emptyList()
@@ -146,6 +152,7 @@ fun PlsolScreen(initialTab: Int = 0) {
 
                                 // WOT filter: keep rows where throttle > 90%
                                 val wotPoints = mutableListOf<Pair<Double, Double>>()
+                                val wotPointsMbar = mutableListOf<Pair<Double, Double>>()
                                 val wotLoads = mutableListOf<Double>()
                                 val wotPressures = mutableListOf<Double>()
                                 val wotBaros = mutableListOf<Double>()
@@ -156,6 +163,7 @@ fun PlsolScreen(initialTab: Int = 0) {
                                         if (i < pressureValues.size) {
                                             val pressurePsi = pressureValues[i] * 0.0145038
                                             wotPoints.add(Pair(loadValues[i], pressurePsi))
+                                            wotPointsMbar.add(Pair(loadValues[i], pressureValues[i]))
                                             wotLoads.add(loadValues[i])
                                             wotPressures.add(pressureValues[i])
                                         }
@@ -173,6 +181,7 @@ fun PlsolScreen(initialTab: Int = 0) {
 
                                 withContext(Dispatchers.Main) {
                                     loggedPoints = wotPoints
+                                    loggedPointsMbar = wotPointsMbar
                                     showProgress = false
 
                                     // Auto-fill baro from mean of logged values
@@ -215,20 +224,72 @@ fun PlsolScreen(initialTab: Int = 0) {
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
+                parseDiagnostics?.let { diag ->
+                    if (diag.missingHeaders.isNotEmpty()) {
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "⚠ ${diag.missingHeaders.size} missing header(s)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+        }
+
+        // Missing header diagnostics detail
+        parseDiagnostics?.let { diag ->
+            if (diag.missingHeaders.isNotEmpty()) {
+                Surface(tonalElevation = 2.dp, modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                        Text("Log Header Diagnostics", style = MaterialTheme.typography.labelMedium)
+                        Text(
+                            "Matched: ${diag.matchedHeaders.size} | Missing: ${diag.missingHeaders.size} | Rows: ${diag.totalRows}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            "Missing: ${diag.missingHeaders.joinToString(", ")}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
             }
         }
 
         // Charts area with tabs
         Column(modifier = Modifier.weight(1f)) {
-            PrimaryScrollableTabRow(
-                selectedTabIndex = selectedTab,
-                modifier = Modifier.fillMaxWidth()
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                tabTitles.forEachIndexed { index, title ->
-                    Tab(
-                        selected = selectedTab == index,
-                        onClick = { selectedTab = index },
-                        text = { Text(title) }
+                PrimaryScrollableTabRow(
+                    selectedTabIndex = selectedTab,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    tabTitles.forEachIndexed { index, title ->
+                        Tab(
+                            selected = selectedTab == index,
+                            onClick = { selectedTab = index },
+                            text = { Text(title) }
+                        )
+                    }
+                }
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.padding(end = 12.dp)
+                ) {
+                    Text(
+                        text = if (showMbar) "mbar" else "PSI",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Switch(
+                        checked = showMbar,
+                        onCheckedChange = { showMbar = it }
                     )
                 }
             }
@@ -236,23 +297,27 @@ fun PlsolScreen(initialTab: Int = 0) {
             Box(modifier = Modifier.fillMaxSize().padding(8.dp)) {
                 when (selectedTab) {
                     0 -> {
+                        val absPoints = if (showMbar) chartData.absolutePointsMbar else chartData.absolutePoints
+                        val relPoints = if (showMbar) chartData.relativePointsMbar else chartData.relativePoints
+                        val unitLabel = if (showMbar) "mbar" else "PSI"
                         val series = mutableListOf(
                             ChartSeries(
                                 name = "Requested Absolute",
-                                points = chartData.absolutePoints,
+                                points = absPoints,
                                 color = Primary
                             ),
                             ChartSeries(
                                 name = "Requested Relative (Boost)",
-                                points = chartData.relativePoints,
+                                points = relPoints,
                                 color = ChartRed
                             )
                         )
-                        if (loggedPoints.isNotEmpty()) {
+                        val activeLogPoints = if (showMbar) loggedPointsMbar else loggedPoints
+                        if (activeLogPoints.isNotEmpty()) {
                             series.add(
                                 ChartSeries(
                                     name = "Logged (WOT)",
-                                    points = loggedPoints,
+                                    points = activeLogPoints,
                                     color = ChartGreen,
                                     showLine = false,
                                     showPoints = true
@@ -263,7 +328,7 @@ fun PlsolScreen(initialTab: Int = 0) {
                             series = series,
                             title = "PLSOL",
                             xAxisLabel = "Requested Load",
-                            yAxisLabel = "PSI"
+                            yAxisLabel = unitLabel
                         )
                     }
                     1 -> {
@@ -376,6 +441,8 @@ fun PlsolScreen(initialTab: Int = 0) {
 private data class PlsolChartData(
     val absolutePoints: List<Pair<Double, Double>>,
     val relativePoints: List<Pair<Double, Double>>,
+    val absolutePointsMbar: List<Pair<Double, Double>>,
+    val relativePointsMbar: List<Pair<Double, Double>>,
     val airflowPoints: List<Pair<Double, Double>>,
     val horsepowerPoints: List<Pair<Double, Double>>
 )

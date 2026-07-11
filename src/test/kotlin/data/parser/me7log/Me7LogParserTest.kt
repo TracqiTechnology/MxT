@@ -209,10 +209,10 @@ class Me7LogParserTest {
 
     @Test
     fun `parseLogDirectory aggregates multiple files as LDRPID`() {
-        // Use a smaller subset — pick just 3 files to avoid OOM with 417 files
-        val subset = logDir.listFiles()!!
-            .filter { it.extension == "csv" }
-            .take(3)
+        // Use the three documented LDRPID-compatible fixtures. listFiles() order is
+        // filesystem-dependent, so an arbitrary .take(3) yields files that may lack
+        // required LDRPID signals (wgdc/gear) and contribute zero rows on CI.
+        val subset = listOf(mainLog, optimizerOnlyLog, closedLoopOnlyLog)
 
         val tempDir = kotlin.io.path.createTempDirectory("me7-test-subset").toFile()
         try {

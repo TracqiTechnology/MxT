@@ -137,7 +137,7 @@ TVUB is a 1D Kennlinie: battery voltage (V) → dead time (ms). Dead time (Venti
 
 #### KFLF Clarification
 
-KFLF exists in ME7 but is "Lambda map at partial load" — a partial-load AFR target map (RPM × load → lambda). It is **NOT** an injector linearization table. There is no "KFLFW" injector linearization in ME7. ME7 handles minimum pulse width via the TEMIN constant.
+KFLF (Lambdakennfeld bei Teillast — "Lambda map at partial load") is **misnamed**. Despite the name, it is NOT a lambda target map. It is a multiplicative injection correction factor (1.0 = no correction, >1.0 = richer, <1.0 = leaner). The FR explicitly states: "Das Kennfeld KFLF sollte nicht zu Gemischeingriffen verwendet werden" — KFLF should not be used for mixture intervention. Use KFPU for relative charge alignment instead. There is no "KFLFW" injector linearization in ME7. ME7 handles minimum pulse width via the TEMIN constant.
 
 #### Usage
 

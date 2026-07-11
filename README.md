@@ -43,15 +43,17 @@ MxT ships as a **native application** — no JRE required:
 | Platform | Format | Notes |
 |----------|--------|-------|
 | **macOS** | `.dmg` | Apple Silicon native. Intel Macs run via Rosetta 2. |
-| **Windows** | `.msi` | Double-click install. No JRE required. |
+| **Windows** | `.msi` + `.zip` | Double-click install, or unzip the portable build. Both bundle their own runtime — no Java required. |
 | **Linux** | `.deb` + `.tar.gz` | Debian package or portable archive. |
-| **Cross-platform** | `.jar` | For the traditionalists. Requires Java 17+. |
+| **Cross-platform** | `.jar` | Advanced. Requires **Java 17+** already installed (see warning below). |
 
 Your buddy who's been "meaning to install Java" for three years can finally just run the DMG.
 
 Download the latest release [here](https://github.com/TracqiTechnology/MxT/releases/latest).
 
-> **JAR users:** You will need [Java 17+](https://www.oracle.com/java/technologies/downloads/) installed. Once you have it, double-click the JAR and you're off.
+> **Windows users:** grab the **`.msi`** (installs) or the **`.zip`** (portable — unzip and run `MxT.exe`). Both include the correct Java runtime. **Do not use the `.jar`** unless you know you have Java 17+.
+>
+> **JAR users:** The `.jar` needs [Java **17 or newer**](https://www.oracle.com/java/technologies/downloads/) — an older install (e.g. Java 8) will fail on launch with a bare *"A Java Exception has occurred"* dialog. If in doubt, use the native package for your platform instead.
 
 # So, Do I Actually Need This?
 

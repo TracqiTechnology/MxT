@@ -1,6 +1,6 @@
 {
-    "name": "Audi RS3 / TTRS 2.5T \u2014 MED17.1.62 (DS1)",
-    "description": "EA855 EVO 2.5 TFSI, 5-cylinder, MED17.1.62 ECU. Dual fuel: port + direct injection. Stock K16 turbo. DS1 flash via Dyno Spectrum.",
+    "name": "Audi RS3 / TTRS 2.5T DAZA — MED17.1.62 (DS1)",
+    "description": "EA855 EVO 2.5 TFSI DAZA variant, 5-cylinder, MED17.1.62 ECU. Dual fuel: port + direct injection. Stock K16 turbo. DS1 flash via Dyno Spectrum. DAZA has 380cc GDI + 270cc PFI (vs DNWA 470cc GDI + 270cc PFI).",
     "ecuPlatform": "MED17",
     "ecuPartNumbers": [],
     "mapDefinitions": {
@@ -146,7 +146,7 @@
         "numCylinders": 5,
         "stoichiometricAfr": 14.7,
         "gasolineGramsPerCcm": 0.755,
-        "fuelInjectorSize": 220.0
+        "fuelInjectorSize": 270.0
     },
     "plsol": {
         "barometricPressure": 1013.0,
@@ -176,12 +176,12 @@
         "minMe7Points": 75,
         "minAfrPoints": 150,
         "maxAfr": 16.0,
-        "fuelInjectorSize": 220.0,
+        "fuelInjectorSize": 270.0,
         "gasolineGramsPerCcm": 0.755,
         "numFuelInjectors": 5.0
     },
     "dualInjection": {
-        "portInjectorFlowRateCcMin": 220.0,
+        "portInjectorFlowRateCcMin": 270.0,
         "portInjectorFuelPressureBar": 4.0,
         "directInjectorFlowRateCcMin": 380.0,
         "directInjectorFuelPressureBar": 240.0,
