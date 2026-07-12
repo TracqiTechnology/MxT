@@ -61,6 +61,11 @@ jobs:
             BETA_NUM=$(git rev-list --count "${LATEST_TAG}..HEAD")
           fi
 
+          # gradle.properties app.version is a manual floor for intentional minor/major
+          # bumps; the greater of (auto patch, app.version) wins so betas track it too.
+          APP_VERSION=$(grep '^app.version=' gradle.properties | cut -d'=' -f2)
+          VERSION=$(printf '%s\n%s\n' "$VERSION" "$APP_VERSION" | sort -V | tail -1)
+
           # Display version for tags, JAR names, and GitHub release title
           DISPLAY_VERSION="${VERSION}-beta.${BETA_NUM}"
           # Native package version — use the base 3-segment version (MAJOR.MINOR.PATCH).
