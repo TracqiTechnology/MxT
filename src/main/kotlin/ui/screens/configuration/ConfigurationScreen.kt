@@ -89,13 +89,16 @@ private val allMapDefinitions = listOf(
     // Shared — boost PID linearization
     MapDefinitionEntry("KFLDRL", KfldrlPreferences),
     MapDefinitionEntry("KFLDIMX", KfldimxPreferences),
-    // ME7 + MED9 — VE model maps (MED17 uses adaptive fupsrl_w / pbrint_w)
-    MapDefinitionEntry("KFPBRK", KfpbrkPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
-    MapDefinitionEntry("KFPBRKNW", KfpbrknwPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
-    MapDefinitionEntry("KFPRG", KfprgPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
+    // ME7-only — VE model maps (residual gas / combustion pressure correction).
+    // These maps do not exist in MED9.1; MED9.1 firmware uses a different VE model.
+    MapDefinitionEntry("KFPBRK", KfpbrkPreferences, platforms = setOf(EcuPlatform.ME7)),
+    MapDefinitionEntry("KFPBRKNW", KfpbrknwPreferences, platforms = setOf(EcuPlatform.ME7)),
+    MapDefinitionEntry("KFPRG", KfprgPreferences, platforms = setOf(EcuPlatform.ME7)),
     // v4: Environmental correction maps
     MapDefinitionEntry("KFLDIOPU", KfldioPuPreferences),
-    MapDefinitionEntry("KFFWTBR", KffwtbrPreferences, platforms = setOf(EcuPlatform.ME7, EcuPlatform.MED9)),
+    // Charge temperature blending factor — different map name in ME7 vs MED9.1.
+    MapDefinitionEntry("KFFWTBR", KffwtbrPreferences, platforms = setOf(EcuPlatform.ME7)),
+    MapDefinitionEntry("KFWTBR", KffwtbrPreferences, platforms = setOf(EcuPlatform.MED9)),
     // v4: PID gain maps
     MapDefinitionEntry("KFLDRQ0", Kfldrq0Preferences),
     MapDefinitionEntry("KFLDRQ1", Kfldrq1Preferences),
