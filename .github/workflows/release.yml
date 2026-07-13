@@ -70,21 +70,26 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Compute next patch version from latest tag
+      - name: Compute release version
         id: version
         run: |
-          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | head -1)
+          # Latest STABLE tag (ignore -beta pre-release tags)
+          LATEST_TAG=$(git tag -l 'v*' --sort=-v:refname | grep -v beta | head -1)
           if [ -z "$LATEST_TAG" ]; then
-            # No tags yet — fall back to gradle.properties
-            VERSION=$(grep '^app.version=' gradle.properties | cut -d'=' -f2)
+            AUTO_VERSION=$(grep '^app.version=' gradle.properties | cut -d'=' -f2)
           else
             CURRENT=${LATEST_TAG#v}
             MAJOR=$(echo "$CURRENT" | cut -d. -f1)
             MINOR=$(echo "$CURRENT" | cut -d. -f2)
             PATCH=$(echo "$CURRENT" | cut -d. -f3)
-            VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+            AUTO_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
           fi
-          echo "Next release: v${VERSION}"
+          # gradle.properties app.version is a manual floor for intentional minor/major
+          # bumps; the greater of (auto-incremented patch, app.version) wins. Routine
+          # releases leave app.version below the tag line and get the auto patch bump.
+          APP_VERSION=$(grep '^app.version=' gradle.properties | cut -d'=' -f2)
+          VERSION=$(printf '%s\n%s\n' "$AUTO_VERSION" "$APP_VERSION" | sort -V | tail -1)
+          echo "Auto: v${AUTO_VERSION}  Floor(app.version): v${APP_VERSION}  ->  Release: v${VERSION}"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
   build-macos:

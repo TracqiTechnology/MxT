@@ -83,15 +83,25 @@ fun KfmiopScreen() {
     LaunchedEffect(Unit) { KfmiopPreferences.mapChanged.collect { mapVersion++ } }
     val kfmiopPair = remember(mapList, mapVersion) { findMap(mapList, KfmiopPreferences) }
     val inputKfmiop = kfmiopPair?.second
+    val platform = EcuPlatformPreference.platform
+
+    // MED9 stores KFMIOP with RPM on x and load on y — the inverse of the algorithm
+    // convention. Detect the stored orientation from axis metadata and normalize to
+    // xAxis=load, yAxis=RPM before any calculation, display, or edit. ME7 passes through.
+    val storedRpmOnX = remember(kfmiopPair, platform) {
+        KfmiopAxisConvention.storedRpmOnX(kfmiopPair?.first, platform)
+    }
+    val normalizedKfmiop = remember(inputKfmiop, storedRpmOnX) {
+        if (inputKfmiop != null) KfmiopAxisConvention.normalize(inputKfmiop, storedRpmOnX) else null
+    }
 
     // Detect scalar KFMIOP (MED17/DS1: 1×1 map with empty axes)
-    val isScalar = inputKfmiop != null && inputKfmiop.xAxis.isEmpty() && inputKfmiop.yAxis.isEmpty()
-    val platform = EcuPlatformPreference.platform
+    val isScalar = normalizedKfmiop != null && normalizedKfmiop.xAxis.isEmpty() && normalizedKfmiop.yAxis.isEmpty()
     val mapLabel = CalibrationTab.KFMIOP.labelFor(platform)
 
     // --- Scalar mode state (MED17/DS1) ---
     val currentScalarValue = if (isScalar) {
-        inputKfmiop!!.zAxis.firstOrNull()?.firstOrNull() ?: 0.0
+        normalizedKfmiop!!.zAxis.firstOrNull()?.firstOrNull() ?: 0.0
     } else 0.0
 
     var editedScalarValue by remember(currentScalarValue) {
@@ -113,22 +123,22 @@ fun KfmiopScreen() {
         mutableStateOf(KfmiopPreferences.maxBoostPressure.toString())
     }
 
-    val kfmiopResult = remember(inputKfmiop, desiredMaxMapPressure, desiredMaxBoostPressure, isScalar) {
-        if (!isScalar && inputKfmiop != null) {
+    val kfmiopResult = remember(normalizedKfmiop, desiredMaxMapPressure, desiredMaxBoostPressure, isScalar) {
+        if (!isScalar && normalizedKfmiop != null) {
             val maxMapPressureVal = desiredMaxMapPressure.toDoubleOrNull() ?: KfmiopPreferences.maxMapPressure
             val maxBoostPressureVal = desiredMaxBoostPressure.toDoubleOrNull() ?: KfmiopPreferences.maxBoostPressure
 
             val maxMapSensorLoad = Rlsol.rlsol(1030.0, maxMapPressureVal, 0.0, 96.0, 0.106, maxMapPressureVal)
             val maxBoostPressureLoad = Rlsol.rlsol(1030.0, maxBoostPressureVal, 0.0, 96.0, 0.106, maxBoostPressureVal)
-            Kfmiop.calculateKfmiop(inputKfmiop, maxMapSensorLoad, maxBoostPressureLoad)
+            Kfmiop.calculateKfmiop(normalizedKfmiop, maxMapSensorLoad, maxBoostPressureLoad)
         } else null
     }
 
     // Editable Y-axis (RPM breakpoints) for output KFMIOP
-    var editedYAxis by remember(inputKfmiop, isScalar) {
+    var editedYAxis by remember(normalizedKfmiop, isScalar) {
         mutableStateOf(
-            if (!isScalar && inputKfmiop != null && inputKfmiop.yAxis.isNotEmpty())
-                arrayOf(inputKfmiop.yAxis.copyOf())
+            if (!isScalar && normalizedKfmiop != null && normalizedKfmiop.yAxis.isNotEmpty())
+                arrayOf(normalizedKfmiop.yAxis.copyOf())
             else arrayOf(emptyArray<Double>())
         )
     }
@@ -235,9 +245,14 @@ fun KfmiopScreen() {
                     showWriteConfirmation = false
                     val outputMap = if (isScalar) scalarOutputMap else finalOutputKfmiop
                     val tableDef = kfmiopPair?.first
-                    if (outputMap != null && tableDef != null) {
+                    // Restore the binary's stored axis convention (RPM on x for MED9)
+                    // before writing; scalar maps are never swapped.
+                    val writeMap = if (outputMap != null && !isScalar) {
+                        KfmiopAxisConvention.denormalize(outputMap, storedRpmOnX)
+                    } else outputMap
+                    if (writeMap != null && tableDef != null) {
                         try {
-                            BinWriter.write(BinFilePreferences.file.value, tableDef, outputMap)
+                            BinWriter.write(BinFilePreferences.file.value, tableDef, writeMap)
                             writeStatus = WriteStatus.Success
                         } catch (e: Exception) {
                             e.printStackTrace()
@@ -327,7 +342,7 @@ fun KfmiopScreen() {
                 modifier = Modifier.weight(1f),
                 selectedTab = selectedTab,
                 onTabSelected = { selectedTab = it },
-                inputKfmiop = inputKfmiop,
+                inputKfmiop = normalizedKfmiop,
                 kfmiopResult = kfmiopResult,
                 finalOutputKfmiop = finalOutputKfmiop,
                 currentPeakBoost = boostChartData.first,
