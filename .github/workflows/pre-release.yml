@@ -12,6 +12,33 @@ permissions:
   contents: write
 
 jobs:
+  determine-runner:
+    name: Determine Runner
+    runs-on: ubuntu-latest
+    outputs:
+      runner-type: ${{ steps.select.outputs.runner }}
+    steps:
+      - name: Pick an idle self-hosted macOS runner
+        id: select
+        env:
+          GH_PAT_WORKFLOW: ${{ secrets.GH_PAT_WORKFLOW }}
+        run: |
+          set -euo pipefail
+          FALLBACK='"macos-latest"'
+          if [ -z "${GH_PAT_WORKFLOW:-}" ]; then
+            echo "::notice::GH_PAT_WORKFLOW not configured for runner lookup — falling back to hosted macOS"
+            echo "runner=$FALLBACK" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          JSON=$(curl -s -H "Authorization: Bearer $GH_PAT_WORKFLOW" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/orgs/${{ github.repository_owner }}/actions/runners?per_page=100" || true)
+          IDLE=$(echo "$JSON" | jq '[.runners[]? | select(.os=="macOS" and .status=="online" and .busy==false)] | length' 2>/dev/null || echo 0)
+          if [ "${IDLE:-0}" -gt 0 ]; then
+            echo 'runner=["self-hosted", "macOS"]' >> "$GITHUB_OUTPUT"
+            echo "Idle self-hosted macOS runner available — using self-hosted (fill local before paying for hosted)"
+          else
+            echo "::notice::No idle self-hosted macOS runner — using hosted fallback"
+            echo "runner=$FALLBACK" >> "$GITHUB_OUTPUT"
+          fi
   test:
     runs-on: ubuntu-latest
     steps:
@@ -73,8 +100,8 @@ jobs:
           echo "pkg_version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
 
   build-macos:
-    needs: [check-version, test]
-    runs-on: macos-latest
+    needs: [determine-runner, check-version, test]
+    runs-on: ${{ fromJSON(needs.determine-runner.outputs.runner-type) }}
     steps:
       - uses: actions/checkout@v4
 
