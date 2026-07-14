@@ -201,7 +201,12 @@ fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
                     val tableDef = rkwPair?.first
                     if (outputRkw != null && tableDef != null) {
                         try {
-                            BinWriter.write(BinFilePreferences.file.value, tableDef, outputRkw)
+                            // Trims only change z — write z ONLY. Never re-write the
+                            // x/y axes read from the bin: it's pointless for a trim,
+                            // and it would faithfully re-persist axis damage from bins
+                            // written by pre-2.1.3 versions (zeroed load axes).
+                            val zOnly = Map3d(emptyArray(), emptyArray(), outputRkw.zAxis)
+                            BinWriter.write(BinFilePreferences.file.value, tableDef, zOnly)
                             writeStatus = WriteStatus.Success
                         } catch (e: Exception) {
                             e.printStackTrace()
@@ -726,28 +731,35 @@ fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
                                         scope.launch {
                                             withContext(Dispatchers.IO) {
                                                 var successCount = 0
-                                                var errorCount = 0
+                                                val failures = mutableListOf<String>()
                                                 for (table in selected) {
                                                     try {
                                                         val corrected = FuelTrimBulkApply.applyCorrections(
                                                             table.map, diag.corrections, diag.rpmBins, diag.loadBins
                                                         )
+                                                        // Trims only change z — write z ONLY, never the axes
+                                                        // (see the single-write path for rationale).
+                                                        val zOnly = Map3d(emptyArray(), emptyArray(), corrected.zAxis)
                                                         BinWriter.write(
                                                             BinFilePreferences.file.value,
                                                             table.tableDefinition,
-                                                            corrected
+                                                            zOnly
                                                         )
                                                         successCount++
                                                     } catch (e: Exception) {
                                                         e.printStackTrace()
-                                                        errorCount++
+                                                        failures.add(
+                                                            "${table.metadata.displayLabel}: ${e.message ?: e.javaClass.simpleName}"
+                                                        )
                                                     }
                                                 }
                                                 withContext(Dispatchers.Main) {
-                                                    bulkApplyProgress = if (errorCount == 0) {
+                                                    bulkApplyProgress = if (failures.isEmpty()) {
                                                         "✓ Applied corrections to $successCount table(s)"
                                                     } else {
-                                                        "⚠ $successCount succeeded, $errorCount failed"
+                                                        "⚠ $successCount succeeded, ${failures.size} failed — " +
+                                                            failures.take(3).joinToString("; ") +
+                                                            (if (failures.size > 3) " (+${failures.size - 3} more)" else "")
                                                     }
                                                     bulkApplyRunning = false
                                                 }
