@@ -10,6 +10,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import ui.components.StabilityBadge
 import ui.screens.a2lecu.A2lToEcuScreen
+import ui.screens.a2ltoxdf.A2lToXdfScreen
 import ui.screens.axisrescaler.AxisRescalerScreen
 import ui.screens.logger.LoggerScreen
 import ui.screens.sniffer.RamSnifferScreen
@@ -54,6 +55,7 @@ fun ToolsContent(navState: NavigationState) {
         Box(modifier = Modifier.fillMaxSize().weight(1f)) {
             when (selectedTab) {
                 ToolsTab.A2L_GENERATOR -> A2lToEcuScreen()
+                ToolsTab.XDF_GENERATOR -> A2lToXdfScreen()
                 ToolsTab.LOGGER -> LoggerScreen(ecuPlatform = navState.ecuPlatform)
                 ToolsTab.RAM_SNIFFER -> RamSnifferScreen()
                 ToolsTab.AXIS_RESCALER -> AxisRescalerScreen(preloadedMap = navState.axisRescalerPreloadMap)
