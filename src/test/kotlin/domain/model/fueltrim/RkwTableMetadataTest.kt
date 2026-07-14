@@ -123,7 +123,7 @@ class RkwTableMetadataTest {
     fun `parse defaults to HO1 when no HO variant present`() {
         val meta = RkwTableMetadata.parse(
             tableName = "Some table",
-            tableDescription = "Some rk_w correction table"
+            tableDescription = "Some correction table = rk_w"
         )
         assertNotNull(meta)
         assertEquals(1, meta.hoVariant)
@@ -227,7 +227,7 @@ class RkwTableMetadataTest {
     fun `parse handles rk_w detected only via description`() {
         val meta = RkwTableMetadata.parse(
             tableName = "Custom correction table",
-            tableDescription = "Custom rk_w correction"
+            tableDescription = "Custom correction = rk_w"
         )
         assertNotNull(meta)
         assertEquals(FuelType.UNKNOWN, meta.fuelType)
@@ -266,12 +266,29 @@ class RkwTableMetadataTest {
     }
 
     @Test
-    fun `isRkwTable detects via tableDescription rk_w`() {
+    fun `isRkwTable detects via tableDescription map-variable rk_w`() {
+        // Only the map-variable position ("= rk_w") counts — a bare "rk_w" mention
+        // matched maps that merely have rk_w as an AXIS (e.g. KFLBKAPP
+        // "nmot(1/min) vs rk_w(%)"), and bulk apply then wrote trims into them.
         assertTrue(
             RkwTableMetadata.isRkwTable(
                 tableName = "Some table",
-                tableDescription = "Contains rk_w keyword"
+                tableDescription = "Custom correction rl_w(%) vs nmot_w(1/min) = rk_w"
             )
+        )
+        assertFalse(
+            RkwTableMetadata.isRkwTable(
+                tableName = "Characteristic map LBK setpoint for the application",
+                tableDescription = "KFLBKAPP nmot(1/min) vs rk_w(%) = --"
+            ),
+            "rk_w as an axis reference is not a trim table"
+        )
+        assertFalse(
+            RkwTableMetadata.isRkwTable(
+                tableName = "Rel fuel mass fac inj type corr HO1 x rl_w(%)",
+                tableDescription = "x axis"
+            ),
+            "axis helper tables are never trim targets"
         )
     }
 

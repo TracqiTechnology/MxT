@@ -56,11 +56,24 @@ data class RkwTableMetadata(
         /**
          * Returns `true` when the table name or description indicate an rk_w
          * (relative fuel-mass correction) table.
+         *
+         * Two classes of false positive are explicitly excluded — both would let
+         * bulk apply write fuel-trim multipliers into non-trim data:
+         *  - axis helper tables ("… HO1 x rl_w(%)", description "x axis"): their
+         *    z data IS the axis breakpoints — trim-writing them corrupts the axis;
+         *  - tables that merely have rk_w as an *axis* (e.g. KFLBKAPP
+         *    "nmot(1/min) vs rk_w(%)"): only a "= rk_w" map-variable reference in
+         *    the description counts, not any mention of rk_w.
          */
         fun isRkwTable(tableName: String, tableDescription: String): Boolean {
+            // Axis helper tables are never trim targets.
+            if (tableDescription.equals("x axis", ignoreCase = true) ||
+                tableDescription.equals("y axis", ignoreCase = true)
+            ) return false
+
             return tableName.contains("RelMCor", ignoreCase = true) ||
                 tableName.contains("Rel fuel mass fac inj type corr", ignoreCase = true) ||
-                tableDescription.contains("rk_w", ignoreCase = true) ||
+                tableDescription.contains("= rk_w", ignoreCase = true) ||
                 tableDescription.contains("RelMCor", ignoreCase = true)
         }
 
