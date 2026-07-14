@@ -1,0 +1,223 @@
+/begin COMPU_METHOD
+
+    t1sxs_uw_q1
+    ""
+    RAT_FUNC
+    "%6.2"
+    "s"
+
+    COEFFS 0 1 0 0 0 1 
+    
+/end COMPU_METHOD
+
+/begin COMPU_METHOD
+
+    dez
+    ""
+    RAT_FUNC
+    "%6.2"
+    ""
+
+    COEFFS 0 1 0 0 0 1 
+    
+/end COMPU_METHOD
+
+/begin COMPU_METHOD
+
+    nmot_uw_q0p25
+    ""
+    RAT_FUNC
+    "%6.3"
+    "1/min"
+
+    COEFFS 0 1 0 0 0 0.25 
+    
+/end COMPU_METHOD
+
+/begin COMPU_METHOD
+
+    fak_ub_b1
+    ""
+    RAT_FUNC
+    "%6.4"
+    "-"
+
+    COEFFS 0 256 0 0 0 1 
+    
+/end COMPU_METHOD
+
+/begin COMPU_METHOD
+
+    rel_uw_q0p0234
+    ""
+    RAT_FUNC
+    "%6.4"
+    "%"
+
+    COEFFS 0 32 0 0 0 0.75 
+    
+/end COMPU_METHOD
+
+/begin COMPU_METHOD
+
+    rel_uw_b100
+    ""
+    RAT_FUNC
+    "%6.4"
+    "%"
+
+    COEFFS 0 65536 0 0 0 100 
+    
+/end COMPU_METHOD
+
+/begin RECORD_LAYOUT KfAxUwAyUwSstxUwSstyUwWUw
+
+    NO_AXIS_PTS_X     1 UWORD
+    NO_AXIS_PTS_Y     2 UWORD
+    AXIS_PTS_X        3 UWORD INDEX_INCR DIRECT
+    AXIS_PTS_Y        4 UWORD INDEX_INCR DIRECT
+    FNC_VALUES        5 UWORD COLUMN_DIR DIRECT
+
+/end RECORD_LAYOUT
+
+/begin RECORD_LAYOUT KwWU8
+
+    FNC_VALUES        1 UBYTE COLUMN_DIR DIRECT
+
+/end RECORD_LAYOUT
+
+/begin RECORD_LAYOUT KlAxU8SstxU16WU8
+
+    NO_AXIS_PTS_X     1 UBYTE
+    AXIS_PTS_X        2 UWORD INDEX_INCR DIRECT
+    FNC_VALUES        3 UBYTE COLUMN_DIR DIRECT
+
+/end RECORD_LAYOUT
+
+/begin RECORD_LAYOUT KwUb
+
+    FNC_VALUES        1 UBYTE COLUMN_DIR DIRECT
+
+/end RECORD_LAYOUT
+
+/begin CHARACTERISTIC
+
+    KFMIOP
+    "Kennfeld optimales Motormoment"
+    MAP
+    0x1CE5C4
+    KfAxUwAyUwSstxUwSstyUwWUw
+    99.99847
+    rel_uw_b100
+    0.00
+    99.99847
+
+    FORMAT "%8.5"
+    
+    /begin IF_DATA ASAP1B_CCP DP_BLOB 0x00 0x5CE5C4 410 /end IF_DATA
+    /begin IF_DATA ETK  DP_BLOB 0x90E5C4  0x19A  /end IF_DATA 
+    /begin IF_DATA ASAP1B_KWP2000 DP_BLOB 0x5CE5C4 0x19A /end IF_DATA 
+
+    /begin AXIS_DESCR
+
+        STD_AXIS
+        nmot_w
+        nmot_uw_q0p25
+        16
+        0.00
+        16383.75
+
+        FORMAT "%8.2"
+        DEPOSIT ABSOLUTE
+
+    /end AXIS_DESCR
+
+    /begin AXIS_DESCR
+
+        STD_AXIS
+        rl_w
+        rel_uw_q0p0234
+        11
+        0.00
+        1535.977
+
+        FORMAT "%8.3"
+        DEPOSIT ABSOLUTE
+
+    /end AXIS_DESCR
+
+/end CHARACTERISTIC
+
+/begin CHARACTERISTIC
+
+    BSGTYP
+    "Bremsensteuergeräte-Typ"
+    VALUE
+    0x1E0110
+    KwWU8
+    255.0
+    dez
+    0.00
+    255.0
+
+    FORMAT "%5.1"
+    
+    /begin IF_DATA ASAP1B_CCP DP_BLOB 0x00 0x5E0110 1 /end IF_DATA
+    /begin IF_DATA ETK  DP_BLOB 0x920110  0x1  /end IF_DATA 
+    /begin IF_DATA ASAP1B_KWP2000 DP_BLOB 0x5E0110 0x1 /end IF_DATA 
+
+/end CHARACTERISTIC
+
+/begin CHARACTERISTIC
+
+    BZ_MSR_UC
+    ""
+    VALUE
+    0x1C37AC
+    KwUb
+    255.0
+    dez
+    0.00
+    255.0
+
+    FORMAT "%5.1"
+    
+    /begin IF_DATA ASAP1B_CCP DP_BLOB 0x00 0x5C37AC 1 /end IF_DATA
+    /begin IF_DATA ETK  DP_BLOB 0x9037AC  0x1  /end IF_DATA 
+    /begin IF_DATA ASAP1B_KWP2000 DP_BLOB 0x5C37AC 0x1 /end IF_DATA 
+
+/end CHARACTERISTIC
+
+/begin CHARACTERISTIC
+
+    ABKKATTAB
+    "Abkühlkurve in Abhängigkeit von der Abstellzeit"
+    CURVE
+    0x1D7E02
+    KlAxU8SstxU16WU8
+    0.9961
+    fak_ub_b1
+    0.00
+    0.9961
+
+    FORMAT "%6.4"
+    
+    /begin IF_DATA ASAP1B_CCP DP_BLOB 0x00 0x5D7E02 20 /end IF_DATA
+    /begin IF_DATA ETK  DP_BLOB 0x917E02  0x14  /end IF_DATA 
+    /begin IF_DATA ASAP1B_KWP2000 DP_BLOB 0x5D7E02 0x14 /end IF_DATA 
+
+    /begin AXIS_DESCR
+
+        STD_AXIS
+        tabst_w
+        t1sxs_uw_q1
+        6
+        0.00
+        65535.00
+
+        FORMAT "%8.2"
+        DEPOSIT ABSOLUTE
+
+    /end AXIS_DESCR
+
+/end CHARACTERISTIC
