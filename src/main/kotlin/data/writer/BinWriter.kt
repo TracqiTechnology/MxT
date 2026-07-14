@@ -26,47 +26,65 @@ object BinWriter {
     fun isBinWriteSupported(): Boolean = true
 
     fun write(file: File, tableDefinition: TableDefinition, map: Map3d) {
+        // ── Validate EVERYTHING before writing a single byte (all-or-nothing). ──
+        // A guard firing between partial writes must never leave a corrupted bin.
+        //
+        // Axis writes only apply when the map carries that axis's breakpoints.
+        // A scalar map (MED17 1×1 KFMIOP) has empty x/y axes and writes only z.
+        // Guards compare against indexCount (the axis's own breakpoint count);
+        // rowCount/columnCount mirror the linked z-table dims, not the axis length.
+        val xAxis = tableDefinition.xAxis?.takeIf { it.address != INVALID_ADDRESS && map.xAxis.isNotEmpty() }
+        val yAxis = tableDefinition.yAxis?.takeIf { it.address != INVALID_ADDRESS && map.yAxis.isNotEmpty() }
+        val zAxis = tableDefinition.zAxis.takeIf { it.address != INVALID_ADDRESS }
+
+        xAxis?.let { axis ->
+            require(map.xAxis.size == axis.indexCount) {
+                "Refusing to write '${tableDefinition.tableName}': x-axis has ${map.xAxis.size} " +
+                    "points but the binary table holds ${axis.indexCount}. Breakpoint counts cannot change on write."
+            }
+        }
+        yAxis?.let { axis ->
+            require(map.yAxis.size == axis.indexCount) {
+                "Refusing to write '${tableDefinition.tableName}': y-axis has ${map.yAxis.size} " +
+                    "points but the binary table holds ${axis.indexCount}. Breakpoint counts cannot change on write."
+            }
+        }
+        val zRows = maxOf(tableDefinition.zAxis.rowCount, 1)
+        val zCols = maxOf(tableDefinition.zAxis.columnCount, 1)
+        zAxis?.let {
+            require(map.zAxis.size == zRows && map.zAxis.all { row -> row.size == zCols }) {
+                "Refusing to write '${tableDefinition.tableName}': z-data is " +
+                    "${map.zAxis.size}×${map.zAxis.firstOrNull()?.size ?: 0} but the binary table is " +
+                    "$zRows×$zCols. Map dimensions cannot change on write."
+            }
+        }
+
         RandomAccessFile(file, "rws").use { raf ->
-            // Axis writes only apply when the map carries that axis's breakpoints.
-            // A scalar map (MED17 1×1 KFMIOP) has empty x/y axes and writes only z.
-            // The guard compares against indexCount (the axis's own breakpoint count);
-            // rowCount/columnCount mirror the linked z-table dims, not the axis length.
-            tableDefinition.xAxis?.takeIf { it.address != INVALID_ADDRESS && map.xAxis.isNotEmpty() }?.let { axis ->
-                require(map.xAxis.size == axis.indexCount) {
-                    "Refusing to write '${tableDefinition.tableName}': x-axis has ${map.xAxis.size} " +
-                        "points but the binary table holds ${axis.indexCount}. Breakpoint counts cannot change on write."
-                }
-                val xFlat = DoubleArray(maxOf(axis.rowCount, 1) * maxOf(axis.indexCount, 1))
+            // An axis is 1-D: write EXACTLY indexCount elements. Sizing by
+            // rowCount × indexCount (the pre-2.1.3 behaviour) ballooned linked-axis
+            // buffers to the linked table's z dims and the zero tail overwrote
+            // whatever follows the axis in flash — zeroing rk_w's x axis and z rows.
+            xAxis?.let { axis ->
+                val xFlat = DoubleArray(axis.indexCount)
                 for (i in map.xAxis.indices) xFlat[i] = map.xAxis[i]
                 write(raf, axis, xFlat)
             }
 
-            tableDefinition.yAxis?.takeIf { it.address != INVALID_ADDRESS && map.yAxis.isNotEmpty() }?.let { axis ->
-                require(map.yAxis.size == axis.indexCount) {
-                    "Refusing to write '${tableDefinition.tableName}': y-axis has ${map.yAxis.size} " +
-                        "points but the binary table holds ${axis.indexCount}. Breakpoint counts cannot change on write."
-                }
-                val yFlat = DoubleArray(maxOf(axis.rowCount, 1) * maxOf(axis.indexCount, 1))
+            yAxis?.let { axis ->
+                val yFlat = DoubleArray(axis.indexCount)
                 for (i in map.yAxis.indices) yFlat[i] = map.yAxis[i]
                 write(raf, axis, yFlat)
             }
 
-            tableDefinition.zAxis.takeIf { it.address != INVALID_ADDRESS }?.let { axis ->
-                val rows = maxOf(axis.rowCount, 1)
-                val cols = maxOf(axis.columnCount, 1)
-                require(map.zAxis.size == rows && map.zAxis.all { it.size == cols }) {
-                    "Refusing to write '${tableDefinition.tableName}': z-data is " +
-                        "${map.zAxis.size}×${map.zAxis.firstOrNull()?.size ?: 0} but the binary table is " +
-                        "$rows×$cols. Map dimensions cannot change on write."
-                }
-                val zFlat = DoubleArray(rows * cols)
+            zAxis?.let { axis ->
+                val zFlat = DoubleArray(zRows * zCols)
                 var index = 0
                 if (axis.isColumnMajor) {
                     // COLUMN_DIR: write column-by-column so the on-disk layout matches
                     // what BinParser reads back (column-major storage, e.g. MED9 KFMIOP).
-                    for (j in 0 until cols) for (i in 0 until rows) zFlat[index++] = map.zAxis[i][j]
+                    for (j in 0 until zCols) for (i in 0 until zRows) zFlat[index++] = map.zAxis[i][j]
                 } else {
-                    for (i in 0 until rows) for (j in 0 until cols) zFlat[index++] = map.zAxis[i][j]
+                    for (i in 0 until zRows) for (j in 0 until zCols) zFlat[index++] = map.zAxis[i][j]
                 }
                 write(raf, axis, zFlat)
             }
