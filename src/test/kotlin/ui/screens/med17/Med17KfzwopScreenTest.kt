@@ -13,7 +13,7 @@ import kotlin.test.assertTrue
  *  - Profile application resolves KfzwopPreferences
  *  - Screen renders without "Not configured" when profile is applied
  *  - Write button is enabled when prerequisites are met
- *  - Clicking Write + Yes writes to BIN and changes bytes
+ *  - Clicking Write + Yes performs a corruption-free identity write
  *  - Unconfigured state correctly shows "Not configured"
  */
 @OptIn(ExperimentalTestApi::class)
@@ -54,7 +54,7 @@ class Med17KfzwopScreenTest : Med17ScreenTestBase() {
             ui.screens.kfzwop.KfzwopScreen()
         }
 
-        val kfzwopPair = KfzwopPreferences.getSelectedMap()!!
+        KfzwopPreferences.getSelectedMap()!!
 
         // Click Write
         onNodeWithText("Write KFZWOP").performClick()
@@ -62,9 +62,13 @@ class Med17KfzwopScreenTest : Med17ScreenTestBase() {
         onNodeWithText("Yes").performClick()
         waitForIdle()
 
-        // Binary diff: only KFZWOP address range should be modified
-        BinaryDiffHelper.assertOnlyExpectedBytesChanged(
-            stockBinCopy, tempBinFile, kfzwopPair.first
+        // With no axis edits the rescale is identity, so the write must be a
+        // byte-perfect identity round-trip. (Before the linked-axis buffer fix
+        // this "passed" only because oversized axis writes zeroed the shared
+        // linked axis tables — i.e. the corruption itself registered as change.)
+        assertTrue(
+            stockBinCopy.readBytes().contentEquals(tempBinFile.readBytes()),
+            "unedited KFZWOP write must leave the BIN byte-identical (no axis-spill corruption)"
         )
     }
 
