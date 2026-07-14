@@ -65,7 +65,7 @@ class Med17KfzwScreenTest : Med17ScreenTestBase() {
     fun kfzwWriteProducesValidBinaryOutput() = runComposeUiTest {
         setContent { ui.screens.kfzw.KfzwScreen() }
 
-        val kfzwPair = KfzwPreferences.getSelectedMap()!!
+        KfzwPreferences.getSelectedMap()!!
 
         // Click Write
         onNodeWithText("Write KFZW").performClick()
@@ -73,9 +73,13 @@ class Med17KfzwScreenTest : Med17ScreenTestBase() {
         onNodeWithText("Yes").performClick()
         waitForIdle()
 
-        // Binary diff: only KFZW address range should be modified
-        BinaryDiffHelper.assertOnlyExpectedBytesChanged(
-            stockBinCopy, tempBinFile, kfzwPair.first
+        // With no edits the output equals the input, so the write must be a
+        // byte-perfect identity round-trip. (Before the linked-axis buffer fix
+        // this "passed" only because oversized axis writes zeroed the shared
+        // linked axis tables — i.e. the corruption itself registered as change.)
+        assertTrue(
+            stockBinCopy.readBytes().contentEquals(tempBinFile.readBytes()),
+            "unedited KFZW write must leave the BIN byte-identical (no axis-spill corruption)"
         )
     }
 

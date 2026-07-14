@@ -1,5 +1,6 @@
 package data.parser.bin
 
+import data.parser.a2l.A2lCalibrationParser
 import data.parser.csv.WinOlsCsvDefinitionAdapter
 import data.parser.csv.WinOlsCsvMapDefinition
 import data.parser.csv.WinOlsCsvParser
@@ -37,17 +38,19 @@ object BinParser {
                 BinFilePreferences.file,
                 XdfParser.tableDefinitions,
                 WinOlsCsvParser.definitions,
-                KpHintParser.definitions
-            ) { file, xdfDefs, csvDefs, kpDefs ->
-                arrayOf(file, xdfDefs, csvDefs, kpDefs)
+                KpHintParser.definitions,
+                A2lCalibrationParser.tableDefinitions
+            ) { file, xdfDefs, csvDefs, kpDefs, a2lDefs ->
+                arrayOf(file, xdfDefs, csvDefs, kpDefs, a2lDefs)
             }.collect { args ->
                 @Suppress("UNCHECKED_CAST")
-                val file = args[0] as File
+                val file    = args[0] as File
                 val xdfDefs = args[1] as List<TableDefinition>
                 val csvDefs = args[2] as List<WinOlsCsvMapDefinition>
-                val kpDefs = args[3] as List<KpMapDefinition>
+                val kpDefs  = args[3] as List<KpMapDefinition>
+                val a2lDefs = args[4] as List<TableDefinition>
                 binaryFile = file
-                val merged = mergeDefinitions(xdfDefs, csvDefs, kpDefs)
+                val merged = mergeDefinitions(xdfDefs, csvDefs, kpDefs, a2lDefs)
                 if (file.exists() && file.isFile) {
                     try { parseMutex.withLock { parse(FileInputStream(file), merged) } }
                     catch (e: IOException) { e.printStackTrace() }
@@ -60,7 +63,8 @@ object BinParser {
                     val merged = mergeDefinitions(
                         XdfParser.tableDefinitions.value,
                         WinOlsCsvParser.definitions.value,
-                        KpHintParser.definitions.value
+                        KpHintParser.definitions.value,
+                        A2lCalibrationParser.tableDefinitions.value
                     )
                     try { parseMutex.withLock { parse(FileInputStream(binaryFile), merged) } }
                     catch (e: IOException) { e.printStackTrace() }
@@ -70,45 +74,35 @@ object BinParser {
     }
 
     /**
-     * Merge XDF, CSV-derived, and KP-derived table definitions.
-     * Priority: XDF > CSV > KP — each source only fills gaps left by higher-priority sources.
+     * Merge table definitions from all sources.
+     * Priority: XDF > CSV > KP > A2L — each source only fills gaps left by higher-priority sources.
+     *
+     * The A2L source ([a2lDefs]) provides calibration maps parsed from CHARACTERISTIC blocks.
+     * This allows MED9 users to load a binary + A2L without needing an XDF file.
      */
     internal fun mergeDefinitions(
         xdfDefs: List<TableDefinition>,
         csvDefs: List<WinOlsCsvMapDefinition>,
-        kpDefs: List<KpMapDefinition> = emptyList()
+        kpDefs: List<KpMapDefinition> = emptyList(),
+        a2lDefs: List<TableDefinition> = emptyList()
     ): List<TableDefinition> {
         val csvTableDefs = if (csvDefs.isNotEmpty()) WinOlsCsvDefinitionAdapter.toTableDefinitions(csvDefs) else emptyList()
-        val kpTableDefs = if (kpDefs.isNotEmpty()) KpDefinitionAdapter.toTableDefinitions(kpDefs) else emptyList()
-
-        if (csvTableDefs.isEmpty() && kpTableDefs.isEmpty()) return xdfDefs
-        if (xdfDefs.isEmpty() && csvTableDefs.isEmpty()) return kpTableDefs
-        if (xdfDefs.isEmpty() && kpTableDefs.isEmpty()) return csvTableDefs
+        val kpTableDefs  = if (kpDefs.isNotEmpty()) KpDefinitionAdapter.toTableDefinitions(kpDefs) else emptyList()
 
         val names = mutableSetOf<String>()
         val result = mutableListOf<TableDefinition>()
 
-        // XDF first (highest priority)
-        for (def in xdfDefs) {
-            names.add(def.tableName.lowercase())
-            result.add(def)
-        }
-
-        // CSV fills gaps
-        for (def in csvTableDefs) {
-            if (def.tableName.lowercase() !in names) {
-                names.add(def.tableName.lowercase())
-                result.add(def)
+        fun addIfNew(defs: List<TableDefinition>) {
+            for (def in defs) {
+                val key = def.tableName.lowercase()
+                if (key !in names) { names.add(key); result.add(def) }
             }
         }
 
-        // KP fills remaining gaps
-        for (def in kpTableDefs) {
-            if (def.tableName.lowercase() !in names) {
-                names.add(def.tableName.lowercase())
-                result.add(def)
-            }
-        }
+        addIfNew(xdfDefs)       // highest priority
+        addIfNew(csvTableDefs)
+        addIfNew(kpTableDefs)
+        addIfNew(a2lDefs)       // lowest priority — fills gaps when no XDF exists
 
         return result
     }

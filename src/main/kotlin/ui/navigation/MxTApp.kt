@@ -18,6 +18,7 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import data.model.EcuPlatform
 import data.model.StabilityLevel
+import data.parser.a2l.A2lCalibrationParser
 import data.preferences.bin.BinFilePreferences
 import data.preferences.xdf.XdfFilePreferences
 import ui.components.StabilityBadge
@@ -27,11 +28,16 @@ import ui.screens.optimizer.OptimizerScreen
 @Composable
 fun MxTApp(navState: NavigationState = remember { NavigationState() }) {
 
-    val xdfFile by XdfFilePreferences.file.collectAsState()
-    val binFile by BinFilePreferences.file.collectAsState()
+    val xdfFile    by XdfFilePreferences.file.collectAsState()
+    val binFile    by BinFilePreferences.file.collectAsState()
+    val a2lDefs    by A2lCalibrationParser.tableDefinitions.collectAsState()
 
-    val isConfigured = xdfFile.exists() && xdfFile.isFile &&
-        binFile.exists() && binFile.isFile
+    val binLoaded  = binFile.exists() && binFile.isFile
+    val xdfLoaded  = xdfFile.exists() && xdfFile.isFile
+    val a2lLoaded  = a2lDefs.isNotEmpty()
+
+    // Calibration requires a BIN + at least one definition source (XDF or A2L)
+    val isConfigured = binLoaded && (xdfLoaded || a2lLoaded)
 
     Surface(modifier = Modifier.fillMaxSize()) {
         Row(modifier = Modifier.fillMaxSize()) {
