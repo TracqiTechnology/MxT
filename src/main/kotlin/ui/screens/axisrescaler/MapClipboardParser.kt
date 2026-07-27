@@ -23,8 +23,17 @@ object MapClipboardParser {
      *         if the input is blank or cannot be parsed into a valid map.
      */
     fun parseTsv(text: String): Map3d? {
-        val lines = text.trim().lines().filter { it.isNotBlank() }
-        if (lines.isEmpty()) return null
+        return try {
+            parseTsvOrThrow(text)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+
+    fun parseTsvOrThrow(text: String): Map3d {
+        require(text.isNotBlank()) { "Clipboard is empty" }
+        val lines = text.trimEnd().lines().filter { it.isNotBlank() }
+        require(lines.size >= 2) { "Paste a header row and at least one data row" }
 
         val headerCells = lines[0].split("\t").map { it.trim() }
 
@@ -38,40 +47,61 @@ object MapClipboardParser {
 
         if (firstCellIsHeader) {
             // Top-left cell is a label or empty — X-axis starts at index 1
-            xValues = headerCells.drop(1).mapNotNull { it.toDoubleOrNull() }
+            xValues = headerCells.drop(1).mapIndexed { index, value ->
+                value.toDoubleOrNull()
+                    ?: throw IllegalArgumentException("Invalid X-axis value in column ${index + 1}: '$value'")
+            }
             dataLines = lines.drop(1)
         } else {
             // Entire first row is numeric — treat it all as X-axis,
             // and data rows have Y value in first column
-            xValues = headerCells.mapNotNull { it.toDoubleOrNull() }
+            xValues = headerCells.mapIndexed { index, value ->
+                value.toDoubleOrNull()
+                    ?: throw IllegalArgumentException("Invalid X-axis value in column ${index + 1}: '$value'")
+            }
             dataLines = lines.drop(1)
         }
 
-        if (xValues.isEmpty() || dataLines.isEmpty()) return null
+        require(xValues.isNotEmpty()) { "No X-axis values found" }
+        require(xValues.all(Double::isFinite)) { "X-axis values must be finite" }
+        require(xValues.zipWithNext().all { (left, right) -> right > left }) {
+            "X-axis must be strictly monotonically increasing"
+        }
 
         val yValues = mutableListOf<Double>()
         val zRows = mutableListOf<Array<Double>>()
 
-        for (line in dataLines) {
+        for ((rowIndex, line) in dataLines.withIndex()) {
             val cells = line.split("\t").map { it.trim() }
-            if (cells.isEmpty()) continue
+            require(cells.size == xValues.size + 1) {
+                "Row ${rowIndex + 1} has ${cells.size - 1} Z values; expected ${xValues.size}"
+            }
 
-            val yVal = cells[0].toDoubleOrNull() ?: continue
+            val yVal = cells[0].toDoubleOrNull()
+                ?: throw IllegalArgumentException("Invalid Y-axis value in row ${rowIndex + 1}: '${cells[0]}'")
             yValues.add(yVal)
 
-            val zRow = cells.drop(1).map { it.toDoubleOrNull() ?: 0.0 }
-            // Pad or trim to match X-axis length
-            val paddedRow = Array(xValues.size) { idx ->
-                if (idx < zRow.size) zRow[idx] else 0.0
+            val zRow = Array(xValues.size) { columnIndex ->
+                val raw = cells[columnIndex + 1]
+                raw.toDoubleOrNull() ?: throw IllegalArgumentException(
+                    "Invalid Z value at row ${rowIndex + 1}, column ${columnIndex + 1}: '$raw'"
+                )
             }
-            zRows.add(paddedRow)
+            zRows.add(zRow)
         }
 
-        if (yValues.isEmpty() || zRows.isEmpty()) return null
+        require(yValues.isNotEmpty()) { "No data rows found" }
+        require(yValues.all(Double::isFinite)) { "Y-axis values must be finite" }
+        require(yValues.zipWithNext().all { (left, right) -> right > left }) {
+            "Y-axis must be strictly monotonically increasing"
+        }
+        require(zRows.all { row -> row.all(Double::isFinite) }) {
+            "Z values must be finite"
+        }
 
         return Map3d(
-            xValues.toTypedArray().toDoubleArray().toTypedArray(),
-            yValues.toTypedArray().toDoubleArray().toTypedArray(),
+            xValues.toTypedArray(),
+            yValues.toTypedArray(),
             zRows.toTypedArray()
         )
     }

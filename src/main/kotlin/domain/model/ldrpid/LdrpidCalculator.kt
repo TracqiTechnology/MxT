@@ -4,7 +4,6 @@ import data.contract.Me7LogFileContract
 import domain.math.Index
 import domain.math.MonotoneCubicInterpolator
 import domain.math.map.Map3d
-import java.util.Collections
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.roundToInt
@@ -21,7 +20,17 @@ object LdrpidCalculator {
         /** Per-cell sample count for KFLDRL [rpmIdx][pressureIdx]. Derived from non-linear table. */
         val kfldrlSampleCounts: Array<IntArray> = emptyArray(),
         /** Per-cell sample count for KFLDIMX [rpmIdx][pressureIdx]. Derived from KFLDRL. */
-        val kfldimxSampleCounts: Array<IntArray> = emptyArray()
+        val kfldimxSampleCounts: Array<IntArray> = emptyArray(),
+        val logDiagnostics: List<LogDiagnosticRow> = emptyList()
+    )
+
+    data class LogDiagnosticRow(
+        val rpm: Double,
+        val sampleCount: Int,
+        val measuredDutyCells: Int,
+        val averageAbsolutePressureErrorMbar: Double?,
+        val maximumOvershootMbar: Double?,
+        val percentWithinTolerance: Double?
     )
 
     private const val DEFAULT_RPM_ROWS = 8
@@ -60,11 +69,14 @@ object LdrpidCalculator {
         // Round to nearest 500 RPM for clean breakpoints
         val roundedMin = (floor(minRpm / 500.0) * 500).coerceAtLeast(1000.0)
         val roundedMax = (ceil(maxRpm / 500.0) * 500).coerceAtMost(9000.0)
-        val step = ((roundedMax - roundedMin) / (numRows - 1)).coerceAtLeast(500.0)
+        if (roundedMax <= roundedMin) return arrayOf(roundedMin)
+        val rowCount = minOf(
+            numRows,
+            ((roundedMax - roundedMin) / 500.0).toInt() + 1
+        ).coerceAtLeast(2)
+        val step = (roundedMax - roundedMin) / (rowCount - 1)
 
-        return Array(numRows) { i ->
-            (roundedMin + step * i).coerceAtMost(roundedMax)
-        }
+        return Array(rowCount) { i -> roundedMin + step * i }
     }
 
     /**
@@ -129,20 +141,17 @@ object LdrpidCalculator {
             val row = nonLinearTable[rowIdx]
             val filledIndices = row.indices.filter { count[rowIdx][it] > 0 }
 
-            if (filledIndices.isEmpty()) {
-                // No data in this RPM row — fill with small ascending placeholders
-                for (i in row.indices) row[i] = 0.1 + i * 0.01
-            } else {
+            if (filledIndices.isNotEmpty()) {
                 val firstFilled = filledIndices.first()
                 val lastFilled = filledIndices.last()
 
                 // Interior gaps (between first and last known points): monotone cubic if enough data
                 if (filledIndices.size >= 3) {
-                    val knownX = filledIndices.map { it.toDouble() }.toDoubleArray()
+                    val knownX = filledIndices.map { dutyAxis[it] }.toDoubleArray()
                     val knownY = filledIndices.map { row[it] }.toDoubleArray()
                     for (i in (firstFilled + 1) until lastFilled) {
                         if (row[i] == 0.0) {
-                            row[i] = MonotoneCubicInterpolator.interpolate(knownX, knownY, i.toDouble())
+                            row[i] = MonotoneCubicInterpolator.interpolate(knownX, knownY, dutyAxis[i])
                         }
                     }
                 } else {
@@ -152,7 +161,9 @@ object LdrpidCalculator {
                             val left = filledIndices.lastOrNull { it < i }
                             val right = filledIndices.firstOrNull { it > i }
                             if (left != null && right != null) {
-                                val t = (i - left).toDouble() / (right - left)
+                                val span = dutyAxis[right] - dutyAxis[left]
+                                val t = if (span == 0.0) 0.0 else
+                                    (dutyAxis[i] - dutyAxis[left]) / span
                                 row[i] = row[left] + t * (row[right] - row[left])
                             }
                         }
@@ -164,8 +175,11 @@ object LdrpidCalculator {
                     if (row[i] == 0.0) {
                         val prevFilled = filledIndices.lastOrNull { it < lastFilled }
                         row[i] = if (prevFilled != null) {
-                            val slope = (row[lastFilled] - row[prevFilled]) / (lastFilled - prevFilled)
-                            (row[lastFilled] + slope * (i - lastFilled)).coerceAtLeast(row[lastFilled])
+                            val span = dutyAxis[lastFilled] - dutyAxis[prevFilled]
+                            val slope = if (span == 0.0) 0.0 else
+                                (row[lastFilled] - row[prevFilled]) / span
+                            (row[lastFilled] + slope * (dutyAxis[i] - dutyAxis[lastFilled]))
+                                .coerceAtLeast(row[lastFilled])
                         } else {
                             row[lastFilled] * (1.0 + 0.02 * (i - lastFilled))
                         }
@@ -182,13 +196,17 @@ object LdrpidCalculator {
                 }
             }
 
-            // Enforce minimum and monotonicity (higher duty → higher or equal boost)
-            for (i in row.indices) {
-                if (row[i] <= 0.0 || row[i].isNaN()) row[i] = 0.1
-            }
-            for (i in 1 until row.size) {
-                if (row[i] < row[i - 1]) {
-                    row[i] = row[i - 1] + 0.01
+            if (filledIndices.isNotEmpty()) {
+                // Enforce minimum and monotonicity only on rows supported by the log.
+                for (i in row.indices) {
+                    if (count[rowIdx][i] == 0.0 && (row[i] <= 0.0 || !row[i].isFinite())) {
+                        row[i] = 0.1
+                    }
+                }
+                for (i in 1 until row.size) {
+                    if (count[rowIdx][i] == 0.0 && row[i] < row[i - 1]) {
+                        row[i] = row[i - 1] + 0.01
+                    }
                 }
             }
         }
@@ -251,19 +269,17 @@ object LdrpidCalculator {
             val row = nonLinearTable[rowIdx]
             val filledIndices = row.indices.filter { count[rowIdx][it] > 0 }
 
-            if (filledIndices.isEmpty()) {
-                for (i in row.indices) row[i] = 0.1 + i * 0.01
-            } else {
+            if (filledIndices.isNotEmpty()) {
                 val firstFilled = filledIndices.first()
                 val lastFilled = filledIndices.last()
 
                 // Interior gaps: monotone cubic if enough data
                 if (filledIndices.size >= 3) {
-                    val knownX = filledIndices.map { it.toDouble() }.toDoubleArray()
+                    val knownX = filledIndices.map { dutyAxis[it] }.toDoubleArray()
                     val knownY = filledIndices.map { row[it] }.toDoubleArray()
                     for (i in (firstFilled + 1) until lastFilled) {
                         if (row[i] == 0.0) {
-                            row[i] = MonotoneCubicInterpolator.interpolate(knownX, knownY, i.toDouble())
+                            row[i] = MonotoneCubicInterpolator.interpolate(knownX, knownY, dutyAxis[i])
                         }
                     }
                 } else {
@@ -272,7 +288,9 @@ object LdrpidCalculator {
                             val left = filledIndices.lastOrNull { it < i }
                             val right = filledIndices.firstOrNull { it > i }
                             if (left != null && right != null) {
-                                val t = (i - left).toDouble() / (right - left)
+                                val span = dutyAxis[right] - dutyAxis[left]
+                                val t = if (span == 0.0) 0.0 else
+                                    (dutyAxis[i] - dutyAxis[left]) / span
                                 row[i] = row[left] + t * (row[right] - row[left])
                             }
                         }
@@ -284,8 +302,11 @@ object LdrpidCalculator {
                     if (row[i] == 0.0) {
                         val prevFilled = filledIndices.lastOrNull { it < lastFilled }
                         row[i] = if (prevFilled != null) {
-                            val slope = (row[lastFilled] - row[prevFilled]) / (lastFilled - prevFilled)
-                            (row[lastFilled] + slope * (i - lastFilled)).coerceAtLeast(row[lastFilled])
+                            val span = dutyAxis[lastFilled] - dutyAxis[prevFilled]
+                            val slope = if (span == 0.0) 0.0 else
+                                (row[lastFilled] - row[prevFilled]) / span
+                            (row[lastFilled] + slope * (dutyAxis[i] - dutyAxis[lastFilled]))
+                                .coerceAtLeast(row[lastFilled])
                         } else {
                             row[lastFilled] * (1.0 + 0.02 * (i - lastFilled))
                         }
@@ -302,12 +323,16 @@ object LdrpidCalculator {
                 }
             }
 
-            for (i in row.indices) {
-                if (row[i] <= 0.0 || row[i].isNaN()) row[i] = 0.1
-            }
-            for (i in 1 until row.size) {
-                if (row[i] < row[i - 1]) {
-                    row[i] = row[i - 1] + 0.01
+            if (filledIndices.isNotEmpty()) {
+                for (i in row.indices) {
+                    if (count[rowIdx][i] == 0.0 && (row[i] <= 0.0 || !row[i].isFinite())) {
+                        row[i] = 0.1
+                    }
+                }
+                for (i in 1 until row.size) {
+                    if (count[rowIdx][i] == 0.0 && row[i] < row[i - 1]) {
+                        row[i] = row[i - 1] + 0.01
+                    }
                 }
             }
         }
@@ -315,30 +340,50 @@ object LdrpidCalculator {
         return Pair(Map3d(dutyAxis, rpmAxis, nonLinearTable), sampleCounts)
     }
 
-    fun calculateLinearTable(nonLinearTable: Array<Array<Double>>, kfldrlMap: Map3d): Map3d {
+    fun calculateLinearTable(
+        nonLinearTable: Array<Array<Double>>,
+        kfldrlMap: Map3d,
+        xAxis: Array<Double> = kfldrlMap.xAxis,
+        yAxis: Array<Double> = kfldrlMap.yAxis
+    ): Map3d {
         if (nonLinearTable.isEmpty() || nonLinearTable[0].isEmpty()) {
-            return Map3d(kfldrlMap.xAxis, kfldrlMap.yAxis, emptyArray())
+            return Map3d(xAxis, yAxis, emptyArray())
         }
         val linearTable = Array(nonLinearTable.size) { Array(nonLinearTable[0].size) { 0.0 } }
 
-        for (i in nonLinearTable[0].indices) {
-            val min = nonLinearTable[0][i]
-            val max = nonLinearTable[nonLinearTable.size - 1][i]
-            val step = (max - min) / (nonLinearTable.size - 1)
-
-            for (j in linearTable.indices) {
-                linearTable[j][i] = min + step * j
+        for (rowIndex in nonLinearTable.indices) {
+            val row = nonLinearTable[rowIndex]
+            val supported = row.filter { it > 0.0 && it.isFinite() }
+            if (supported.isEmpty()) continue
+            val min = supported.min()
+            val max = supported.max()
+            for (columnIndex in row.indices) {
+                val fraction = if (row.size <= 1) 0.0 else columnIndex.toDouble() / (row.size - 1)
+                linearTable[rowIndex][columnIndex] = min + (max - min) * fraction
             }
         }
 
-        return Map3d(kfldrlMap.xAxis, kfldrlMap.yAxis, linearTable)
+        return Map3d(xAxis, yAxis, linearTable)
     }
 
-    fun calculateKfldrl(nonLinearTable: Array<Array<Double>>, linearTable: Array<Array<Double>>, kfldrlMap: Map3d): Map3d {
-        val dutyAxis = if (kfldrlMap.xAxis.size >= 2) kfldrlMap.xAxis else deriveDutyAxis(kfldrlMap.xAxis)
+    fun calculateKfldrl(
+        nonLinearTable: Array<Array<Double>>,
+        linearTable: Array<Array<Double>>,
+        kfldrlMap: Map3d,
+        dutyAxis: Array<Double> =
+            if (kfldrlMap.xAxis.size >= 2) kfldrlMap.xAxis else deriveDutyAxis(kfldrlMap.xAxis),
+        rpmAxis: Array<Double> = kfldrlMap.yAxis
+    ): Map3d {
         val kfldrl = Array(nonLinearTable.size) { i ->
             // Pair boost→duty and sort by boost so interpolation x-axis is ascending
-            val pairs = nonLinearTable[i].zip(dutyAxis).sortedBy { it.first }
+            val pairs = nonLinearTable[i].zip(dutyAxis)
+                .filter { it.first > 0.0 && it.first.isFinite() }
+                .sortedBy { it.first }
+            if (pairs.size < 2) {
+                return@Array Array(linearTable[i].size) { column ->
+                    kfldrlMap.zAxis.getOrNull(i)?.getOrNull(column) ?: 0.0
+                }
+            }
             val sortedBoost = pairs.map { it.first }.toDoubleArray()
             val sortedDuty = pairs.map { it.second }.toDoubleArray()
             Array(nonLinearTable[i].size) { j ->
@@ -346,35 +391,67 @@ object LdrpidCalculator {
                 if (result.isNaN()) 0.0 else result
             }
         }
-        return Map3d(dutyAxis, kfldrlMap.yAxis, kfldrl)
+        return Map3d(dutyAxis, rpmAxis, kfldrl)
     }
 
-    fun calculateKfldimx(nonLinearTable: Array<Array<Double>>, linearTable: Array<Array<Double>>, kfldrlMap: Map3d, kfldimxMap: Map3d): Map3d {
+    fun calculateKfldimx(
+        nonLinearTable: Array<Array<Double>>,
+        linearTable: Array<Array<Double>>,
+        kfldrlMap: Map3d,
+        kfldimxMap: Map3d,
+        dutyAxis: Array<Double> =
+            if (kfldrlMap.xAxis.size >= 2) kfldrlMap.xAxis else deriveDutyAxis(kfldrlMap.xAxis),
+        rpmAxis: Array<Double> = kfldimxMap.yAxis
+    ): Map3d {
         if (linearTable.isEmpty() || linearTable[0].isEmpty() || nonLinearTable.isEmpty()) {
             return Map3d(kfldimxMap.xAxis, kfldimxMap.yAxis, emptyArray())
         }
-        val dutyAxis = if (kfldrlMap.xAxis.size >= 2) kfldrlMap.xAxis else deriveDutyAxis(kfldrlMap.xAxis)
         if (kfldimxMap.xAxis.size < 2 && dutyAxis.size < 2) {
             return Map3d(kfldimxMap.xAxis, kfldimxMap.yAxis, emptyArray())
         }
-        val linearBoostMax = Array(linearTable[0].size) { i ->
-            val linearBoost = linearTable.map { it[i] * 68.9476 }
-            Collections.max(linearBoost)
+        val supportedBoost = linearTable.flatMap { row ->
+            row.filter { it > 0.0 && it.isFinite() }.map { it * 68.9476 }
+        }
+        if (supportedBoost.isEmpty()) {
+            return Map3d(kfldimxMap.xAxis, kfldimxMap.yAxis, kfldimxMap.zAxis)
         }
 
         val targetXAxisSize = if (kfldimxMap.xAxis.size >= 2) kfldimxMap.xAxis.size else DEFAULT_DUTY_COLS
         val kfldimxXAxis = Array(targetXAxisSize) { 0.0 }
-        val min = ceil(linearBoostMax[0] / 100.0) * 100
-        val max = ceil(linearBoostMax[linearBoostMax.size - 1] / 100.0) * 100
+        val observedMin = floor(supportedBoost.min() / 100.0) * 100
+        val observedMax = ceil(supportedBoost.max() / 100.0) * 100
+        // The linked KFLDIMX pressure axis has a fixed binary representation.
+        // Keep log-derived breakpoints inside the existing calibration envelope
+        // so high-boost logs cannot generate an axis the ECU cannot encode.
+        val nativeMin = kfldimxMap.xAxis.minOrNull()
+        val nativeMax = kfldimxMap.xAxis.maxOrNull()
+        val nativeEnvelopeIsUsable = nativeMin != null && nativeMax != null && nativeMax > nativeMin
+        val observedRangeOverlapsNative = nativeEnvelopeIsUsable &&
+            observedMax > nativeMin && observedMin < nativeMax
+        val min = if (observedRangeOverlapsNative) maxOf(observedMin, nativeMin) else observedMin
+        val max = if (observedRangeOverlapsNative) minOf(observedMax, nativeMax) else observedMax
+        if (nativeEnvelopeIsUsable && !observedRangeOverlapsNative) {
+            for (i in kfldimxXAxis.indices) {
+                kfldimxXAxis[i] = kfldimxMap.xAxis[i]
+            }
+        }
         val interval = if (kfldimxXAxis.size > 1) (max - min) / (kfldimxXAxis.size - 1) else 0.0
 
-        for (i in kfldimxXAxis.indices) {
-            kfldimxXAxis[i] = min + interval * i
+        if (!nativeEnvelopeIsUsable || observedRangeOverlapsNative) {
+            for (i in kfldimxXAxis.indices) {
+                kfldimxXAxis[i] = min + interval * i
+            }
         }
 
         val kfldimx = Array(nonLinearTable.size) { i ->
-            // Pair linearBoostMax→duty and sort by boost for correct interpolation
-            val pairs = linearBoostMax.zip(dutyAxis).sortedBy { it.first }
+            // Each RPM row uses its own boost→duty relationship.
+            val rowBoost = linearTable[i].map { it * 68.9476 }
+            val pairs = rowBoost.zip(dutyAxis).filter { it.first > 0.0 }.sortedBy { it.first }
+            if (pairs.size < 2) {
+                return@Array Array(kfldimxXAxis.size) { column ->
+                    kfldimxMap.zAxis.getOrNull(i)?.getOrNull(column) ?: 0.0
+                }
+            }
             val sortedBoost = pairs.map { it.first }.toDoubleArray()
             val sortedDuty = pairs.map { it.second }.toDoubleArray()
             Array(kfldimxXAxis.size) { j ->
@@ -382,7 +459,7 @@ object LdrpidCalculator {
             }
         }
 
-        return Map3d(kfldimxXAxis, kfldimxMap.yAxis, kfldimx)
+        return Map3d(kfldimxXAxis, rpmAxis, kfldimx)
     }
 
     /**
@@ -420,7 +497,8 @@ object LdrpidCalculator {
     fun deriveKfldimxSampleCounts(
         kfldrlCounts: Array<IntArray>,
         kfldrlMap: Map3d,
-        kfldimxMap: Map3d
+        kfldimxMap: Map3d,
+        linearTable: Map3d? = null
     ): Array<IntArray> {
         if (kfldrlCounts.isEmpty()) {
             return Array(kfldimxMap.yAxis.size) { IntArray(kfldimxMap.xAxis.size) }
@@ -430,9 +508,17 @@ object LdrpidCalculator {
                 Index.getInsertIndex(kfldrlMap.yAxis.toList(), kfldimxMap.yAxis.getOrElse(rpmIdx) { 0.0 })
             } else rpmIdx
             IntArray(kfldimxMap.xAxis.size) { colIdx ->
-                val kfldrlColIdx = if (kfldrlMap.xAxis.isNotEmpty()) {
-                    Index.getInsertIndex(kfldrlMap.xAxis.toList(), kfldimxMap.xAxis.getOrElse(colIdx) { 0.0 })
-                } else colIdx
+                val targetPressureMbar = kfldimxMap.xAxis.getOrElse(colIdx) { 0.0 }
+                val pressureRow = linearTable?.zAxis?.getOrNull(kfldrlRpmIdx)
+                val kfldrlColIdx = if (!pressureRow.isNullOrEmpty()) {
+                    pressureRow.indices.minByOrNull { index ->
+                        kotlin.math.abs(pressureRow[index] * 68.9476 - targetPressureMbar)
+                    } ?: 0
+                } else if (kfldrlMap.xAxis.isNotEmpty()) {
+                    Index.getInsertIndex(kfldrlMap.xAxis.toList(), targetPressureMbar)
+                } else {
+                    colIdx
+                }
                 if (kfldrlRpmIdx < kfldrlCounts.size && kfldrlColIdx < kfldrlCounts[kfldrlRpmIdx].size) {
                     kfldrlCounts[kfldrlRpmIdx][kfldrlColIdx]
                 } else 0
@@ -448,13 +534,68 @@ object LdrpidCalculator {
         kfldrlMap: Map3d,
         kfldimxMap: Map3d
     ): LdrpidResult {
-        val (nonLinearMap3d, nonLinearCounts) = calculateNonLinearTableWithCounts(values, kfldrlMap)
-        val linearTable = calculateLinearTable(nonLinearMap3d.zAxis, kfldrlMap)
-        val kfldrl = calculateKfldrl(nonLinearMap3d.zAxis, linearTable.zAxis, kfldrlMap)
-        val kfldimxMap3d = calculateKfldimx(nonLinearMap3d.zAxis, linearTable.zAxis, kfldrlMap, kfldimxMap)
+        val (measuredNonLinear, nonLinearCounts) = calculateNonLinearTableWithCounts(values, kfldrlMap)
+        val supportedRows = nonLinearCounts.indices.filter { nonLinearCounts[it].sum() > 0 }
+        val workingZ = interpolateUnsupportedRpmRows(
+            measuredNonLinear.zAxis,
+            measuredNonLinear.yAxis,
+            supportedRows
+        )
+        val nonLinearMap3d = Map3d(measuredNonLinear.xAxis, measuredNonLinear.yAxis, workingZ)
+        val linearTable = calculateLinearTable(
+            workingZ,
+            kfldrlMap,
+            measuredNonLinear.xAxis,
+            measuredNonLinear.yAxis
+        )
+        val kfldrl = calculateKfldrl(
+            workingZ,
+            linearTable.zAxis,
+            kfldrlMap,
+            measuredNonLinear.xAxis,
+            measuredNonLinear.yAxis
+        )
+        val kfldimxMap3d = calculateKfldimx(
+            workingZ,
+            linearTable.zAxis,
+            kfldrlMap,
+            kfldimxMap,
+            measuredNonLinear.xAxis,
+            measuredNonLinear.yAxis
+        )
+
+        // Rows outside the measured RPM envelope are not extrapolated into a
+        // writable calibration. Preserve the original map values there.
+        if (supportedRows.isNotEmpty()) {
+            val firstSupported = supportedRows.first()
+            val lastSupported = supportedRows.last()
+            for (row in kfldrl.zAxis.indices) {
+                if (row < firstSupported || row > lastSupported) {
+                    kfldrlMap.zAxis.getOrNull(row)?.let { original ->
+                        for (column in kfldrl.zAxis[row].indices) {
+                            original.getOrNull(column)?.let { kfldrl.zAxis[row][column] = it }
+                        }
+                    }
+                }
+            }
+            for (row in kfldimxMap3d.zAxis.indices) {
+                if (row < firstSupported || row > lastSupported) {
+                    kfldimxMap.zAxis.getOrNull(row)?.let { original ->
+                        for (column in kfldimxMap3d.zAxis[row].indices) {
+                            original.getOrNull(column)?.let { kfldimxMap3d.zAxis[row][column] = it }
+                        }
+                    }
+                }
+            }
+        }
 
         val kfldrlCounts = deriveKfldrlSampleCounts(nonLinearMap3d.zAxis, linearTable.zAxis, nonLinearCounts, kfldrlMap)
-        val kfldimxCounts = deriveKfldimxSampleCounts(kfldrlCounts, kfldrl, kfldimxMap3d)
+        val kfldimxCounts = deriveKfldimxSampleCounts(
+            kfldrlCounts,
+            kfldrl,
+            kfldimxMap3d,
+            linearTable
+        )
 
         return LdrpidResult(
             nonLinearOutput = nonLinearMap3d,
@@ -463,15 +604,108 @@ object LdrpidCalculator {
             kfldimx = kfldimxMap3d,
             nonLinearSampleCounts = nonLinearCounts,
             kfldrlSampleCounts = kfldrlCounts,
-            kfldimxSampleCounts = kfldimxCounts
+            kfldimxSampleCounts = kfldimxCounts,
+            logDiagnostics = analyzeLogDiagnostics(values, nonLinearMap3d.yAxis, nonLinearCounts)
         )
+    }
+
+    private fun interpolateUnsupportedRpmRows(
+        source: Array<Array<Double>>,
+        rpmAxis: Array<Double>,
+        supportedRows: List<Int>
+    ): Array<Array<Double>> {
+        val result = Array(source.size) { row -> source[row].copyOf() }
+        if (supportedRows.size < 2) return result
+
+        for (row in source.indices) {
+            if (row in supportedRows) continue
+            val lower = supportedRows.lastOrNull { it < row } ?: continue
+            val upper = supportedRows.firstOrNull { it > row } ?: continue
+            val span = rpmAxis[upper] - rpmAxis[lower]
+            val fraction = if (span == 0.0) 0.0 else (rpmAxis[row] - rpmAxis[lower]) / span
+            for (column in result[row].indices) {
+                result[row][column] =
+                    result[lower][column] + fraction * (result[upper][column] - result[lower][column])
+            }
+        }
+        return result
+    }
+
+    fun analyzeLogDiagnostics(
+        values: Map<Me7LogFileContract.Header, List<Double>>,
+        rpmAxis: Array<Double>,
+        nonLinearCounts: Array<IntArray> = emptyArray()
+    ): List<LogDiagnosticRow> {
+        val rpm = values[Me7LogFileContract.Header.RPM_COLUMN_HEADER].orEmpty()
+        val throttle = values[Me7LogFileContract.Header.THROTTLE_PLATE_ANGLE_HEADER].orEmpty()
+        val actual = values[Me7LogFileContract.Header.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER].orEmpty()
+        val requested = values[Me7LogFileContract.Header.REQUESTED_PRESSURE_HEADER].orEmpty()
+        if (rpmAxis.isEmpty() || rpm.isEmpty() || throttle.isEmpty() || actual.isEmpty()) return emptyList()
+
+        data class Accumulator(
+            var samples: Int = 0,
+            var absoluteError: Double = 0.0,
+            var overshoot: Double = 0.0,
+            var withinTolerance: Int = 0,
+            var targetSamples: Int = 0
+        )
+
+        val accumulators = Array(rpmAxis.size) { Accumulator() }
+        val rowCount = minOf(rpm.size, throttle.size, actual.size)
+        for (index in 0 until rowCount) {
+            if (throttle[index] < 80.0) continue
+            val rpmIndex = Index.getInsertIndex(rpmAxis.toList(), rpm[index])
+            val accumulator = accumulators[rpmIndex]
+            accumulator.samples++
+            val target = requested.getOrNull(index)?.takeIf { it.isFinite() } ?: continue
+            val error = actual[index] - target
+            accumulator.targetSamples++
+            accumulator.absoluteError += kotlin.math.abs(error)
+            accumulator.overshoot = maxOf(accumulator.overshoot, error)
+            if (kotlin.math.abs(error) <= 50.0) accumulator.withinTolerance++
+        }
+
+        return rpmAxis.indices.map { index ->
+            val accumulator = accumulators[index]
+            val hasTarget = accumulator.targetSamples > 0
+            LogDiagnosticRow(
+                rpm = rpmAxis[index],
+                sampleCount = accumulator.samples,
+                measuredDutyCells = nonLinearCounts.getOrNull(index)?.count { it > 0 } ?: 0,
+                averageAbsolutePressureErrorMbar = if (hasTarget) {
+                    accumulator.absoluteError / accumulator.targetSamples
+                } else null,
+                maximumOvershootMbar = if (hasTarget) accumulator.overshoot.coerceAtLeast(0.0) else null,
+                percentWithinTolerance = if (hasTarget) {
+                    accumulator.withinTolerance * 100.0 / accumulator.targetSamples
+                } else null
+            )
+        }
     }
 
     fun calculateLdrpid(values: Map<Me7LogFileContract.Header, List<Double>>, kfldrlMap: Map3d, kfldimxMap: Map3d): LdrpidResult {
         val nonLinearTable = calculateNonLinearTable(values, kfldrlMap)
-        val linearTable = calculateLinearTable(nonLinearTable.zAxis, kfldrlMap)
-        val kfldrl = calculateKfldrl(nonLinearTable.zAxis, linearTable.zAxis, kfldrlMap)
-        val kfldimxMap3d = calculateKfldimx(nonLinearTable.zAxis, linearTable.zAxis, kfldrlMap, kfldimxMap)
+        val linearTable = calculateLinearTable(
+            nonLinearTable.zAxis,
+            kfldrlMap,
+            nonLinearTable.xAxis,
+            nonLinearTable.yAxis
+        )
+        val kfldrl = calculateKfldrl(
+            nonLinearTable.zAxis,
+            linearTable.zAxis,
+            kfldrlMap,
+            nonLinearTable.xAxis,
+            nonLinearTable.yAxis
+        )
+        val kfldimxMap3d = calculateKfldimx(
+            nonLinearTable.zAxis,
+            linearTable.zAxis,
+            kfldrlMap,
+            kfldimxMap,
+            nonLinearTable.xAxis,
+            nonLinearTable.yAxis
+        )
 
         return LdrpidResult(nonLinearTable, linearTable, kfldrl, kfldimxMap3d)
     }

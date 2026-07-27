@@ -130,6 +130,33 @@ class AxisRescalerTest {
         assertEquals(7.0, map.zAxis[3][3], 1e-9, "Midpoint x=25, y=2500")
     }
 
+    @Test
+    fun `caller can select monotone cubic while bilinear remains the default`() {
+        val original = Map3d(
+            arrayOf(0.0, 1.0, 2.0, 3.0),
+            arrayOf(0.0),
+            arrayOf(arrayOf(0.0, 2.0, 3.0, 3.2))
+        )
+
+        val bilinear = AxisRescaler.rescaleMap(
+            original,
+            newXAxis = arrayOf(0.0, 1.5, 3.0)
+        )
+        val cubic = AxisRescaler.rescaleMap(
+            original,
+            newXAxis = arrayOf(0.0, 1.5, 3.0),
+            method = ResamplingMethod.MONOTONE_CUBIC
+        )
+
+        assertEquals(ResamplingMethod.BILINEAR, bilinear.method)
+        assertEquals(ResamplingMethod.MONOTONE_CUBIC, cubic.method)
+        assertEquals(2.5, bilinear.rescaledMap.zAxis[0][1], 1e-9)
+        assertNotEquals(
+            bilinear.rescaledMap.zAxis[0][1],
+            cubic.rescaledMap.zAxis[0][1]
+        )
+    }
+
     // ── Exact match preservation ──────────────────────────────────────
 
     @Test

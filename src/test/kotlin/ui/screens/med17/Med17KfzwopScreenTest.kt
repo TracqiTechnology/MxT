@@ -2,6 +2,7 @@ package ui.screens.med17
 
 import androidx.compose.ui.test.*
 import data.preferences.kfzwop.KfzwopPreferences
+import java.text.DecimalFormat
 import kotlin.test.Test
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -91,5 +92,21 @@ class Med17KfzwopScreenTest : Med17ScreenTestBase() {
         }
 
         onNodeWithText("DS1 Note", substring = true).assertExists()
+    }
+
+    @Test
+    fun nativeAxesAndIdentityRescaleRenderExactInputAndOutputValues() = runComposeUiTest {
+        val input = KfzwopPreferences.getSelectedMap()!!.second
+        val expectedCell = DecimalFormat("#.##").format(input.zAxis[0][0])
+        val expectedAxis = DecimalFormat("#.00").format(input.xAxis[0])
+
+        setContent { ui.screens.kfzwop.KfzwopScreen() }
+
+        onNodeWithTag("kfzwop-output-x_cell_0_0").assertTextEquals(expectedAxis)
+        onNodeWithTag("kfzwop-input-cell-0-0").assertTextEquals(expectedCell)
+        onNodeWithText("KFZWOP (Comparison)").performClick()
+        waitForIdle()
+        onNodeWithTag("kfzwop-original-cell-0-0").assertTextEquals(expectedCell)
+        onNodeWithTag("kfzwop-calculated-cell-0-0").assertTextEquals(expectedCell)
     }
 }

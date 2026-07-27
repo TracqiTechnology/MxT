@@ -73,9 +73,11 @@ class Me7ProfileTest {
     }
 
     private lateinit var savedPlatform: EcuPlatform
+    private lateinit var globalState: support.GlobalTestStateSnapshot
 
     @BeforeTest
     fun setUp() {
+        globalState = support.GlobalTestStateSnapshot.capture()
         savedPlatform = EcuPlatformPreference.platform
         EcuPlatformPreference.platform = EcuPlatform.ME7
 
@@ -90,7 +92,7 @@ class Me7ProfileTest {
 
     @AfterTest
     fun tearDown() {
-        EcuPlatformPreference.platform = savedPlatform
+        globalState.restore()
     }
 
     private fun loadProfile(resourcePath: String): ConfigurationProfile {

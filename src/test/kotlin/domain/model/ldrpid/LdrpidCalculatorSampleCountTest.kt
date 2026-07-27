@@ -94,9 +94,12 @@ class LdrpidCalculatorSampleCountTest {
         }
         assertTrue(zeroCellCount > 0, "There should be interpolated cells")
 
-        // But the map itself should have non-zero values due to interpolation
-        val allValues = map3d.zAxis.flatMap { it.toList() }
-        assertTrue(allValues.all { it > 0 }, "All map values should be positive after interpolation")
+        // Unsupported RPM rows stay zero instead of receiving synthetic 0.10,
+        // 0.11... placeholder values.
+        assertTrue(map3d.zAxis[0].all { it == 0.0 })
+        assertTrue(map3d.zAxis[2].all { it == 0.0 })
+        assertTrue(map3d.zAxis[3].all { it == 0.0 })
+        assertTrue(map3d.zAxis[1].all { it > 0.0 }, "The measured RPM row may interpolate across duty")
     }
 
     // ── 3. KFLDRL counts propagate from nonLinearTable ──────────────

@@ -16,6 +16,7 @@ import java.io.FileInputStream
 import kotlin.test.BeforeTest
 import kotlin.test.AfterTest
 import kotlin.test.assertTrue
+import support.GlobalTestStateSnapshot
 
 /**
  * Shared base for MED9 screen tests.
@@ -46,8 +47,7 @@ abstract class Med9ScreenTestBase {
         private val profileJson = Json { ignoreUnknownKeys = true }
     }
 
-    protected lateinit var savedPlatform: EcuPlatform
-    protected lateinit var savedXdfFile: File
+    private lateinit var globalState: GlobalTestStateSnapshot
     protected lateinit var tableDefs: List<TableDefinition>
     protected lateinit var allMaps: List<Pair<TableDefinition, Map3d>>
     protected lateinit var tempBinFile: File
@@ -56,8 +56,7 @@ abstract class Med9ScreenTestBase {
 
     @BeforeTest
     open fun setUp() {
-        savedPlatform = EcuPlatformPreference.platform
-        savedXdfFile = XdfFilePreferences.getStoredFile()
+        globalState = GlobalTestStateSnapshot.capture()
         EcuPlatformPreference.platform = EcuPlatform.MED9
 
         assertTrue(XDF_FILE.exists(), "XDF not found: ${XDF_FILE.absolutePath}")
@@ -91,14 +90,13 @@ abstract class Med9ScreenTestBase {
 
     @AfterTest
     open fun tearDown() {
-        EcuPlatformPreference.platform = savedPlatform
-        XdfFilePreferences.setFile(savedXdfFile)
         if (::tempBinFile.isInitialized && tempBinFile.exists()) {
             tempBinFile.delete()
         }
         if (::stockBinCopy.isInitialized && stockBinCopy.exists()) {
             stockBinCopy.delete()
         }
+        if (::globalState.isInitialized) globalState.restore()
     }
 
     protected fun findMap(title: String): Pair<TableDefinition, Map3d>? =

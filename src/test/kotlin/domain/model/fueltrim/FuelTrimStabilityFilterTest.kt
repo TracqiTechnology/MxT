@@ -109,6 +109,68 @@ class FuelTrimStabilityFilterTest {
         assertEquals(5.0, result.diagnostics[0][0].meanTrimPercent, 0.01)
     }
 
+    @Test
+    fun `short optional filter channels do not truncate valid trim rows`() {
+        val result = FuelTrimAnalyzer.analyzeMed17TrimsWithDiagnostics(
+            buildLogData(
+                rpm = constant(2000.0, 10),
+                load = constant(50.0, 10),
+                stft = constant(1.10, 10),
+                bLr = listOf(1.0),
+                lamsbgW = listOf(1.0)
+            ),
+            rpmBins = doubleArrayOf(2000.0),
+            loadBins = doubleArrayOf(50.0)
+        )
+
+        assertEquals(10, result.totalSamplesProcessed)
+        assertEquals(10, result.diagnostics[0][0].sampleCount)
+        assertEquals(10.0, result.diagnostics[0][0].meanTrimPercent, 0.01)
+    }
+
+    @Test
+    fun `diagnostic weighting requires enough effective evidence in each cell`() {
+        val result = FuelTrimAnalyzer.analyzeMed17TrimsWithDiagnostics(
+            buildLogData(
+                rpm = constant(2500.0, 10),
+                load = constant(75.0, 10),
+                stft = constant(1.20, 10)
+            ),
+            rpmBins = doubleArrayOf(2000.0, 3000.0),
+            loadBins = doubleArrayOf(50.0, 100.0)
+        )
+
+        for (row in result.diagnostics) {
+            for (cell in row) {
+                assertEquals(20.0, cell.meanTrimPercent, 0.01)
+                assertEquals(2.5, cell.effectiveSampleWeight, 0.01)
+                assertTrue(cell.rejected)
+                assertEquals(0.0, cell.correctionApplied, 0.01)
+            }
+        }
+    }
+
+    @Test
+    fun `distributed samples react once each cell reaches the effective sample threshold`() {
+        val result = FuelTrimAnalyzer.analyzeMed17TrimsWithDiagnostics(
+            buildLogData(
+                rpm = constant(2500.0, 12),
+                load = constant(75.0, 12),
+                stft = constant(1.20, 12)
+            ),
+            rpmBins = doubleArrayOf(2000.0, 3000.0),
+            loadBins = doubleArrayOf(50.0, 100.0)
+        )
+
+        for (row in result.diagnostics) {
+            for (cell in row) {
+                assertEquals(3.0, cell.effectiveSampleWeight, 0.01)
+                assertFalse(cell.rejected)
+                assertEquals(20.0, cell.correctionApplied, 0.01)
+            }
+        }
+    }
+
     // ── 4. High std_dev bins are rejected ───────────────────────────
 
     @Test
@@ -286,6 +348,7 @@ class FuelTrimStabilityFilterTest {
         val cell = result.diagnostics[0][0]
         assertEquals(2.0, cell.meanTrimPercent, 0.01)
         assertEquals(0.0, cell.correctionApplied, 0.001)
+        assertFalse(cell.rejected, "A stable bin within the reaction threshold is valid, not rejected")
         assertNotNull(cell.rejectReason)
         assertTrue(cell.rejectReason!!.contains("within threshold"))
     }

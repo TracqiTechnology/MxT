@@ -9,7 +9,7 @@ object Kfzw {
             return emptyArray()
         }
         return Array(kfzwOld.size) { i ->
-            Array(kfzwOld[0].size) { j ->
+            Array(xAxisNew.size) { j ->
                 var indexKey = Index.getInsertIndex(xAxisOld.toList(), xAxisNew[j])
 
                 if (indexKey > 0 && indexKey < kfzwOld[i].size - 1 && xAxisNew[j] < xAxisOld[indexKey]) {

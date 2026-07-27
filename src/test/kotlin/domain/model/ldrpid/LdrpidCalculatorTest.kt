@@ -122,7 +122,7 @@ class LdrpidCalculatorTest {
     // ── 4. Linear table interpolation ───────────────────────────────
 
     @Test
-    fun `calculateLinearTable produces linear interpolation per column`() {
+    fun `calculateLinearTable produces linear boost targets within each RPM row`() {
         // Build a non-linear table with known values
         val nonLinear = arrayOf(
             arrayOf(1.0, 2.0, 3.0, 4.0, 5.0),   // row 0 (min per column)
@@ -134,24 +134,16 @@ class LdrpidCalculatorTest {
         val kfldrl = buildKfldrlMap()
         val result = LdrpidCalculator.calculateLinearTable(nonLinear, kfldrl)
 
-        // For column 0: min=1, max=10, step=(10-1)/3=3
-        // Expected: [1, 4, 7, 10]
-        assertEquals(1.0,  result.zAxis[0][0], 0.01)
-        assertEquals(4.0,  result.zAxis[1][0], 0.01)
-        assertEquals(7.0,  result.zAxis[2][0], 0.01)
-        assertEquals(10.0, result.zAxis[3][0], 0.01)
-
-        // For column 4: min=5, max=18, step=(18-5)/3 ≈ 4.333
-        assertEquals(5.0,   result.zAxis[0][4], 0.01)
-        assertEquals(18.0,  result.zAxis[3][4], 0.01)
-
-        // Verify linearity: equal spacing within each column
-        for (col in nonLinear[0].indices) {
-            val step = result.zAxis[1][col] - result.zAxis[0][col]
-            for (row in 2 until nonLinear.size) {
-                val actual = result.zAxis[row][col] - result.zAxis[row - 1][col]
+        // Each row spans its own observed boost range. This keeps RPM behavior
+        // independent instead of using the first/last RPM rows for every row.
+        for (row in nonLinear.indices) {
+            assertEquals(nonLinear[row].first(), result.zAxis[row].first(), 0.01)
+            assertEquals(nonLinear[row].last(), result.zAxis[row].last(), 0.01)
+            val step = result.zAxis[row][1] - result.zAxis[row][0]
+            for (column in 2 until nonLinear[row].size) {
+                val actual = result.zAxis[row][column] - result.zAxis[row][column - 1]
                 assertEquals(step, actual, 0.01,
-                    "Column $col should have equal step size")
+                    "RPM row $row should have equal boost-target spacing")
             }
         }
     }

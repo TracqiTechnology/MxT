@@ -6,6 +6,7 @@ import domain.math.map.Map3d
 import java.io.File
 import kotlin.test.AfterTest
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertFailsWith
 
 /**
@@ -105,5 +106,134 @@ class BinWriterDimensionGuardTest {
             AxisDefinition("z", 0, 0x30, 4, 16, 1, 4, "", "X", "X", emptyList(), lsbFirst = false)
         )
         BinWriter.write(bin(), oneRowTable, scalarZ) // must not throw (x/y skipped, z 1x4 matches)
+    }
+
+    @Test
+    fun `encoding failure propagates and leaves BIN unchanged`() {
+        val file = bin()
+        val before = file.readBytes()
+        val invalid = map(x = 4, y = 3, zr = 3, zc = 4).also { map ->
+            map.zAxis[1][2] = -1.0 // table is unsigned
+        }
+
+        assertFailsWith<IllegalArgumentException> {
+            BinWriter.write(file, table2d(), invalid)
+        }
+        assertContentEquals(before, file.readBytes())
+    }
+
+    @Test
+    fun `dimension rejection leaves BIN byte identical`() {
+        val invalidMaps = listOf(
+            map(x = 5, y = 3, zr = 3, zc = 4),
+            map(x = 4, y = 4, zr = 3, zc = 4),
+            map(x = 4, y = 3, zr = 4, zc = 4),
+            map(x = 4, y = 3, zr = 3, zc = 5)
+        )
+
+        invalidMaps.forEachIndexed { index, invalid ->
+            val file = bin()
+            val before = file.readBytes()
+            assertFailsWith<IllegalArgumentException>("invalid dimension case $index") {
+                BinWriter.write(file, table2d(), invalid)
+            }
+            assertContentEquals(before, file.readBytes(), "invalid dimension case $index")
+        }
+    }
+
+    @Test
+    fun `out of bounds staged region leaves BIN byte identical`() {
+        val file = bin()
+        val before = file.readBytes()
+        val outOfBounds = TableDefinition(
+            "OUT_OF_BOUNDS", "",
+            axis("x", 0x7c, 4),
+            axis("y", 0x20, 3),
+            AxisDefinition(
+                "z", 0, 0x30, 12, 16, 3, 4,
+                "", "X", "X", emptyList(), lsbFirst = false
+            )
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            BinWriter.write(file, outOfBounds, map(x = 4, y = 3, zr = 3, zc = 4))
+        }
+        assertContentEquals(before, file.readBytes())
+    }
+
+    @Test
+    fun `non finite data leaves BIN byte identical`() {
+        val file = bin()
+        val before = file.readBytes()
+        val invalid = map(x = 4, y = 3, zr = 3, zc = 4).also {
+            it.zAxis[0][0] = Double.NaN
+        }
+
+        assertFailsWith<IllegalArgumentException> {
+            BinWriter.write(file, table2d(), invalid)
+        }
+        assertContentEquals(before, file.readBytes())
+    }
+
+    @Test
+    fun `batch failure leaves every table byte identical`() {
+        val file = bin()
+        val before = file.readBytes()
+        val valid = TableDefinition(
+            "VALID", "", null, null,
+            AxisDefinition(
+                "z", 0, 0x10, 1, 16, 1, 1, "", "X", "X", emptyList(),
+                lsbFirst = false
+            )
+        )
+        val invalid = TableDefinition(
+            "INVALID", "", null, null,
+            AxisDefinition(
+                "z", 0, 0x7f, 1, 16, 1, 1, "", "X", "X", emptyList(),
+                lsbFirst = false
+            )
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            BinWriter.writeBatch(
+                file,
+                listOf(
+                    valid to Map3d(emptyArray(), emptyArray(), arrayOf(arrayOf(123.0))),
+                    invalid to Map3d(emptyArray(), emptyArray(), arrayOf(arrayOf(456.0)))
+                )
+            )
+        }
+        assertContentEquals(before, file.readBytes())
+    }
+
+    @Test
+    fun `conflicting overlapping batch regions fail without modifying BIN`() {
+        val file = bin()
+        val before = file.readBytes()
+        val first = TableDefinition(
+            "FIRST", "", null, null,
+            AxisDefinition(
+                "z", 0, 0x20, 1, 16, 1, 1, "", "X", "X", emptyList(),
+                lsbFirst = false
+            )
+        )
+        val second = TableDefinition(
+            "SECOND", "", null, null,
+            AxisDefinition(
+                "z", 0, 0x21, 1, 16, 1, 1, "", "X", "X", emptyList(),
+                lsbFirst = false
+            )
+        )
+
+        assertFailsWith<IllegalArgumentException> {
+            BinWriter.writeBatch(
+                file,
+                listOf(
+                    first to Map3d(emptyArray(), emptyArray(), arrayOf(arrayOf(0x1234.toDouble()))),
+                    second to Map3d(emptyArray(), emptyArray(), arrayOf(arrayOf(0x5678.toDouble())))
+                )
+            )
+        }
+        assertContentEquals(before, file.readBytes())
     }
 }

@@ -3,6 +3,7 @@ package ui.screens.med17
 import androidx.compose.ui.test.*
 import data.preferences.kfldimx.KfldimxPreferences
 import data.preferences.kfldrl.KfldrlPreferences
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
@@ -58,43 +59,25 @@ class Med17LdrpidScreenTest : Med17ScreenTestBase() {
     }
 
     @Test
-    fun ldrpidWriteKfldrlProducesValidBinaryOutput() = runComposeUiTest {
+    fun ldrpidWriteKfldrlRequiresMeasuredLogData() = runComposeUiTest {
         setContent {
             ui.screens.ldrpid.LdrpidScreen()
         }
 
-        val kfldrlPair = KfldrlPreferences.getSelectedMap()!!
-
-        // Click Write KFLDRL
-        onNodeWithText("Write KFLDRL").performClick()
-        onNodeWithText("Are you sure you want to write KFLDRL to the binary?").assertExists()
-        onNodeWithText("Yes").performClick()
-        waitForIdle()
-
-        // Binary diff: only KFLDRL address range should be modified
-        BinaryDiffHelper.assertOnlyExpectedBytesChanged(
-            stockBinCopy, tempBinFile, kfldrlPair.first
-        )
+        onNodeWithText("Write KFLDRL").assertIsNotEnabled()
+        onAllNodesWithText("Are you sure you want to write KFLDRL to the binary?")
+            .assertCountEquals(0)
     }
 
     @Test
-    fun ldrpidWriteKfldimxProducesValidBinaryOutput() = runComposeUiTest {
+    fun ldrpidWriteKfldimxRequiresMeasuredLogData() = runComposeUiTest {
         setContent {
             ui.screens.ldrpid.LdrpidScreen()
         }
 
-        val kfldimxPair = KfldimxPreferences.getSelectedMap()!!
-
-        // Click Write KFLDIMX
-        onNodeWithText("Write KFLDIMX").performClick()
-        onNodeWithText("Are you sure you want to write KFLDIMX to the binary?").assertExists()
-        onNodeWithText("Yes").performClick()
-        waitForIdle()
-
-        // Binary diff: only KFLDIMX address range should be modified
-        BinaryDiffHelper.assertOnlyExpectedBytesChanged(
-            stockBinCopy, tempBinFile, kfldimxPair.first
-        )
+        onNodeWithText("Write KFLDIMX").assertIsNotEnabled()
+        onAllNodesWithText("Are you sure you want to write KFLDIMX to the binary?")
+            .assertCountEquals(0)
     }
 
     @Test
@@ -135,5 +118,65 @@ class Med17LdrpidScreenTest : Med17ScreenTestBase() {
         assertTrue(
             onAllNodesWithText("KFLDIMX", substring = true).fetchSemanticsNodes().isNotEmpty()
         )
+    }
+
+    @Test
+    fun mockWotLogRendersMeasuredBoostAndIndependentDiagnostics() {
+        val kfldrl = KfldrlPreferences.getSelectedMap()!!.second
+        val row = kfldrl.yAxis.indices.first { kfldrl.yAxis[it] >= 2000.0 }
+        val col = kfldrl.xAxis.indices.first { kfldrl.xAxis[it] > 0.0 }
+        val logDir = File.createTempFile("mxt-ldrpid-ui-", "")
+        logDir.delete()
+        logDir.mkdirs()
+        val logFile = File(logDir, "synthetic-wot.csv")
+        logFile.writeText(
+            buildString {
+                appendLine("DS1 firmware:test,MED17")
+                appendLine(
+                    "Time(s),Engine speed(nmot_w) (1/min),Throttle(wdkba) (%)," +
+                        "Baro(pu_w) (hPa),WGDC(tvldste_w) (%)," +
+                        "Manifold abs press(psrg_w) (hPa),Requested pressure(pvds_w) (hPa)"
+                )
+                repeat(10) { sample ->
+                    appendLine(
+                        "${sample / 10.0},${kfldrl.yAxis[row]},95," +
+                            "1000,${kfldrl.xAxis[col]},2000,1900"
+                    )
+                }
+            }
+        )
+
+        try {
+            runComposeUiTest {
+                setContent {
+                    ui.screens.ldrpid.LdrpidScreen(preloadedLogDir = logDir)
+                }
+
+                waitUntil(timeoutMillis = 10_000) {
+                    onAllNodesWithTag("ldrpid-nonlinear-cell-$row-$col")
+                        .fetchSemanticsNodes().isNotEmpty()
+                }
+                onNodeWithTag("ldrpid-nonlinear-cell-$row-$col")
+                    .assertTextEquals("14.5")
+                onNodeWithTag("ldrpid-write-kfldrl").assertIsEnabled()
+                onNodeWithTag("ldrpid-write-kfldimx").assertIsEnabled()
+
+                onNodeWithText("PID Analysis").performClick()
+                waitForIdle()
+                val rpm = kfldrl.yAxis[row].toInt()
+                onNodeWithTag("ldrpid-diagnostic-$rpm-samples")
+                    .assertTextEquals("10")
+                onNodeWithTag("ldrpid-diagnostic-$rpm-duty-cells")
+                    .assertTextEquals("1")
+                onNodeWithTag("ldrpid-diagnostic-$rpm-avg-error")
+                    .assertTextEquals("100.0 mbar")
+                onNodeWithTag("ldrpid-diagnostic-$rpm-overshoot")
+                    .assertTextEquals("100.0 mbar")
+                onNodeWithTag("ldrpid-diagnostic-$rpm-within-tolerance")
+                    .assertTextEquals("0%")
+            }
+        } finally {
+            logDir.deleteRecursively()
+        }
     }
 }

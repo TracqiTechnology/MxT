@@ -119,17 +119,26 @@ class BinWriterInverseEquationTest {
         assertEquals("X * 1000.0", BinWriter.buildInverseEquation("X / 1e3", "X"))
     }
 
-    // ── Complex / unrecognised → fallback ───────────────────────────────
+    // ── Composite affine / unsupported non-linear ───────────────────────
 
     @Test
-    fun `complex expression falls back to X`() {
-        // (X + 40) / 0.75 — not matched by any simple pattern
-        assertEquals("X", BinWriter.buildInverseEquation("(X + 40) / 0.75", "X"))
+    fun `composite affine expression is inverted`() {
+        val inverse = BinWriter.buildInverseEquation("(X + 40) / 0.75", "X")
+        assertTrue(inverse.startsWith("(X - "))
+        assertTrue(inverse.contains(") / 1.333333"))
     }
 
     @Test
-    fun `expression with function call falls back to X`() {
-        assertEquals("X", BinWriter.buildInverseEquation("Math.sqrt(X)", "X"))
+    fun `multiply after division affine expression is inverted`() {
+        val inverse = BinWriter.buildInverseEquation("X / 16384 * 100", "X")
+        assertTrue(inverse.startsWith("(X - 0.0) / "))
+    }
+
+    @Test
+    fun `expression with nonlinear function fails closed`() {
+        assertFailsWith<IllegalArgumentException> {
+            BinWriter.buildInverseEquation("Math.sqrt(X)", "X")
+        }
     }
 
     // ── ME7 real-world equations ────────────────────────────────────────

@@ -206,11 +206,14 @@ private fun KfzwMultiSwitchScreen(
                 TextButton(onClick = {
                     showWriteConfirmation = false
                     try {
-                        for ((idx, pair) in switchMaps) {
-                            val (tableDef, _) = pair ?: continue
-                            val output = computedOutputs[idx] ?: continue
-                            BinWriter.write(BinFilePreferences.file.value, tableDef, output)
+                        val writes = buildList {
+                            for ((idx, pair) in switchMaps) {
+                                val (tableDef, _) = pair ?: continue
+                                val output = computedOutputs[idx] ?: continue
+                                add(tableDef to output)
+                            }
                         }
+                        BinWriter.writeBatch(BinFilePreferences.file.value, writes)
                         writeStatus = WriteStatus.Success
                     } catch (e: Exception) {
                         e.printStackTrace()
@@ -556,12 +559,11 @@ private fun KfzwSingleMapScreen(
         mutableStateOf(kfmiopScalarValue.toString())
     }
 
-    // --- ME7 / non-DS1 mode: editable KFMIOP xAxis ---
-    val kfmiopXAxis = inputKfmiop?.xAxis
-
-    var editedXAxis by remember(kfmiopXAxis, kfmiopIsScalar) {
+    // The target axis must always be the axis displayed by this screen. Start
+    // from KFZW's native breakpoints; KFMIOP is an optional sync source.
+    var editedXAxis by remember(inputKfzw, kfmiopIsScalar) {
         mutableStateOf(
-            if (!kfmiopIsScalar && kfmiopXAxis != null) arrayOf(kfmiopXAxis.copyOf())
+            if (!kfmiopIsScalar && inputKfzw != null) arrayOf(inputKfzw.xAxis.copyOf())
             else arrayOf(emptyArray<Double>())
         )
     }
@@ -593,10 +595,9 @@ private fun KfzwSingleMapScreen(
         } else {
             if (editedXAxis.isNotEmpty() && editedXAxis[0].isNotEmpty()) {
                 val newXAxis = editedXAxis[0]
-                val maxValue = newXAxis.last()
-                val rescaledXAxis = RescaleAxis.rescaleAxis(input.xAxis, maxValue)
-                val newZAxis = Kfzw.generateKfzw(input.xAxis, input.zAxis, rescaledXAxis)
-                Map3d(rescaledXAxis, input.yAxis, newZAxis)
+                if (newXAxis.size != input.xAxis.size) return@remember null
+                val newZAxis = Kfzw.generateKfzw(input.xAxis, input.zAxis, newXAxis)
+                Map3d(newXAxis, input.yAxis, newZAxis)
             } else null
         } ?: return@remember null
 
@@ -737,7 +738,16 @@ private fun KfzwSingleMapScreen(
                 syncYAxis = kfmiopSyncYAxis,
                 onApplySyncYAxis = { syncAxis -> editedYAxis = arrayOf(syncAxis) },
                 syncXAxis = kfmiopSyncXAxis,
-                onApplySyncXAxis = { syncAxis -> editedXAxis = arrayOf(syncAxis) }
+                onApplySyncXAxis = { syncAxis ->
+                    val native = inputKfzw?.xAxis
+                    editedXAxis = arrayOf(
+                        if (native != null && syncAxis.size != native.size) {
+                            RescaleAxis.rescaleAxis(native, syncAxis.last())
+                        } else {
+                            syncAxis.copyOf()
+                        }
+                    )
+                }
             )
         }
 
@@ -864,7 +874,8 @@ private fun ScalarRescaleConfigCard(
                 MapAxis(
                     data = editedYAxis,
                     editable = true,
-                    onDataChanged = onYAxisChanged
+                    onDataChanged = onYAxisChanged,
+                    testTagPrefix = "kfzw-output-y"
                 )
             }
 
@@ -967,7 +978,8 @@ private fun ConfigurationCard(
                 MapAxis(
                     data = editedXAxis,
                     editable = true,
-                    onDataChanged = onXAxisChanged
+                    onDataChanged = onXAxisChanged,
+                    testTagPrefix = "kfzw-input-x"
                 )
             }
 
@@ -993,7 +1005,8 @@ private fun ConfigurationCard(
                 MapAxis(
                     data = editedYAxis,
                     editable = true,
-                    onDataChanged = onYAxisChanged
+                    onDataChanged = onYAxisChanged,
+                    testTagPrefix = "kfzw-output-y"
                 )
             }
 
@@ -1185,7 +1198,8 @@ private fun EditableInputSection(
                 MapTable(
                     map = editedInputMap,
                     editable = true,
-                    onMapChanged = onInputMapChanged
+                    onMapChanged = onInputMapChanged,
+                    testTagPrefix = "kfzw-input"
                 )
             }
         } else {
@@ -1213,7 +1227,11 @@ private fun SideBySideTables(
             )
             if (originalKfzw != null) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    MapTable(map = originalKfzw, editable = false)
+                    MapTable(
+                        map = originalKfzw,
+                        editable = false,
+                        testTagPrefix = "kfzw-original"
+                    )
                 }
             } else {
                 Text("No map loaded", style = MaterialTheme.typography.bodyMedium)
@@ -1229,7 +1247,11 @@ private fun SideBySideTables(
             )
             if (calculatedKfzw != null) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    MapTable(map = calculatedKfzw, editable = false)
+                    MapTable(
+                        map = calculatedKfzw,
+                        editable = false,
+                        testTagPrefix = "kfzw-calculated"
+                    )
                 }
             } else {
                 Text("No data", style = MaterialTheme.typography.bodyMedium)
