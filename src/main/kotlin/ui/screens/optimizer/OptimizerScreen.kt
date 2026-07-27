@@ -2186,29 +2186,39 @@ private fun ExportTab(
                                     return@Button
                                 }
 
-                                var written = 0
-                                // Write in dependency order: KFMIOP → KFMIRL → KFPBRK → KFLDRL → KFLDIMX
-                                if (writeKfmiop && sm.kfmiop != null) {
-                                    val def = KfmiopPreferences.getSelectedMap()
-                                    if (def != null) { BinWriter.write(binFile, def.first, sm.kfmiop.suggested); written++ }
+                                try {
+                                    val writes = buildList {
+                                        if (writeKfmiop && sm.kfmiop != null) {
+                                            KfmiopPreferences.getSelectedMap()?.let {
+                                                add(it.first to sm.kfmiop.suggested)
+                                            }
+                                        }
+                                        if (writeKfmirl && sm.kfmirl != null) {
+                                            KfmirlPreferences.getSelectedMap()?.let {
+                                                add(it.first to sm.kfmirl.suggested)
+                                            }
+                                        }
+                                        if (writeKfpbrk && sm.kfpbrk != null) {
+                                            KfpbrkPreferences.getSelectedMap()?.let {
+                                                add(it.first to sm.kfpbrk.suggested)
+                                            }
+                                        }
+                                        if (writeKfldrl && sm.kfldrl != null) {
+                                            KfldrlPreferences.getSelectedMap()?.let {
+                                                add(it.first to sm.kfldrl.suggested)
+                                            }
+                                        }
+                                        if (writeKfldimx && sm.kfldimx != null) {
+                                            KfldimxPreferences.getSelectedMap()?.let {
+                                                add(it.first to sm.kfldimx.suggested)
+                                            }
+                                        }
+                                    }
+                                    BinWriter.writeBatch(binFile, writes)
+                                    writeStatus = "OK: ${writes.size} map(s) written to BIN successfully"
+                                } catch (e: Exception) {
+                                    writeStatus = "ERROR: No maps written — ${e.message}"
                                 }
-                                if (writeKfmirl && sm.kfmirl != null) {
-                                    val def = KfmirlPreferences.getSelectedMap()
-                                    if (def != null) { BinWriter.write(binFile, def.first, sm.kfmirl.suggested); written++ }
-                                }
-                                if (writeKfpbrk && sm.kfpbrk != null) {
-                                    val def = KfpbrkPreferences.getSelectedMap()
-                                    if (def != null) { BinWriter.write(binFile, def.first, sm.kfpbrk.suggested); written++ }
-                                }
-                                if (writeKfldrl && sm.kfldrl != null) {
-                                    val def = KfldrlPreferences.getSelectedMap()
-                                    if (def != null) { BinWriter.write(binFile, def.first, sm.kfldrl.suggested); written++ }
-                                }
-                                if (writeKfldimx && sm.kfldimx != null) {
-                                    val def = KfldimxPreferences.getSelectedMap()
-                                    if (def != null) { BinWriter.write(binFile, def.first, sm.kfldimx.suggested); written++ }
-                                }
-                                writeStatus = "OK: $written map(s) written to BIN successfully"
                             }) {
                                 Text("Confirm Write")
                             }

@@ -3,6 +3,7 @@ package data.parser.med17log
 import data.contract.Med17LogFileContract.Header as H
 import domain.model.fueltrim.FuelTrimAnalyzer
 import domain.model.fueltrim.FuelTrimResult
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -20,6 +21,69 @@ class Med17FuelTrimParserEdgeCaseTest {
     private val loadBins = doubleArrayOf(25.0, 50.0, 75.0, 100.0)
 
     // ── Bug 3: Double-count regression ──────────────────────────────
+
+    @Test
+    fun `parser preserves optional fuel trim row alignment when a value is missing`() {
+        val file = File.createTempFile("mxt-fuel-trim-alignment-", ".csv")
+        try {
+            file.writeText(
+                """
+                DS1 firmware:test,MED17
+                Time(s),Engine speed(nmot_w) (1/min),Load(rl_w) (%),STFT(frm_w) (-),LTFT(fra_w) (-),Closed loop(B_lr) (-),Lambda request(lamsbg_w) (-)
+                0.0,2000,50,1.20,1.00,1,1.0
+                0.1,2000,50,1.20,1.00,,1.0
+                0.2,2000,50,1.20,1.00,1,1.0
+                """.trimIndent()
+            )
+
+            val parsed = Med17LogParser().parseLogFile(
+                Med17LogParser.LogType.FUEL_TRIM,
+                file
+            )
+
+            assertEquals(3, parsed[H.RPM_COLUMN_HEADER]!!.size)
+            assertEquals(3, parsed[H.LAMBDA_CONTROL_ACTIVE_HEADER]!!.size)
+            assertTrue(parsed[H.LAMBDA_CONTROL_ACTIVE_HEADER]!![1].isNaN())
+
+            val result = FuelTrimAnalyzer.analyzeMed17TrimsWithDiagnostics(
+                logData = parsed,
+                rpmBins = doubleArrayOf(2000.0),
+                loadBins = doubleArrayOf(50.0)
+            )
+            assertEquals(20.0, result.diagnostics[0][0].meanTrimPercent, 1e-9)
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `merging logs pads every missing optional channel without shifting later rows`() {
+        val first = mapOf(
+            H.TIME_STAMP_COLUMN_HEADER to listOf(0.0, 0.1),
+            H.RPM_COLUMN_HEADER to listOf(2000.0, 2100.0),
+            H.ENGINE_LOAD_HEADER to listOf(50.0, 55.0),
+            H.STFT_MIXED_COLUMN_HEADER to listOf(1.10, 1.20)
+        )
+        val second = mapOf(
+            H.TIME_STAMP_COLUMN_HEADER to listOf(0.0, 0.1),
+            H.RPM_COLUMN_HEADER to listOf(3000.0, 3100.0),
+            H.ENGINE_LOAD_HEADER to listOf(70.0, 75.0),
+            H.LTFT_COLUMN_HEADER to listOf(0.95, 0.90),
+            H.STFT_BANK1_HEADER to listOf(1.01, 1.02),
+            H.STFT_BANK2_HEADER to listOf(0.99, 0.98)
+        )
+
+        val merged = FuelTrimAnalyzer.mergeAlignedLogs(listOf(first, second))
+
+        assertEquals(listOf(2000.0, 2100.0, 3000.0, 3100.0), merged[H.RPM_COLUMN_HEADER])
+        assertEquals(4, merged.values.map { it.size }.distinct().single())
+        assertEquals(listOf(1.10, 1.20), merged[H.STFT_MIXED_COLUMN_HEADER]!!.take(2))
+        assertTrue(merged[H.STFT_MIXED_COLUMN_HEADER]!!.drop(2).all { it.isNaN() })
+        assertTrue(merged[H.LTFT_COLUMN_HEADER]!!.take(2).all { it.isNaN() })
+        assertEquals(listOf(0.95, 0.90), merged[H.LTFT_COLUMN_HEADER]!!.drop(2))
+        assertTrue(merged[H.STFT_BANK1_HEADER]!!.take(2).all { it.isNaN() })
+        assertEquals(listOf(1.01, 1.02), merged[H.STFT_BANK1_HEADER]!!.drop(2))
+    }
 
     @Test
     fun `log with only longft1_w - LTFT list has exactly N entries for N data rows`() {

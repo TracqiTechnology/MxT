@@ -36,9 +36,11 @@ class OptimizerGoldenTest {
     }
 
     private lateinit var savedPlatform: EcuPlatform
+    private lateinit var globalState: support.GlobalTestStateSnapshot
 
     @BeforeTest
     fun setUp() {
+        globalState = support.GlobalTestStateSnapshot.capture()
         savedPlatform = EcuPlatformPreference.platform
         EcuPlatformPreference.platform = EcuPlatform.ME7
 
@@ -58,7 +60,7 @@ class OptimizerGoldenTest {
 
     @AfterTest
     fun tearDown() {
-        EcuPlatformPreference.platform = savedPlatform
+        globalState.restore()
     }
 
     @Test

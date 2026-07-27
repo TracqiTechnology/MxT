@@ -5,6 +5,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import java.io.File
 import java.util.prefs.Preferences
+import data.preferences.SharedAxisPreferences
 
 object BinFilePreferences {
     private const val FILE_PATH_KEY = "file_path_key"
@@ -16,6 +17,7 @@ object BinFilePreferences {
     fun clear() {
         runCatching { prefs.clear(); prefs.flush() }
         _file.value = File("")
+        SharedAxisPreferences.clear()
     }
 
     fun getStoredFile(): File = File(prefs.get(FILE_PATH_KEY, ""))
@@ -24,5 +26,6 @@ object BinFilePreferences {
         prefs.put(FILE_PATH_KEY, file.absolutePath)
         prefs.flush()
         _file.value = file
+        SharedAxisPreferences.clear()
     }
 }

@@ -18,6 +18,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.key.*
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextAlign
@@ -54,10 +55,12 @@ private fun blendColors(base: Color, overlay: Color): Color {
 @Composable
 fun MapTable(
     map: Map3d,
+    modifier: Modifier = Modifier,
     editable: Boolean = true,
     onMapChanged: ((Map3d) -> Unit)? = null,
     cellColorProvider: ((rowIdx: Int, colIdx: Int) -> Color?)? = null,
-    onCellSelected: ((rowIdx: Int, colIdx: Int) -> Unit)? = null
+    onCellSelected: ((rowIdx: Int, colIdx: Int) -> Unit)? = null,
+    testTagPrefix: String = "map"
 ) {
     val zAxis = map.zAxis
     if (zAxis.isEmpty() || zAxis[0].isEmpty()) return
@@ -65,12 +68,12 @@ fun MapTable(
     val rowCount = zAxis.size
     val colCount = zAxis[0].size
 
-    var minValue by remember { mutableStateOf(Double.MAX_VALUE) }
-    var maxValue by remember { mutableStateOf(Double.MIN_VALUE) }
+    var minValue by remember { mutableStateOf(Double.POSITIVE_INFINITY) }
+    var maxValue by remember { mutableStateOf(Double.NEGATIVE_INFINITY) }
 
     LaunchedEffect(zAxis) {
-        var mn = Double.MAX_VALUE
-        var mx = Double.MIN_VALUE
+        var mn = Double.POSITIVE_INFINITY
+        var mx = Double.NEGATIVE_INFINITY
         for (row in zAxis) {
             for (v in row) {
                 if (v < mn) mn = v
@@ -91,6 +94,17 @@ fun MapTable(
     var editingRow by remember { mutableStateOf(-1) }
     var editingCol by remember { mutableStateOf(-1) }
     var editText by remember { mutableStateOf("") }
+    var validationError by remember { mutableStateOf<String?>(null) }
+    val tableFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(rowCount, colCount) {
+        if (selectedRow !in 0 until rowCount || selectedCol !in 0 until colCount) {
+            selectedRow = -1
+            selectedCol = -1
+        }
+        editingRow = -1
+        editingCol = -1
+    }
 
     fun notifyChanged(newZAxis: Array<Array<Double>>, debounce: Boolean = false) {
         debounceJob?.cancel()
@@ -104,16 +118,34 @@ fun MapTable(
         }
     }
 
-    fun commitEdit() {
+    fun commitEdit(advanceSelection: Boolean = false) {
+        val committedRow = editingRow
+        val committedCol = editingCol
         if (editingRow >= 0 && editingCol >= 0) {
-            val newVal = editText.toDoubleOrNull()
+            val newVal = editText.toDoubleOrNull()?.takeIf { it.isFinite() }
             if (newVal != null) {
                 val newZAxis = Array(rowCount) { r -> Array(colCount) { c -> zAxis[r][c] } }
                 newZAxis[editingRow][editingCol] = newVal
+                validationError = null
                 notifyChanged(newZAxis)
+            } else {
+                validationError = "Map values must be finite numbers"
             }
             editingRow = -1
             editingCol = -1
+        }
+        if (advanceSelection && selectedRow >= 0 && selectedCol >= 0) {
+            val linearIndex = selectedRow * colCount + selectedCol + 1
+            selectedRow = (linearIndex / colCount).coerceAtMost(rowCount - 1)
+            selectedCol = if (linearIndex >= rowCount * colCount) {
+                colCount - 1
+            } else {
+                linearIndex % colCount
+            }
+            onCellSelected?.invoke(selectedRow, selectedCol)
+        } else if (committedRow >= 0 && committedCol >= 0) {
+            selectedRow = committedRow
+            selectedCol = committedCol
         }
     }
 
@@ -135,27 +167,38 @@ fun MapTable(
                 val r = selectedRow + i
                 val c = selectedCol + j
                 if (r < rowCount && c < colCount) {
-                    val parsed = value.trim().toDoubleOrNull()
-                    if (parsed != null) newZAxis[r][c] = parsed
+                    val parsed = value.trim().toDoubleOrNull()?.takeIf { it.isFinite() }
+                    if (parsed == null) {
+                        validationError = "Clipboard contains a non-numeric map value"
+                        return
+                    }
+                    newZAxis[r][c] = parsed
                 }
             }
         }
+        validationError = null
         notifyChanged(newZAxis, debounce = true)
     }
 
     val horizontalScroll = rememberScrollState()
     val verticalScroll = rememberScrollState()
 
+    val tableHeight = minOf((rowCount + 1) * 24, 420).dp
     Column(
-        modifier = Modifier
-            .fillMaxSize()
+        modifier = modifier
+            .fillMaxWidth()
+            .height(tableHeight)
+            .testTag("$testTagPrefix-root")
+            .focusRequester(tableFocusRequester)
+            .focusable()
             .onPreviewKeyEvent { event ->
                 if (event.type == KeyEventType.KeyDown) {
                     val meta = event.isMetaPressed || event.isCtrlPressed
                     when {
                         meta && event.key == Key.C -> { handleCopy(); true }
                         meta && event.key == Key.V -> { handlePaste(); true }
-                        event.key == Key.Enter || event.key == Key.Tab -> { commitEdit(); true }
+                        event.key == Key.Enter -> { commitEdit(); true }
+                        event.key == Key.Tab -> { commitEdit(advanceSelection = true); true }
                         event.key == Key.Escape -> { editingRow = -1; editingCol = -1; true }
                         else -> false
                     }
@@ -172,6 +215,7 @@ fun MapTable(
                     val headerValue = if (c < map.xAxis.size) formatter.format(map.xAxis[c]) else ""
                     Box(
                         modifier = Modifier.size(CELL_WIDTH, CELL_HEIGHT)
+                            .testTag("$testTagPrefix-x-$c")
                             .background(MaterialTheme.colorScheme.surfaceVariant)
                             .border(0.5.dp, Color.Black),
                         contentAlignment = Alignment.Center
@@ -195,6 +239,7 @@ fun MapTable(
                     val headerValue = if (r < map.yAxis.size) formatter.format(map.yAxis[r]) else ""
                     Box(
                         modifier = Modifier.size(HEADER_WIDTH, CELL_HEIGHT)
+                            .testTag("$testTagPrefix-y-$r")
                             .background(MaterialTheme.colorScheme.surfaceVariant)
                             .border(0.5.dp, Color.Black),
                         contentAlignment = Alignment.Center
@@ -240,6 +285,7 @@ fun MapTable(
                                 Box(
                                     modifier = Modifier
                                         .size(CELL_WIDTH, CELL_HEIGHT)
+                                        .testTag("$testTagPrefix-cell-$r-$c")
                                         .drawBehind { drawRect(bgColor) }
                                         .border(0.5.dp, Color.Black)
                                         .focusProperties { canFocus = false }
@@ -256,6 +302,7 @@ fun MapTable(
                                                 selectedRow = r
                                                 selectedCol = c
                                                 onCellSelected?.invoke(r, c)
+                                                tableFocusRequester.requestFocus()
                                             }
                                         },
                                     contentAlignment = Alignment.Center
@@ -297,6 +344,14 @@ fun MapTable(
                     }
                 }
             }
+        }
+        validationError?.let { error ->
+            Text(
+                text = error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.testTag("$testTagPrefix-error")
+            )
         }
     }
 }

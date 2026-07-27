@@ -24,6 +24,7 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.io.FileInputStream
 import kotlin.test.*
+import support.GlobalTestStateSnapshot
 
 /**
  * MED17 screen-level calculation pipeline tests.
@@ -42,14 +43,14 @@ class Med17ScreenWorkflowTest {
         private val profileJson = Json { ignoreUnknownKeys = true }
     }
 
-    private lateinit var savedPlatform: EcuPlatform
+    private lateinit var globalState: GlobalTestStateSnapshot
     private lateinit var tempBinFile: File
     private lateinit var stockBinCopy: File
     private lateinit var allMaps: List<Pair<TableDefinition, Map3d>>
 
     @BeforeTest
     fun setUp() {
-        savedPlatform = EcuPlatformPreference.platform
+        globalState = GlobalTestStateSnapshot.capture()
         EcuPlatformPreference.platform = EcuPlatform.MED17
 
         val (_, defs) = XdfParser.parseToList(FileInputStream(XDF_FILE))
@@ -76,9 +77,9 @@ class Med17ScreenWorkflowTest {
 
     @AfterTest
     fun tearDown() {
-        EcuPlatformPreference.platform = savedPlatform
         if (::tempBinFile.isInitialized && tempBinFile.exists()) tempBinFile.delete()
         if (::stockBinCopy.isInitialized && stockBinCopy.exists()) stockBinCopy.delete()
+        if (::globalState.isInitialized) globalState.restore()
     }
 
     private fun resetBin() {

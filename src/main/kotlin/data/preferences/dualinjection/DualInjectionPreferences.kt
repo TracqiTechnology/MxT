@@ -35,6 +35,22 @@ object DualInjectionPreferences {
         get() = prefs.get("port_share_percent", "30.0").toDouble()
         set(value) = prefs.put("port_share_percent", value.toString())
 
+    var krkateAlreadyPressureCompensated: Boolean
+        get() = prefs.getBoolean("krkate_already_pressure_compensated", false)
+        set(value) = prefs.putBoolean("krkate_already_pressure_compensated", value)
+
+    var referencePortDifferentialPressureBar: Double
+        get() = prefs.getDouble("reference_port_differential_pressure", 4.0)
+        set(value) = prefs.putDouble("reference_port_differential_pressure", value)
+
+    var operatingManifoldPressureBarGauge: Double
+        get() = prefs.getDouble("operating_manifold_pressure_gauge", 0.0)
+        set(value) = prefs.putDouble("operating_manifold_pressure_gauge", value)
+
+    var referenceDirectPressureBarAbsolute: Double
+        get() = prefs.getDouble("reference_direct_pressure_absolute", 240.0)
+        set(value) = prefs.putDouble("reference_direct_pressure_absolute", value)
+
     var numPortInjectors: Int
         get() = prefs.get("num_port_injectors", "5").toInt()
         set(value) = prefs.put("num_port_injectors", value.toString())

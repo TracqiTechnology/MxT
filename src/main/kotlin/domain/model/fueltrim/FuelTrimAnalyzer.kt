@@ -30,10 +30,6 @@ object FuelTrimAnalyzer {
     /** Default std-dev threshold (%) — bins with higher variance are rejected. */
     private const val STD_DEV_THRESHOLD_PCT = 5.0
 
-    /** Maximum RPM rate of change (RPM/sample) to consider a sample steady-state.
-     *  At typical 10 Hz logging, 50 RPM/sample ≈ 500 RPM/s. */
-    private const val MAX_RPM_RATE = 50.0
-
     // Default RPM bins — coarse grid covering typical MED17 operating range
     val DEFAULT_RPM_BINS = doubleArrayOf(
         750.0, 1000.0, 1500.0, 2000.0, 2500.0, 3000.0,
@@ -63,113 +59,15 @@ object FuelTrimAnalyzer {
         loadBins: DoubleArray = DEFAULT_LOAD_BINS,
         trimThreshold: Double = TRIM_THRESHOLD_PCT,
         minSamples: Int = MIN_SAMPLES
-    ): FuelTrimResult {
-        val warnings = mutableListOf<String>()
-
-        val rpm = logData[H.RPM_COLUMN_HEADER].orEmpty()
-        val load = logData[H.ENGINE_LOAD_HEADER].orEmpty()
-
-        if (rpm.isEmpty() || load.isEmpty()) {
-            val keysFound = logData.entries.filter { it.value.isNotEmpty() }.map { it.key.name }
-            warnings.add("Missing RPM or engine load data — keys with data: $keysFound")
-            return emptyResult(rpmBins, loadBins, warnings)
-        }
-
-        // Resolve STFT — prefer frm_w over fr_w
-        val stft: List<Double>? = resolveSignal(
-            logData,
-            H.STFT_MIXED_COLUMN_HEADER,
-            H.STFT_COLUMN_HEADER
+    ): FuelTrimResult = analyzeMed17TrimsWithDiagnostics(
+        logData = logData,
+        rpmBins = rpmBins,
+        loadBins = loadBins,
+        settings = FuelTrimSettings(
+            trimThresholdPercent = trimThreshold,
+            minimumSamples = minSamples
         )
-
-        // Resolve LTFT — prefer fra_w over longft1_w
-        val ltft: List<Double>? = resolveSignal(
-            logData,
-            H.LTFT_COLUMN_HEADER,
-            H.LONG_TERM_FT_HEADER
-        )
-
-        if (stft == null && ltft == null) {
-            warnings.add("No fuel trim data found (checked frm_w, fr_w, fra_w, longft1_w)")
-            return emptyResult(rpmBins, loadBins, warnings)
-        }
-
-        val sampleCount = minOf(
-            rpm.size,
-            load.size,
-            stft?.size ?: Int.MAX_VALUE,
-            ltft?.size ?: Int.MAX_VALUE
-        )
-
-        warnings.add(0, "Parsed $sampleCount samples (RPM: ${rpm.size}, Load: ${load.size}" +
-                "${stft?.let { ", STFT: ${it.size}" } ?: ""}" +
-                "${ltft?.let { ", LTFT: ${it.size}" } ?: ""})")
-
-        // Accumulate combined trim per bin
-        val trimSums = Array(rpmBins.size) { DoubleArray(loadBins.size) }
-        val trimCounts = Array(rpmBins.size) { IntArray(loadBins.size) }
-        var transientFiltered = 0
-
-        for (i in 0 until sampleCount) {
-            // Transient filter: skip samples during rapid RPM change
-            // (wall-film wetting and overrun fuel-cut corrupt trim readings)
-            if (i > 0 && abs(rpm[i] - rpm[i - 1]) > MAX_RPM_RATE) {
-                transientFiltered++
-                continue
-            }
-            val rpmWeights = interpolatedBinWeights(rpm[i], rpmBins)
-            val loadWeights = interpolatedBinWeights(load[i], loadBins)
-
-            // MED17 trims are multiplicative around 1.0 → convert to %
-            val stftPct = stft?.let { (it[i] - 1.0) * 100.0 } ?: 0.0
-            val ltftPct = ltft?.let { (it[i] - 1.0) * 100.0 } ?: 0.0
-            val trimPct = stftPct + ltftPct
-
-            for ((rpmIdx, rpmW) in rpmWeights) {
-                for ((loadIdx, loadW) in loadWeights) {
-                    val w = rpmW * loadW
-                    trimSums[rpmIdx][loadIdx] += trimPct * w
-                    trimCounts[rpmIdx][loadIdx]++
-                }
-            }
-        }
-
-        if (transientFiltered > 0) {
-            warnings.add(0, "Transient filter: excluded $transientFiltered samples (dRPM > ${MAX_RPM_RATE.toInt()} RPM/sample)")
-        }
-
-        // Compute averages and generate corrections
-        val avgTrims = Array(rpmBins.size) { DoubleArray(loadBins.size) }
-        val corrections = Array(rpmBins.size) { DoubleArray(loadBins.size) }
-
-        for (r in rpmBins.indices) {
-            for (l in loadBins.indices) {
-                val count = trimCounts[r][l]
-                if (count >= minSamples) {
-                    val avg = trimSums[r][l] / count
-                    avgTrims[r][l] = avg
-
-                    if (abs(avg) > trimThreshold) {
-                        // Negate: positive trim (ECU adding fuel) → base map is lean →
-                        // increase rk_w by the trim amount (negative correction value
-                        // means "the trim was positive so reduce rk_w to compensate"
-                        // — actually we want to bake the trim into the map so the ECU
-                        // doesn't have to compensate: correction = +avg because if the
-                        // ECU adds 5 % we want 5 % more fuel in the base map).
-                        //
-                        // Convention: positive correction = add fuel to rk_w.
-                        corrections[r][l] = avg
-                        warnings.add(
-                            "RPM=%.0f Load=%.0f%%: avg trim %+.1f%% exceeds ±%.0f%% threshold (%d samples)"
-                                .format(rpmBins[r], loadBins[l], avg, trimThreshold, count)
-                        )
-                    }
-                }
-            }
-        }
-
-        return FuelTrimResult(rpmBins, loadBins, avgTrims, corrections, warnings)
-    }
+    ).toFuelTrimResult()
 
     /**
      * Analyse parsed MED17 fuel trim data with closed-loop stability filtering
@@ -193,11 +91,28 @@ object FuelTrimAnalyzer {
         minSamples: Int = MIN_SAMPLES,
         trimThreshold: Double = TRIM_THRESHOLD_PCT,
         stdDevThreshold: Double = STD_DEV_THRESHOLD_PCT
+    ): FuelTrimDiagnosticResult = analyzeMed17TrimsWithDiagnostics(
+        logData = logData,
+        rpmBins = rpmBins,
+        loadBins = loadBins,
+        settings = FuelTrimSettings(
+            trimThresholdPercent = trimThreshold,
+            minimumSamples = minSamples,
+            standardDeviationLimitPercent = stdDevThreshold
+        )
+    )
+
+    fun analyzeMed17TrimsWithDiagnostics(
+        logData: Map<Med17LogFileContract.Header, List<Double>>,
+        rpmBins: DoubleArray = DEFAULT_RPM_BINS,
+        loadBins: DoubleArray = DEFAULT_LOAD_BINS,
+        settings: FuelTrimSettings
     ): FuelTrimDiagnosticResult {
         val warnings = mutableListOf<String>()
 
         val rpm = logData[H.RPM_COLUMN_HEADER].orEmpty()
         val load = logData[H.ENGINE_LOAD_HEADER].orEmpty()
+        val time = logData[H.TIME_STAMP_COLUMN_HEADER].orEmpty()
 
         if (rpm.isEmpty() || load.isEmpty()) {
             val keysFound = logData.entries.filter { it.value.isNotEmpty() }.map { it.key.name }
@@ -224,35 +139,63 @@ object FuelTrimAnalyzer {
         if (bLr != null) warnings.add("Closed-loop filter active (B_lr)")
         if (lamsbgW != null) warnings.add("Lambda request filter active (lamsbg_w ≈ 1.0)")
 
-        val sampleCount = minOf(
-            rpm.size,
-            load.size,
-            stft?.size ?: Int.MAX_VALUE,
-            ltft?.size ?: Int.MAX_VALUE,
-            bLr?.size ?: Int.MAX_VALUE,
-            lamsbgW?.size ?: Int.MAX_VALUE
-        )
+        // Optional channels must not shorten the usable RPM/load rows. A missing
+        // optional value disables that filter for the row instead of truncating
+        // the entire analysis.
+        val sampleCount = minOf(rpm.size, load.size)
 
         // Stats accumulators
         val sums = Array(rpmBins.size) { DoubleArray(loadBins.size) }
         val sumSq = Array(rpmBins.size) { DoubleArray(loadBins.size) }
+        val weights = Array(rpmBins.size) { DoubleArray(loadBins.size) }
         val counts = Array(rpmBins.size) { IntArray(loadBins.size) }
         var filtered = 0
         var transientFiltered = 0
 
         for (i in 0 until sampleCount) {
             // Closed-loop filter: B_lr must be 1.0 (active)
-            if (bLr != null && bLr[i] != 1.0) { filtered++; continue }
+            if (settings.requireClosedLoopWhenAvailable &&
+                bLr?.getOrNull(i)?.takeIf { it.isFinite() }?.let { it != 1.0 } == true
+            ) {
+                filtered++
+                continue
+            }
             // Lambda request filter: must be near stoichiometric
-            if (lamsbgW != null && abs(lamsbgW[i] - 1.0) >= 0.05) { filtered++; continue }
-            // Transient filter: skip samples during rapid RPM change
-            if (i > 0 && abs(rpm[i] - rpm[i - 1]) > MAX_RPM_RATE) { transientFiltered++; continue }
+            if (lamsbgW?.getOrNull(i)?.takeIf { it.isFinite() }
+                    ?.let { abs(it - 1.0) >= settings.maximumLambdaDeviation } == true
+            ) {
+                filtered++
+                continue
+            }
+            // Transient filter: compare a physical RPM/second rate. Missing or
+            // non-monotonic timestamps disable this filter for the affected row.
+            if (i > 0) {
+                val previousTime = time.getOrNull(i - 1)
+                val currentTime = time.getOrNull(i)
+                if (previousTime != null && currentTime != null &&
+                    previousTime.isFinite() && currentTime.isFinite() &&
+                    currentTime > previousTime
+                ) {
+                    val rpmPerSecond = abs(rpm[i] - rpm[i - 1]) / (currentTime - previousTime)
+                    if (rpmPerSecond > settings.maximumRpmChangePerSecond) {
+                        transientFiltered++
+                        continue
+                    }
+                }
+            }
+
+            val stftValue = stft?.getOrNull(i)?.takeIf { it.isFinite() }
+            val ltftValue = ltft?.getOrNull(i)?.takeIf { it.isFinite() }
+            if (stftValue == null && ltftValue == null) {
+                filtered++
+                continue
+            }
 
             val rpmWeights = interpolatedBinWeights(rpm[i], rpmBins)
             val loadWeights = interpolatedBinWeights(load[i], loadBins)
 
-            val stftPct = stft?.let { (it[i] - 1.0) * 100.0 } ?: 0.0
-            val ltftPct = ltft?.let { (it[i] - 1.0) * 100.0 } ?: 0.0
+            val stftPct = stftValue?.let { (it - 1.0) * 100.0 } ?: 0.0
+            val ltftPct = ltftValue?.let { (it - 1.0) * 100.0 } ?: 0.0
             val trimPct = stftPct + ltftPct
 
             for ((rpmIdx, rpmW) in rpmWeights) {
@@ -260,6 +203,7 @@ object FuelTrimAnalyzer {
                     val w = rpmW * loadW
                     sums[rpmIdx][loadIdx] += trimPct * w
                     sumSq[rpmIdx][loadIdx] += trimPct * trimPct * w
+                    weights[rpmIdx][loadIdx] += w
                     counts[rpmIdx][loadIdx]++
                 }
             }
@@ -273,35 +217,40 @@ object FuelTrimAnalyzer {
         val diagnostics = Array(rpmBins.size) { r ->
             Array(loadBins.size) { l ->
                 val n = counts[r][l]
-                if (n > 0) binsWithData++
+                val weight = weights[r][l]
+                if (weight > 0.0) binsWithData++
 
-                if (n == 0) {
+                if (n == 0 || weight <= 0.0) {
                     return@Array FuelTrimCellDiagnostic(
                         rpmBins[r], loadBins[l], 0, 0.0, 0.0, 0.0, true, "no samples"
                     )
                 }
 
-                val mean = sums[r][l] / n
-                val variance = (sumSq[r][l] / n) - (mean * mean)
+                val mean = sums[r][l] / weight
+                val variance = (sumSq[r][l] / weight) - (mean * mean)
                 val stdDev = sqrt(max(0.0, variance))
 
                 val rejected: Boolean
                 val reason: String?
 
                 when {
-                    n < minSamples -> {
+                    weight + 1e-9 < settings.minimumSamples.toDouble() -> {
                         rejected = true
-                        reason = "insufficient samples ($n < $minSamples)"
+                        reason = "insufficient effective samples (" +
+                            "%.2f < %d)".format(weight, settings.minimumSamples)
                         binsRejected++
                     }
-                    stdDev > stdDevThreshold -> {
+                    stdDev > settings.standardDeviationLimitPercent -> {
                         rejected = true
-                        reason = "std_dev %.1f%% > %.1f%%".format(stdDev, stdDevThreshold)
+                        reason = "std_dev %.1f%% > %.1f%%".format(
+                            stdDev,
+                            settings.standardDeviationLimitPercent
+                        )
                         binsRejected++
                     }
-                    abs(mean) <= trimThreshold -> {
+                    abs(mean) <= settings.trimThresholdPercent -> {
                         rejected = false
-                        reason = "within threshold (±${trimThreshold}%)"
+                        reason = "within threshold (±${settings.trimThresholdPercent}%)"
                     }
                     else -> {
                         rejected = false
@@ -309,33 +258,60 @@ object FuelTrimAnalyzer {
                     }
                 }
 
-                val correction = if (!rejected && abs(mean) > trimThreshold) mean else 0.0
+                val correction = if (!rejected && abs(mean) > settings.trimThresholdPercent) mean else 0.0
                 corrections[r][l] = correction
 
                 if (correction != 0.0) {
                     warnings.add(
-                        "RPM=%.0f Load=%.0f%%: avg trim %+.1f%% (σ=%.1f%%, n=%d)"
-                            .format(rpmBins[r], loadBins[l], mean, stdDev, n)
+                        (
+                            "RPM=%.0f Load=%.0f%%: avg trim %+.1f%% exceeds ±%.1f%% threshold " +
+                                "(σ=%.1f%%, n=%d, effective n=%.2f)"
+                            ).format(
+                                rpmBins[r],
+                                loadBins[l],
+                                mean,
+                                settings.trimThresholdPercent,
+                                stdDev,
+                                n,
+                                weight
+                            )
                     )
                 }
 
                 FuelTrimCellDiagnostic(
                     rpmBins[r], loadBins[l], n, mean, stdDev, correction,
-                    rejected || abs(mean) <= trimThreshold,
-                    reason
+                    rejected,
+                    reason,
+                    effectiveSampleWeight = weight
                 )
             }
         }
 
-        if (transientFiltered > 0) warnings.add("Transient filter: excluded $transientFiltered samples (dRPM > ${MAX_RPM_RATE.toInt()} RPM/sample)")
+        if (transientFiltered > 0) {
+            warnings.add(
+                "Transient filter: excluded $transientFiltered samples " +
+                    "(rate > ${settings.maximumRpmChangePerSecond.toInt()} RPM/s)"
+            )
+        }
 
         // ── Bank imbalance detection ────────────────────────────────────
-        detectBankImbalance(logData, sampleCount, rpm, bLr, lamsbgW, warnings)
+        detectBankImbalance(logData, sampleCount, rpm, bLr, lamsbgW, settings, warnings)
 
         // Summary warning at position 0
         warnings.add(0,
-            "Processed %,d samples (%,d filtered: closed-loop/lambda, %,d transient) | %d bins with data, %d rejected"
-                .format(sampleCount, filtered, transientFiltered, binsWithData, binsRejected)
+            (
+                "Processed %,d samples (%,d filtered: closed-loop/lambda/missing trim, %,d transient) | " +
+                    "%d bins with data, %d rejected | threshold ±%.1f%%, min n=%d, max σ=%.1f%%"
+                ).format(
+                    sampleCount,
+                    filtered,
+                    transientFiltered,
+                    binsWithData,
+                    binsRejected,
+                    settings.trimThresholdPercent,
+                    settings.minimumSamples,
+                    settings.standardDeviationLimitPercent
+                )
         )
 
         return FuelTrimDiagnosticResult(
@@ -398,10 +374,12 @@ object FuelTrimAnalyzer {
         rpm: List<Double>,
         bLr: List<Double>?,
         lamsbgW: List<Double>?,
+        settings: FuelTrimSettings,
         warnings: MutableList<String>
     ) {
         val b1 = logData[H.STFT_BANK1_HEADER]?.takeIf { it.isNotEmpty() } ?: return
         val b2 = logData[H.STFT_BANK2_HEADER]?.takeIf { it.isNotEmpty() } ?: return
+        val time = logData[H.TIME_STAMP_COLUMN_HEADER].orEmpty()
 
         val n = minOf(sampleCount, b1.size, b2.size)
         var sum1 = 0.0
@@ -409,16 +387,36 @@ object FuelTrimAnalyzer {
         var count = 0
 
         for (i in 0 until n) {
-            if (bLr != null && i < bLr.size && bLr[i] != 1.0) continue
-            if (lamsbgW != null && i < lamsbgW.size && abs(lamsbgW[i] - 1.0) >= 0.05) continue
-            if (i > 0 && abs(rpm[i] - rpm[i - 1]) > MAX_RPM_RATE) continue
+            if (settings.requireClosedLoopWhenAvailable &&
+                bLr?.getOrNull(i)?.takeIf { it.isFinite() }?.let { it != 1.0 } == true
+            ) {
+                continue
+            }
+            if (lamsbgW?.getOrNull(i)?.takeIf { it.isFinite() }
+                    ?.let { abs(it - 1.0) >= settings.maximumLambdaDeviation } == true
+            ) {
+                continue
+            }
+            if (i > 0) {
+                val previousTime = time.getOrNull(i - 1)
+                val currentTime = time.getOrNull(i)
+                if (previousTime != null && currentTime != null &&
+                    previousTime.isFinite() && currentTime.isFinite() &&
+                    currentTime > previousTime &&
+                    abs(rpm[i] - rpm[i - 1]) / (currentTime - previousTime) >
+                    settings.maximumRpmChangePerSecond
+                ) {
+                    continue
+                }
+            }
 
+            if (!b1[i].isFinite() || !b2[i].isFinite()) continue
             sum1 += (b1[i] - 1.0) * 100.0
             sum2 += (b2[i] - 1.0) * 100.0
             count++
         }
 
-        if (count >= MIN_SAMPLES) {
+        if (count >= settings.minimumSamples) {
             val avg1 = sum1 / count
             val avg2 = sum2 / count
             val imbalance = abs(avg1 - avg2)
@@ -439,6 +437,61 @@ object FuelTrimAnalyzer {
     }
 
     // ── helpers ──────────────────────────────────────────────────────
+
+    /**
+     * Merge separately parsed fuel-trim files without losing row identity when
+     * optional channels differ between files.
+     */
+    fun mergeAlignedLogs(
+        logs: List<Map<Med17LogFileContract.Header, List<Double>>>
+    ): Map<Med17LogFileContract.Header, List<Double>> {
+        val output: LinkedHashMap<H, MutableList<Double>> = linkedMapOf(
+            H.TIME_STAMP_COLUMN_HEADER to mutableListOf<Double>(),
+            H.RPM_COLUMN_HEADER to mutableListOf(),
+            H.ENGINE_LOAD_HEADER to mutableListOf(),
+            H.STFT_MIXED_COLUMN_HEADER to mutableListOf(),
+            H.LTFT_COLUMN_HEADER to mutableListOf(),
+            H.LAMBDA_CONTROL_ACTIVE_HEADER to mutableListOf(),
+            H.REQUESTED_LAMBDA_HEADER to mutableListOf(),
+            H.STFT_BANK1_HEADER to mutableListOf(),
+            H.STFT_BANK2_HEADER to mutableListOf()
+        )
+
+        for (log in logs) {
+            val rpm = log[H.RPM_COLUMN_HEADER].orEmpty()
+            val load = log[H.ENGINE_LOAD_HEADER].orEmpty()
+            val rowCount = minOf(rpm.size, load.size)
+            if (rowCount == 0) continue
+
+            val time = log[H.TIME_STAMP_COLUMN_HEADER].orEmpty()
+            val stft = resolveSignal(log, H.STFT_MIXED_COLUMN_HEADER, H.STFT_COLUMN_HEADER)
+            val ltft = resolveSignal(log, H.LTFT_COLUMN_HEADER, H.LONG_TERM_FT_HEADER)
+            val closedLoop = log[H.LAMBDA_CONTROL_ACTIVE_HEADER].orEmpty()
+            val requestedLambda = log[H.REQUESTED_LAMBDA_HEADER].orEmpty()
+            val bank1 = log[H.STFT_BANK1_HEADER].orEmpty()
+            val bank2 = log[H.STFT_BANK2_HEADER].orEmpty()
+
+            for (index in 0 until rowCount) {
+                output.getValue(H.TIME_STAMP_COLUMN_HEADER)
+                    .add(time.getOrNull(index) ?: Double.NaN)
+                output.getValue(H.RPM_COLUMN_HEADER).add(rpm[index])
+                output.getValue(H.ENGINE_LOAD_HEADER).add(load[index])
+                output.getValue(H.STFT_MIXED_COLUMN_HEADER)
+                    .add(stft?.getOrNull(index) ?: Double.NaN)
+                output.getValue(H.LTFT_COLUMN_HEADER)
+                    .add(ltft?.getOrNull(index) ?: Double.NaN)
+                output.getValue(H.LAMBDA_CONTROL_ACTIVE_HEADER)
+                    .add(closedLoop.getOrNull(index) ?: Double.NaN)
+                output.getValue(H.REQUESTED_LAMBDA_HEADER)
+                    .add(requestedLambda.getOrNull(index) ?: Double.NaN)
+                output.getValue(H.STFT_BANK1_HEADER)
+                    .add(bank1.getOrNull(index) ?: Double.NaN)
+                output.getValue(H.STFT_BANK2_HEADER)
+                    .add(bank2.getOrNull(index) ?: Double.NaN)
+            }
+        }
+        return output
+    }
 
     /** Return the first non-empty signal list from the candidates, or null. */
     private fun resolveSignal(

@@ -9,6 +9,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
 import data.parser.bin.BinParser
 import data.parser.xdf.TableDefinition
@@ -148,6 +149,8 @@ fun KfmirlScreen() {
 
     // Collect Y-axis edits from KFMIOP for sync
     val kfmiopSyncYAxis by SharedAxisPreferences.kfmiopEditedYAxis.collectAsState(initial = null)
+    val calculatedKfmiopFromWorkspace by SharedAxisPreferences.kfmiopCalculatedMap.collectAsState(initial = null)
+    var workspaceStatus by remember { mutableStateOf<String?>(null) }
 
     // Write prerequisites — scalar mode only needs KFMIRL configured
     val binFile by BinFilePreferences.file.collectAsState()
@@ -222,6 +225,40 @@ fun KfmirlScreen() {
         modifier = Modifier.fillMaxSize().padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
+        if (!kfmiopIsScalar && calculatedKfmiopFromWorkspace != null) {
+            Surface(
+                shape = MaterialTheme.shapes.small,
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        workspaceStatus ?: "A calculated $kfmiopLabel result is available from the $kfmiopLabel tab.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("kfmirl-workspace-status")
+                    )
+                    TextButton(
+                        modifier = Modifier.testTag("kfmirl-use-kfmiop"),
+                        onClick = {
+                            calculatedKfmiopFromWorkspace?.let { calculated ->
+                                editedInputMap = Map3d(calculated)
+                                editedXAxis = arrayOf(calculated.xAxis.copyOf())
+                                workspaceStatus = "Using calculated $kfmiopLabel output"
+                            }
+                        }
+                    ) {
+                        Text("Use in $kfmirlLabel")
+                    }
+                }
+            }
+        }
+
         // DS1 note for MED17 users
         if (EcuPlatformPreference.platform == EcuPlatform.MED17) {
             Surface(
@@ -430,7 +467,8 @@ private fun ConfigurationCard(
                 MapAxis(
                     data = editedXAxis,
                     editable = true,
-                    onDataChanged = onXAxisChanged
+                    onDataChanged = onXAxisChanged,
+                    testTagPrefix = "kfmirl-input-x"
                 )
             }
 
@@ -456,7 +494,8 @@ private fun ConfigurationCard(
                 MapAxis(
                     data = editedYAxis,
                     editable = true,
-                    onDataChanged = onYAxisChanged
+                    onDataChanged = onYAxisChanged,
+                    testTagPrefix = "kfmirl-output-y"
                 )
             }
 
@@ -631,7 +670,8 @@ private fun EditableInputSection(
                 MapTable(
                     map = editedInputMap,
                     editable = true,
-                    onMapChanged = onInputMapChanged
+                    onMapChanged = onInputMapChanged,
+                    testTagPrefix = "kfmirl-input"
                 )
             }
         } else {
@@ -668,7 +708,11 @@ private fun SideBySideTables(
             )
             if (originalKfmirl != null) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    MapTable(map = originalKfmirl, editable = false)
+                    MapTable(
+                        map = originalKfmirl,
+                        editable = false,
+                        testTagPrefix = "kfmirl-original"
+                    )
                 }
             } else {
                 Text("No map loaded", style = MaterialTheme.typography.bodyMedium)
@@ -684,7 +728,11 @@ private fun SideBySideTables(
             )
             if (calculatedKfmirl != null) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    MapTable(map = calculatedKfmirl, editable = false)
+                    MapTable(
+                        map = calculatedKfmirl,
+                        editable = false,
+                        testTagPrefix = "kfmirl-calculated"
+                    )
                 }
             } else {
                 Text("No data", style = MaterialTheme.typography.bodyMedium)

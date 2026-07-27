@@ -43,19 +43,20 @@ private fun axisHsbColor(value: Double): Color {
 fun MapAxis(
     data: Array<Array<Double>>,
     editable: Boolean = true,
-    onDataChanged: ((Array<Array<Double>>) -> Unit)? = null
+    onDataChanged: ((Array<Array<Double>>) -> Unit)? = null,
+    testTagPrefix: String = "axis"
 ) {
     if (data.isEmpty() || data[0].isEmpty()) return
 
     val rowCount = data.size
     val colCount = data[0].size
 
-    var minValue by remember { mutableStateOf(Double.MAX_VALUE) }
-    var maxValue by remember { mutableStateOf(Double.MIN_VALUE) }
+    var minValue by remember { mutableStateOf(Double.POSITIVE_INFINITY) }
+    var maxValue by remember { mutableStateOf(Double.NEGATIVE_INFINITY) }
 
     LaunchedEffect(data) {
-        var mn = Double.MAX_VALUE
-        var mx = Double.MIN_VALUE
+        var mn = Double.POSITIVE_INFINITY
+        var mx = Double.NEGATIVE_INFINITY
         for (row in data) {
             for (v in row) {
                 if (v < mn) mn = v
@@ -75,6 +76,27 @@ fun MapAxis(
     var editingRow by remember { mutableStateOf(-1) }
     var editingCol by remember { mutableStateOf(-1) }
     var editText by remember { mutableStateOf("") }
+    var validationError by remember { mutableStateOf<String?>(null) }
+    val axisFocusRequester = remember { FocusRequester() }
+
+    LaunchedEffect(rowCount, colCount) {
+        if (selectedRow !in 0 until rowCount || selectedCol !in 0 until colCount) {
+            selectedRow = -1
+            selectedCol = -1
+        }
+        editingRow = -1
+        editingCol = -1
+    }
+
+    fun validateAxis(newData: Array<Array<Double>>): String? {
+        if (newData.any { row -> row.any { !it.isFinite() } }) {
+            return "Axis values must be finite numbers"
+        }
+        if (newData.any { row -> row.indices.drop(1).any { row[it] <= row[it - 1] } }) {
+            return "Axis values must be strictly increasing"
+        }
+        return null
+    }
 
     fun notifyChanged(newData: Array<Array<Double>>, debounce: Boolean = false) {
         debounceJob?.cancel()
@@ -88,16 +110,33 @@ fun MapAxis(
         }
     }
 
-    fun commitEdit() {
+    fun commitEdit(advanceSelection: Boolean = false) {
+        val committedRow = editingRow
+        val committedCol = editingCol
         if (editingRow >= 0 && editingCol >= 0) {
-            val newVal = editText.toDoubleOrNull()
-            if (newVal != null) {
+            val newVal = editText.toDoubleOrNull()?.takeIf { it.isFinite() }
+            if (newVal == null) {
+                validationError = "Axis values must be finite numbers"
+            } else {
                 val newData = Array(rowCount) { r -> Array(colCount) { c -> data[r][c] } }
                 newData[editingRow][editingCol] = newVal
-                notifyChanged(newData)
+                validationError = validateAxis(newData)
+                if (validationError == null) notifyChanged(newData)
             }
             editingRow = -1
             editingCol = -1
+        }
+        if (advanceSelection && selectedRow >= 0 && selectedCol >= 0) {
+            val linearIndex = selectedRow * colCount + selectedCol + 1
+            selectedRow = (linearIndex / colCount).coerceAtMost(rowCount - 1)
+            selectedCol = if (linearIndex >= rowCount * colCount) {
+                colCount - 1
+            } else {
+                linearIndex % colCount
+            }
+        } else if (committedRow >= 0 && committedCol >= 0) {
+            selectedRow = committedRow
+            selectedCol = committedCol
         }
     }
 
@@ -109,37 +148,47 @@ fun MapAxis(
         for ((j, value) in values.withIndex()) {
             val c = selectedCol + j
             if (c < colCount) {
-                val parsed = value.trim().toDoubleOrNull()
-                if (parsed != null) newData[selectedRow][c] = parsed
+                val parsed = value.trim().toDoubleOrNull()?.takeIf { it.isFinite() }
+                if (parsed == null) {
+                    validationError = "Clipboard contains a non-numeric axis value"
+                    return
+                }
+                newData[selectedRow][c] = parsed
             }
         }
-        notifyChanged(newData, debounce = true)
+        validationError = validateAxis(newData)
+        if (validationError == null) notifyChanged(newData, debounce = true)
     }
 
     val horizontalScroll = rememberScrollState()
 
-    Row(
-        modifier = Modifier
-            .horizontalScroll(horizontalScroll)
-            .onPreviewKeyEvent { event ->
-                if (event.type == KeyEventType.KeyDown) {
-                    val meta = event.isMetaPressed || event.isCtrlPressed
-                    when {
-                        meta && event.key == Key.C -> {
-                            if (selectedRow >= 0 && selectedCol >= 0)
-                                clipboardManager.setText(AnnotatedString(axisFormatter.format(data[selectedRow][selectedCol])))
-                            true
+    Column {
+        Row(
+            modifier = Modifier
+                .horizontalScroll(horizontalScroll)
+                .testTag("${testTagPrefix}_root")
+                .focusRequester(axisFocusRequester)
+                .focusable()
+                .onPreviewKeyEvent { event ->
+                    if (event.type == KeyEventType.KeyDown) {
+                        val meta = event.isMetaPressed || event.isCtrlPressed
+                        when {
+                            meta && event.key == Key.C -> {
+                                if (selectedRow >= 0 && selectedCol >= 0)
+                                    clipboardManager.setText(AnnotatedString(axisFormatter.format(data[selectedRow][selectedCol])))
+                                true
+                            }
+                            meta && event.key == Key.V -> { handlePaste(); true }
+                            event.key == Key.Enter -> { commitEdit(); true }
+                            event.key == Key.Tab -> { commitEdit(advanceSelection = true); true }
+                            event.key == Key.Escape -> { editingRow = -1; editingCol = -1; true }
+                            else -> false
                         }
-                        meta && event.key == Key.V -> { handlePaste(); true }
-                        event.key == Key.Enter || event.key == Key.Tab -> { commitEdit(); true }
-                        event.key == Key.Escape -> { editingRow = -1; editingCol = -1; true }
-                        else -> false
-                    }
-                } else false
-            }
-    ) {
-        for (r in 0 until rowCount) {
-            for (c in 0 until colCount) {
+                    } else false
+                }
+        ) {
+            for (r in 0 until rowCount) {
+                for (c in 0 until colCount) {
                 val value = data[r][c]
                 val isEditing = editingRow == r && editingCol == c
                 val isSelected = selectedRow == r && selectedCol == c
@@ -156,7 +205,7 @@ fun MapAxis(
                 Box(
                     modifier = Modifier
                         .size(AXIS_CELL_WIDTH, AXIS_CELL_HEIGHT)
-                        .testTag("axis_cell_${r}_${c}")
+                        .testTag("${testTagPrefix}_cell_${r}_${c}")
                         .drawBehind { drawRect(bgColor) }
                         .border(0.5.dp, Color.Black)
                         .focusProperties { canFocus = false }
@@ -172,6 +221,7 @@ fun MapAxis(
                                 commitEdit()
                                 selectedRow = r
                                 selectedCol = c
+                                axisFocusRequester.requestFocus()
                             }
                         },
                     contentAlignment = Alignment.Center
@@ -208,7 +258,16 @@ fun MapAxis(
                         )
                     }
                 }
+                }
             }
+        }
+        validationError?.let { error ->
+            Text(
+                text = error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.labelSmall,
+                modifier = Modifier.testTag("${testTagPrefix}_error")
+            )
         }
     }
 }

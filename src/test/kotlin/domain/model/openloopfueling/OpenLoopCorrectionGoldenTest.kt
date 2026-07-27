@@ -22,6 +22,7 @@ import java.io.File
 import java.io.FileInputStream
 import kotlin.math.abs
 import kotlin.test.*
+import support.GlobalTestStateSnapshot
 
 /**
  * Golden-value tests for open-loop MLHFM correction.
@@ -47,7 +48,7 @@ class OpenLoopCorrectionGoldenTest {
         private val profileJson = Json { ignoreUnknownKeys = true }
     }
 
-    private lateinit var savedPlatform: EcuPlatform
+    private lateinit var globalState: GlobalTestStateSnapshot
     private lateinit var tableDefs: List<TableDefinition>
     private lateinit var allMaps: List<Pair<TableDefinition, Map3d>>
     private lateinit var tempBinFile: File
@@ -56,7 +57,7 @@ class OpenLoopCorrectionGoldenTest {
 
     @BeforeTest
     fun setUp() {
-        savedPlatform = EcuPlatformPreference.platform
+        globalState = GlobalTestStateSnapshot.capture()
         EcuPlatformPreference.platform = EcuPlatform.ME7
 
         assertTrue(XDF_FILE.exists(), "XDF not found: ${XDF_FILE.absolutePath}")
@@ -88,9 +89,9 @@ class OpenLoopCorrectionGoldenTest {
 
     @AfterTest
     fun tearDown() {
-        EcuPlatformPreference.platform = savedPlatform
         if (::tempBinFile.isInitialized) tempBinFile.delete()
         if (::stockBinCopy.isInitialized) stockBinCopy.delete()
+        if (::globalState.isInitialized) globalState.restore()
     }
 
     // ── Helper ──

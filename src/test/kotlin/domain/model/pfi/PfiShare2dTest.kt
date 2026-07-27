@@ -72,6 +72,24 @@ class PfiShare2dTest {
     }
 
     @Test
+    fun `refineFromLog2d treats an all-missing aligned load column as RPM-only`() {
+        val logData = mapOf(
+            Header.RPM_COLUMN_HEADER to listOf(3000.0, 4000.0, 5000.0),
+            Header.PFI_SPLIT_FACTOR_HEADER to listOf(0.25, 0.30, 0.35),
+            Header.ENGINE_LOAD_HEADER to listOf(Double.NaN, Double.NaN, Double.NaN)
+        )
+
+        val result = PfiShareCalculator.refineFromLog2d(logData)
+
+        assertTrue(result.provenance.all { row ->
+            row.all { it == GridValueProvenance.INTERPOLATED }
+        })
+        assertTrue(result.pfiSharePercent2d.all { row ->
+            row.all { it == row.first() }
+        })
+    }
+
+    @Test
     fun `refineFromLog2d with empty data returns default`() {
         val logData = emptyMap<Header, List<Double>>()
         val result = PfiShareCalculator.refineFromLog2d(logData)
@@ -257,6 +275,32 @@ class PfiShare2dTest {
                 val avg1d = rpm1d.loggedPfiPercent!![idx3k]
                 // 1D average would be (0.20 + 0.70) / 2 * 100 = 45%
                 assertEquals(45.0, avg1d, 1e-9, "1D should average both loads together")
+            }
+        }
+    }
+
+    @Test
+    fun `bilinear binning preserves observed PFI share magnitude`() {
+        val logData = mapOf(
+            Header.RPM_COLUMN_HEADER to List(10) { 2250.0 },
+            Header.ENGINE_LOAD_HEADER to List(10) { 50.0 },
+            Header.PFI_SPLIT_FACTOR_HEADER to List(10) { 0.28 }
+        )
+
+        val result = PfiShareCalculator.refineFromLog2d(
+            logData,
+            rpmBins = doubleArrayOf(2000.0, 2500.0),
+            loadBins = doubleArrayOf(40.0, 60.0)
+        )
+
+        for (row in result.pfiSharePercent2d) {
+            for (share in row) {
+                assertEquals(28.0, share, 1e-9, "Weighted binning must not dilute logged share")
+            }
+        }
+        for (row in result.effectiveSampleWeights) {
+            for (weight in row) {
+                assertEquals(2.5, weight, 1e-9)
             }
         }
     }

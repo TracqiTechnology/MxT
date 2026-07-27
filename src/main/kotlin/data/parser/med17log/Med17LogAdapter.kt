@@ -82,6 +82,7 @@ object Med17LogAdapter {
         mapSignal(med17Values, Med17LogFileContract.Header.BAROMETRIC_PRESSURE_HEADER, result, Me7LogFileContract.Header.BAROMETRIC_PRESSURE_HEADER)
         mapSignal(med17Values, Med17LogFileContract.Header.SELECTED_GEAR_HEADER, result, Me7LogFileContract.Header.SELECTED_GEAR_HEADER)
         mapSignal(med17Values, Med17LogFileContract.Header.TIME_STAMP_COLUMN_HEADER, result, Me7LogFileContract.Header.TIME_STAMP_COLUMN_HEADER)
+        mapSignal(med17Values, Med17LogFileContract.Header.REQUESTED_PRESSURE_HEADER, result, Me7LogFileContract.Header.REQUESTED_PRESSURE_HEADER)
 
         return result
     }

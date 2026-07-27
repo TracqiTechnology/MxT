@@ -304,14 +304,14 @@ class Med17WorkflowCalculatorTest {
         assertEquals(nonLinear[0].size, linear.zAxis[0].size,
             "Linear table should have same column count as input")
 
-        // Each column should have equal step sizes
-        for (col in linear.zAxis[0].indices) {
-            if (linear.zAxis.size < 3) continue
-            val step = linear.zAxis[1][col] - linear.zAxis[0][col]
-            for (row in 2 until linear.zAxis.size) {
-                val actualStep = linear.zAxis[row][col] - linear.zAxis[row - 1][col]
+        // Each RPM row should have equal pressure steps across duty columns.
+        for (row in linear.zAxis.indices) {
+            if (linear.zAxis[row].size < 3) continue
+            val step = linear.zAxis[row][1] - linear.zAxis[row][0]
+            for (column in 2 until linear.zAxis[row].size) {
+                val actualStep = linear.zAxis[row][column] - linear.zAxis[row][column - 1]
                 assertEquals(step, actualStep, 0.01,
-                    "Column $col step should be constant: expected $step, got $actualStep at row $row")
+                    "RPM row $row step should be constant: expected $step, got $actualStep at column $column")
             }
         }
     }

@@ -200,7 +200,16 @@ fun KfzwopScreen() {
             syncYAxis = kfmiopSyncYAxis,
             onApplySyncYAxis = { syncAxis -> editedYAxis = arrayOf(syncAxis) },
             syncXAxis = kfmiopSyncXAxis,
-            onApplySyncXAxis = { syncAxis -> editedXAxis = arrayOf(syncAxis) }
+            onApplySyncXAxis = { syncAxis ->
+                val native = inputKfzwop?.xAxis
+                editedXAxis = arrayOf(
+                    if (native != null && syncAxis.size != native.size) {
+                        domain.math.RescaleAxis.rescaleAxis(native, syncAxis.last())
+                    } else {
+                        syncAxis.copyOf()
+                    }
+                )
+            }
         )
 
         ComparisonArea(
@@ -285,7 +294,8 @@ private fun ConfigurationCard(
                 MapAxis(
                     data = editedXAxis,
                     editable = true,
-                    onDataChanged = onXAxisChanged
+                    onDataChanged = onXAxisChanged,
+                    testTagPrefix = "kfzwop-output-x"
                 )
             }
 
@@ -310,7 +320,8 @@ private fun ConfigurationCard(
                 MapAxis(
                     data = editedYAxis,
                     editable = true,
-                    onDataChanged = onYAxisChanged
+                    onDataChanged = onYAxisChanged,
+                    testTagPrefix = "kfzwop-output-y"
                 )
             }
 
@@ -501,7 +512,8 @@ private fun EditableInputSection(
                 MapTable(
                     map = editedInputMap,
                     editable = true,
-                    onMapChanged = onInputMapChanged
+                    onMapChanged = onInputMapChanged,
+                    testTagPrefix = "kfzwop-input"
                 )
             }
         } else {
@@ -529,7 +541,11 @@ private fun SideBySideTables(
             )
             if (originalKfzwop != null) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    MapTable(map = originalKfzwop, editable = false)
+                    MapTable(
+                        map = originalKfzwop,
+                        editable = false,
+                        testTagPrefix = "kfzwop-original"
+                    )
                 }
             } else {
                 Text("No map loaded", style = MaterialTheme.typography.bodyMedium)
@@ -545,7 +561,11 @@ private fun SideBySideTables(
             )
             if (calculatedKfzwop != null) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    MapTable(map = calculatedKfzwop, editable = false)
+                    MapTable(
+                        map = calculatedKfzwop,
+                        editable = false,
+                        testTagPrefix = "kfzwop-calculated"
+                    )
                 }
             } else {
                 Text("No data", style = MaterialTheme.typography.bodyMedium)

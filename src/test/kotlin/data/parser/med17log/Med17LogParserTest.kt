@@ -22,6 +22,57 @@ class Med17LogParserTest {
         return File(url.toURI())
     }
 
+    @Test
+    fun `missing required headers fail closed with actionable diagnostics`() {
+        val file = File.createTempFile("mxt-missing-headers-", ".csv")
+        try {
+            file.writeText(
+                """
+                DS1 firmware:test,MED17
+                Time(s),Engine speed(nmot_w) (1/min)
+                0.0,2000
+                """.trimIndent()
+            )
+
+            val error = assertFailsWith<IllegalArgumentException> {
+                parser.parseLogFile(Med17LogParser.LogType.FUEL_TRIM, file)
+            }
+            assertTrue(error.message!!.contains("headers were not found"))
+            val diagnostics = assertNotNull(parser.lastDiagnostics)
+            assertTrue(diagnostics.missingHeaders.contains(H.ENGINE_LOAD_HEADER.header))
+            assertEquals(0, diagnostics.acceptedRows)
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `non-numeric required values fail closed instead of returning a partial log`() {
+        val file = File.createTempFile("mxt-malformed-row-", ".csv")
+        try {
+            file.writeText(
+                """
+                DS1 firmware:test,MED17
+                Time(s),Engine speed(nmot_w) (1/min),Load(rl_w) (%),STFT(frm_w) (-)
+                0.0,2000,50,1.10
+                0.1,not-an-rpm,55,1.20
+                """.trimIndent()
+            )
+
+            val error = assertFailsWith<IllegalArgumentException> {
+                parser.parseLogFile(Med17LogParser.LogType.FUEL_TRIM, file)
+            }
+            assertTrue(error.message!!.contains("Malformed rows"))
+            val diagnostics = assertNotNull(parser.lastDiagnostics)
+            assertEquals(2, diagnostics.attemptedRows)
+            assertEquals(1, diagnostics.acceptedRows)
+            assertEquals(1, diagnostics.rejectedRows)
+            assertTrue(diagnostics.errors.single().contains("non-numeric"))
+        } finally {
+            file.delete()
+        }
+    }
+
     // ── T1: Optimizer parsing — row counts ──────────────────────────
 
     @Test
@@ -156,11 +207,14 @@ class Med17LogParserTest {
     }
 
     @Test
-    fun `LDRPID does not populate optimizer-only signals`() {
+    fun `LDRPID includes requested pressure for measured diagnostics but omits unrelated optimizer signals`() {
         val result = parser.parseLogFile(Med17LogParser.LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
 
-        // LDRPID map doesn't include these keys at all
-        assertNull(result[H.REQUESTED_PRESSURE_HEADER], "Requested pressure should not be in LDRPID map")
+        assertEquals(
+            result[H.RPM_COLUMN_HEADER]!!.size,
+            result[H.REQUESTED_PRESSURE_HEADER]!!.size,
+            "Requested pressure should remain row-aligned for measured log diagnostics"
+        )
         assertNull(result[H.REQUESTED_LOAD_HEADER], "Requested load should not be in LDRPID map")
         assertNull(result[H.ENGINE_LOAD_HEADER], "Engine load should not be in LDRPID map")
     }

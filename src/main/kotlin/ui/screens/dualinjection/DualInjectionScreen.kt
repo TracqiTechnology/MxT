@@ -12,6 +12,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -28,12 +30,7 @@ import domain.model.injector.InjectorScalingSolver
 import domain.model.injector.InjectorSpec
 import domain.model.injector.KrkteScalingResult
 import domain.model.injector.TvubResult
-import domain.model.pfi.InjectorStatus
-import domain.model.pfi.PfiShareCalculator
-import domain.model.pfi.PfiShareResult
-import domain.model.pfi.PfiShare2dResult
-import domain.model.pfi.ReversePfiResult
-import domain.model.pfi.RpmSweepRow
+import domain.model.pfi.*
 import domain.model.presets.InjectorPresets
 import domain.model.presets.InjectorType
 import kotlinx.coroutines.Dispatchers
@@ -45,6 +42,7 @@ import java.awt.Frame
 import java.io.File
 
 private enum class WriteStatus { Idle, Success, Error }
+private enum class PfiShareSource { MANUAL, DEFAULT_CURVE, LOGGED_CURVE, LOGGED_SURFACE }
 
 /**
  * MED17-only screen for dual injection (port + direct) calibration.
@@ -58,7 +56,8 @@ private enum class WriteStatus { Idle, Success, Error }
 fun DualInjectionScreen(
     initialTab: Int = 0,
     initialKrktePfi: String? = null,
-    initialKrkteGdi: String? = null
+    initialKrkteGdi: String? = null,
+    preloadedPfiLogFile: File? = null
 ) {
     var selectedTab by remember { mutableStateOf(initialTab) }
     val tabTitles = listOf("Port Injector", "Direct Injector", "Split Calculator")
@@ -77,7 +76,7 @@ fun DualInjectionScreen(
         when (selectedTab) {
             0 -> PortInjectorTab()
             1 -> DirectInjectorTab()
-            2 -> SplitCalculatorTab(initialKrktePfi, initialKrkteGdi)
+            2 -> SplitCalculatorTab(initialKrktePfi, initialKrkteGdi, preloadedPfiLogFile)
         }
     }
 }
@@ -651,7 +650,8 @@ private fun DirectInjectorTab() {
 @Composable
 private fun SplitCalculatorTab(
     initialKrktePfi: String? = null,
-    initialKrkteGdi: String? = null
+    initialKrkteGdi: String? = null,
+    preloadedPfiLogFile: File? = null
 ) {
     val scrollState = rememberScrollState()
     val scope = rememberCoroutineScope()
@@ -660,6 +660,28 @@ private fun SplitCalculatorTab(
     var diKrkte by remember { mutableStateOf(initialKrkteGdi ?: "") }
     var targetLoad by remember { mutableStateOf("150.0") }
     var targetRpm by remember { mutableStateOf("5000.0") }
+    var pfiShareSource by remember { mutableStateOf(PfiShareSource.DEFAULT_CURVE) }
+    var manualPfiShare by remember {
+        mutableStateOf(DualInjectionPreferences.portSharePercentDefault.toString())
+    }
+    var pressureAlreadyCompensated by remember {
+        mutableStateOf(DualInjectionPreferences.krkateAlreadyPressureCompensated)
+    }
+    var referencePfiPressure by remember {
+        mutableStateOf(DualInjectionPreferences.referencePortDifferentialPressureBar.toString())
+    }
+    var operatingPfiRailPressure by remember {
+        mutableStateOf(DualInjectionPreferences.portInjectorFuelPressureBar.toString())
+    }
+    var operatingManifoldPressure by remember {
+        mutableStateOf(DualInjectionPreferences.operatingManifoldPressureBarGauge.toString())
+    }
+    var referenceGdiPressure by remember {
+        mutableStateOf(DualInjectionPreferences.referenceDirectPressureBarAbsolute.toString())
+    }
+    var operatingGdiPressure by remember {
+        mutableStateOf(DualInjectionPreferences.directInjectorFuelPressureBar.toString())
+    }
 
     var pfiResult by remember { mutableStateOf<PfiShareResult?>(null) }
     var pfi2dResult by remember { mutableStateOf<PfiShare2dResult?>(null) }
@@ -677,6 +699,147 @@ private fun SplitCalculatorTab(
     var reverseTargetDi by remember { mutableStateOf("5.0") }
     var reverseResult by remember { mutableStateOf<ReversePfiResult?>(null) }
 
+    fun loadPfiLog(logFile: File) {
+        showProgress = true
+        logStatus = "Loading..."
+        pfiResult = PfiShareCalculator.calculateRpmDependentShare()
+        pfi2dResult = null
+        pfiShareSource = PfiShareSource.DEFAULT_CURVE
+        show2dView = false
+        sweepRows = emptyList()
+        reverseResult = null
+        errorMessage = null
+        scope.launch {
+            try {
+                val (refined, refined2d) = withContext(Dispatchers.IO) {
+                    val logData = Med17LogParser().parseLogFile(
+                        Med17LogParser.LogType.PFI_SPLIT, logFile
+                    )
+                    PfiShareCalculator.refineFromLog(logData) to
+                        PfiShareCalculator.refineFromLog2d(logData)
+                }
+                pfiResult = refined
+                pfi2dResult = refined2d
+                val measuredCells = refined2d.provenance.sumOf { row ->
+                    row.count { it == GridValueProvenance.MEASURED }
+                }
+                val hasMeasuredSurface = measuredCells > 0
+                pfiShareSource = when {
+                    hasMeasuredSurface -> PfiShareSource.LOGGED_SURFACE
+                    refined.loggedRpmAxis != null -> PfiShareSource.LOGGED_CURVE
+                    else -> PfiShareSource.DEFAULT_CURVE
+                }
+                logStatus = if (refined.loggedRpmAxis != null) {
+                    "✓ Loaded ${refined.loggedRpmAxis!!.size} RPM points from ${logFile.name}" +
+                        if (hasMeasuredSurface) {
+                            " ($measuredCells measured 2D cells; remaining cells are interpolated/default)"
+                        } else {
+                            " (RPM-only PFI split signal)"
+                        }
+                } else {
+                    "⚠ No PFI split data found in log"
+                }
+            } catch (e: Exception) {
+                logStatus = "Error: ${e.message}"
+            } finally {
+                showProgress = false
+            }
+        }
+    }
+
+    fun pressureContext(): InjectionPressureContext {
+        val context = InjectionPressureContext(
+            mode = if (pressureAlreadyCompensated) {
+                PressureCompensationMode.ALREADY_COMPENSATED
+            } else {
+                PressureCompensationMode.REFERENCE_TO_OPERATING
+            },
+            referencePfiDifferentialBar = referencePfiPressure.toDouble(),
+            operatingPfiRailGaugeBar = operatingPfiRailPressure.toDouble(),
+            operatingManifoldGaugeBar = operatingManifoldPressure.toDouble(),
+            referenceGdiRailBarAbsolute = referenceGdiPressure.toDouble(),
+            operatingGdiRailBarAbsolute = operatingGdiPressure.toDouble()
+        )
+        context.validate()
+        DualInjectionPreferences.krkateAlreadyPressureCompensated = pressureAlreadyCompensated
+        DualInjectionPreferences.referencePortDifferentialPressureBar =
+            context.referencePfiDifferentialBar
+        DualInjectionPreferences.portInjectorFuelPressureBar =
+            context.operatingPfiRailGaugeBar
+        DualInjectionPreferences.operatingManifoldPressureBarGauge =
+            context.operatingManifoldGaugeBar
+        DualInjectionPreferences.referenceDirectPressureBarAbsolute =
+            context.referenceGdiRailBarAbsolute
+        DualInjectionPreferences.directInjectorFuelPressureBar =
+            context.operatingGdiRailBarAbsolute
+        return context
+    }
+
+    fun selectedPfiShare(load: Double, rpm: Double): Double = when (pfiShareSource) {
+        PfiShareSource.MANUAL -> manualPfiShare.toDouble().also {
+            require(it.isFinite() && it in 0.0..100.0) {
+                "Manual PFI share must be between 0 and 100%"
+            }
+        }
+        PfiShareSource.DEFAULT_CURVE -> PfiShareCalculator.interpolateClamped(
+            rpm,
+            PfiShareCalculator.DEFAULT_RPM_AXIS,
+            PfiShareCalculator.DEFAULT_PFI_SHARE
+        )
+        PfiShareSource.LOGGED_CURVE -> {
+            val result = pfiResult
+            if (result?.loggedRpmAxis != null && result.loggedPfiPercent != null) {
+                PfiShareCalculator.interpolateClamped(rpm, result.loggedRpmAxis, result.loggedPfiPercent)
+            } else {
+                throw IllegalArgumentException("Load a log containing a PFI split signal first")
+            }
+        }
+        PfiShareSource.LOGGED_SURFACE -> {
+            val result = pfi2dResult
+                ?: throw IllegalArgumentException("Load a log containing RPM and load PFI data first")
+            Map3d(
+                result.loadAxis.toTypedArray(),
+                result.rpmAxis.toTypedArray(),
+                result.pfiSharePercent2d.map { row -> row.toTypedArray() }.toTypedArray()
+            ).lookup(load, rpm)
+        }
+    }
+
+    fun selectedSweepCurve(load: Double): PfiShareResult = when (pfiShareSource) {
+        PfiShareSource.MANUAL -> PfiShareResult(
+            rpmAxis = doubleArrayOf(1000.0, 9000.0),
+            pfiSharePercent = manualPfiShare.toDouble().also {
+                require(it.isFinite() && it in 0.0..100.0) {
+                    "Manual PFI share must be between 0 and 100%"
+                }
+            }.let { doubleArrayOf(it, it) }
+        )
+        PfiShareSource.LOGGED_CURVE -> {
+            val result = pfiResult
+            if (result?.loggedRpmAxis != null && result.loggedPfiPercent != null) {
+                PfiShareResult(result.loggedRpmAxis!!, result.loggedPfiPercent!!)
+            } else {
+                throw IllegalArgumentException("Load a log containing a PFI split signal first")
+            }
+        }
+        PfiShareSource.LOGGED_SURFACE -> {
+            val result = pfi2dResult
+                ?: throw IllegalArgumentException("Load a log containing RPM and load PFI data first")
+            val surface = Map3d(
+                result.loadAxis.toTypedArray(),
+                result.rpmAxis.toTypedArray(),
+                result.pfiSharePercent2d.map { row -> row.toTypedArray() }.toTypedArray()
+            )
+            PfiShareResult(
+                rpmAxis = result.rpmAxis.copyOf(),
+                pfiSharePercent = DoubleArray(result.rpmAxis.size) { index ->
+                    surface.lookup(load, result.rpmAxis[index])
+                }
+            )
+        }
+        PfiShareSource.DEFAULT_CURVE -> PfiShareCalculator.calculateRpmDependentShare()
+    }
+
     // Initialize default curve on first composition
     LaunchedEffect(Unit) {
         if (pfiResult == null) {
@@ -684,16 +847,21 @@ private fun SplitCalculatorTab(
         }
     }
 
+    LaunchedEffect(preloadedPfiLogFile) {
+        preloadedPfiLogFile?.let(::loadPfiLog)
+    }
+
     // Auto-trigger RPM sweep when initial KRKTE values are provided (screenshot harness)
     LaunchedEffect(pfiResult) {
         if (initialKrktePfi != null && initialKrkteGdi != null && pfiResult != null && sweepRows.isEmpty()) {
             try {
-                val curve = pfiResult ?: PfiShareCalculator.calculateRpmDependentShare()
+                val load = sweepLoad.toDouble()
                 sweepRows = PfiShareCalculator.calculateRpmSweep(
-                    loadPercent = sweepLoad.toDouble(),
-                    pfiShareCurve = curve,
+                    loadPercent = load,
+                    pfiShareCurve = selectedSweepCurve(load),
                     portKrkte = portKrkte.toDouble(),
-                    directKrkte = diKrkte.toDouble()
+                    directKrkte = diKrkte.toDouble(),
+                    pressureContext = pressureContext()
                 )
             } catch (_: Exception) { }
         }
@@ -742,36 +910,7 @@ private fun SplitCalculatorTab(
                         val dir = dialog.directory
                         val file = dialog.file
                         if (dir != null && file != null) {
-                            showProgress = true
-                            logStatus = "Loading..."
-                            scope.launch {
-                                withContext(Dispatchers.IO) {
-                                    try {
-                                        val logFile = File(dir, file)
-                                        val parser = Med17LogParser()
-                                        val logData = parser.parseLogFile(
-                                            Med17LogParser.LogType.PFI_SPLIT, logFile
-                                        )
-                                        val refined = PfiShareCalculator.refineFromLog(logData)
-                                        val refined2d = PfiShareCalculator.refineFromLog2d(logData)
-                                        withContext(Dispatchers.Main) {
-                                            pfiResult = refined
-                                            pfi2dResult = refined2d
-                                            logStatus = if (refined.loggedRpmAxis != null)
-                                                "✓ Loaded ${refined.loggedRpmAxis!!.size} RPM points from ${logFile.name}" +
-                                                    if (logData[Med17LogFileContract.Header.ENGINE_LOAD_HEADER]?.isNotEmpty() == true) " (2D load data available)" else ""
-                                            else
-                                                "⚠ No PFI split data found in log"
-                                            showProgress = false
-                                        }
-                                    } catch (e: Exception) {
-                                        withContext(Dispatchers.Main) {
-                                            logStatus = "Error: ${e.message}"
-                                            showProgress = false
-                                        }
-                                    }
-                                }
-                            }
+                            loadPfiLog(File(dir, file))
                         }
                     }) {
                         Text("Load PFI Log")
@@ -779,7 +918,10 @@ private fun SplitCalculatorTab(
                     Button(onClick = {
                         pfiResult = PfiShareCalculator.calculateRpmDependentShare()
                         pfi2dResult = null
+                        pfiShareSource = PfiShareSource.DEFAULT_CURVE
                         show2dView = false
+                        sweepRows = emptyList()
+                        reverseResult = null
                         logStatus = "Reset to default curve"
                     }, colors = ButtonDefaults.outlinedButtonColors()) {
                         Text("Reset to Default")
@@ -791,7 +933,12 @@ private fun SplitCalculatorTab(
                 }
                 logStatus?.let {
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        it,
+                        modifier = Modifier.testTag("pfi-log-status"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
@@ -903,6 +1050,7 @@ private fun SplitCalculatorTab(
                     MapTable(
                         map = map3d,
                         editable = false,
+                        testTagPrefix = "pfi-logged-surface",
                         cellColorProvider = { r, c ->
                             val count = result2d.sampleCounts[r][c]
                             when {
@@ -933,20 +1081,121 @@ private fun SplitCalculatorTab(
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedTextField(value = portKrkte, onValueChange = { portKrkte = it }, label = { Text("KRKTE_PFI (ms/%)") }, modifier = Modifier.weight(1f), singleLine = true)
-                    OutlinedTextField(value = diKrkte, onValueChange = { diKrkte = it }, label = { Text("KRKTE_GDI (ms/%)") }, modifier = Modifier.weight(1f), singleLine = true)
+                    OutlinedTextField(value = portKrkte, onValueChange = { portKrkte = it }, label = { Text("KRKTE_PFI (ms/%)") }, modifier = Modifier.weight(1f).testTag("pfi-krkte-port"), singleLine = true)
+                    OutlinedTextField(value = diKrkte, onValueChange = { diKrkte = it }, label = { Text("KRKTE_GDI (ms/%)") }, modifier = Modifier.weight(1f).testTag("pfi-krkte-direct"), singleLine = true)
                 }
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    OutlinedTextField(value = targetRpm, onValueChange = { targetRpm = it }, label = { Text("RPM") }, modifier = Modifier.weight(1f), singleLine = true)
-                    OutlinedTextField(value = targetLoad, onValueChange = { targetLoad = it }, label = { Text("Target Load (%)") }, modifier = Modifier.weight(1f), singleLine = true)
+                    OutlinedTextField(value = targetRpm, onValueChange = { targetRpm = it }, label = { Text("RPM") }, modifier = Modifier.weight(1f).testTag("pfi-target-rpm"), singleLine = true)
+                    OutlinedTextField(value = targetLoad, onValueChange = { targetLoad = it }, label = { Text("Target Load (%)") }, modifier = Modifier.weight(1f).testTag("pfi-target-load"), singleLine = true)
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("PFI share source", style = MaterialTheme.typography.labelMedium)
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterChip(
+                        selected = pfiShareSource == PfiShareSource.MANUAL,
+                        onClick = { pfiShareSource = PfiShareSource.MANUAL },
+                        label = { Text("Manual") }
+                    )
+                    FilterChip(
+                        selected = pfiShareSource == PfiShareSource.DEFAULT_CURVE,
+                        onClick = { pfiShareSource = PfiShareSource.DEFAULT_CURVE },
+                        label = { Text("Default RPM") }
+                    )
+                    FilterChip(
+                        selected = pfiShareSource == PfiShareSource.LOGGED_CURVE,
+                        onClick = { pfiShareSource = PfiShareSource.LOGGED_CURVE },
+                        enabled = pfiResult?.loggedRpmAxis != null,
+                        label = { Text("Logged RPM") }
+                    )
+                    FilterChip(
+                        selected = pfiShareSource == PfiShareSource.LOGGED_SURFACE,
+                        onClick = { pfiShareSource = PfiShareSource.LOGGED_SURFACE },
+                        enabled = pfi2dResult?.provenance?.any { row ->
+                            row.any { it == GridValueProvenance.MEASURED }
+                        } == true,
+                        label = { Text("Logged RPM × load") }
+                    )
+                }
+                if (pfiShareSource == PfiShareSource.MANUAL) {
+                    OutlinedTextField(
+                        value = manualPfiShare,
+                        onValueChange = { manualPfiShare = it },
+                        label = { Text("Manual PFI share (%)") },
+                        modifier = Modifier.width(220.dp).testTag("pfi-manual-share"),
+                        singleLine = true
+                    )
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = pressureAlreadyCompensated,
+                        modifier = Modifier.testTag("pfi-pressure-compensated"),
+                        onCheckedChange = {
+                            pressureAlreadyCompensated = it
+                            DualInjectionPreferences.krkateAlreadyPressureCompensated = it
+                        }
+                    )
+                    Text("Entered KRKATE values are already compensated for operating pressure")
+                }
+                AnimatedVisibility(!pressureAlreadyCompensated) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text(
+                            "Pressure correction: effective KRKATE = entered KRKATE × √(reference pressure / operating pressure)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                referencePfiPressure,
+                                { referencePfiPressure = it },
+                                label = { Text("PFI reference ΔP (bar)") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                operatingPfiRailPressure,
+                                { operatingPfiRailPressure = it },
+                                label = { Text("PFI rail gauge (bar)") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                operatingManifoldPressure,
+                                { operatingManifoldPressure = it },
+                                label = { Text("Manifold gauge (bar)") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                referenceGdiPressure,
+                                { referenceGdiPressure = it },
+                                label = { Text("GDI reference rail abs (bar)") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                operatingGdiPressure,
+                                { operatingGdiPressure = it },
+                                label = { Text("GDI operating rail abs (bar)") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                        }
+                    }
                 }
             }
         }
 
         // Calculate
-        Button(onClick = {
+        Button(
+            modifier = Modifier.testTag("pfi-calculate"),
+            onClick = {
             errorMessage = null
+            if (logStatus?.contains("on-time:") == true) logStatus = null
             try {
                 val pKrkte = portKrkte.toDouble()
                 val dKrkte = diKrkte.toDouble()
@@ -958,46 +1207,52 @@ private fun SplitCalculatorTab(
                 require(load > 0) { "Target load must be positive" }
                 require(rpm > 0) { "RPM must be positive" }
 
-                // Look up PFI share — prefer 2D surface when available
-                val pfiShare = if (show2dView && pfi2dResult != null) {
-                    val map3d = Map3d(
-                        pfi2dResult!!.loadAxis.map { it }.toTypedArray(),
-                        pfi2dResult!!.rpmAxis.map { it }.toTypedArray(),
-                        pfi2dResult!!.pfiSharePercent2d.map { row -> row.map { it }.toTypedArray() }.toTypedArray()
-                    )
-                    map3d.lookup(load, rpm) / 100.0
-                } else {
-                    val curveResult = pfiResult ?: PfiShareCalculator.calculateRpmDependentShare()
-                    PfiShareCalculator.interpolateClamped(
-                        rpm, curveResult.rpmAxis, curveResult.pfiSharePercent
-                    ) / 100.0
-                }
-
-                val portOnTime = load * pfiShare * pKrkte
-                val diOnTime = load * (1.0 - pfiShare) * dKrkte
-                val availableWindow = 120000.0 / rpm  // ms per injection event (4-stroke)
+                val sharePercent = selectedPfiShare(load, rpm)
+                val context = pressureContext()
+                val calculation = PfiShareCalculator.calculateInjectionOnTime(
+                    rpm = rpm,
+                    loadPercent = load,
+                    pfiSharePercent = sharePercent,
+                    portKrkte = pKrkte,
+                    directKrkte = dKrkte,
+                    pressureContext = context
+                )
 
                 errorMessage = null
                 // Build result display inline
                 val result = buildString {
-                    appendLine("RPM: %.0f  |  PFI Share: %.1f%%  |  Available window: %.2f ms".format(rpm, pfiShare * 100.0, availableWindow))
-                    appendLine("Port (PFI) on-time:   %.4f ms".format(portOnTime))
-                    appendLine("Direct (GDI) on-time: %.4f ms".format(diOnTime))
-                    appendLine("Total on-time:        %.4f ms".format(portOnTime + diOnTime))
-                    if (portOnTime > availableWindow * 0.85) {
+                    appendLine(
+                        "RPM: %.0f  |  PFI Share: %.1f%% (%s)  |  Available window: %.2f ms"
+                            .format(rpm, calculation.pfiSharePercent, pfiShareSource.name, calculation.availableWindowMs)
+                    )
+                    appendLine(
+                        "Effective KRKATE: PFI %.5f, GDI %.5f"
+                            .format(calculation.effectivePortKrkte, calculation.effectiveDirectKrkte)
+                    )
+                    appendLine("Port (PFI) on-time:   %.4f ms".format(calculation.portOnTimeMs))
+                    appendLine("Direct (GDI) on-time: %.4f ms".format(calculation.directOnTimeMs))
+                    appendLine(
+                        "Total on-time:        %.4f ms"
+                            .format(calculation.portOnTimeMs + calculation.directOnTimeMs)
+                    )
+                    if (calculation.portOnTimeMs > calculation.availableWindowMs * 0.85) {
                         appendLine("⚠ PFI on-time exceeds 85% of available window — consider reducing PFI share at this RPM")
                     }
-                    if (diOnTime > availableWindow * 0.85) {
-                        appendLine("⚠ GDI on-time exceeds 85% of available window — check DI injector sizing")
+                    if (calculation.status == InjectorStatus.DI_OVER_LIMIT ||
+                        calculation.status == InjectorStatus.DI_NEAR_LIMIT
+                    ) {
+                        appendLine("⚠ GDI on-time is near/over the configured DI limit")
                     }
                 }
                 // Store result in errorMessage field (reusing for simplicity)
                 logStatus = result
-                DualInjectionPreferences.portSharePercentDefault = pfiShare * 100.0
+                DualInjectionPreferences.portSharePercentDefault = sharePercent
             } catch (e: Exception) {
+                if (logStatus?.contains("on-time:") == true) logStatus = null
                 errorMessage = e.message ?: "Calculation error"
             }
-        }) {
+            }
+        ) {
             Text("Calculate at RPM")
         }
 
@@ -1013,7 +1268,12 @@ private fun SplitCalculatorTab(
                     tonalElevation = 2.dp,
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(modifier = Modifier.padding(16.dp)) {
+                    Column(
+                        modifier = Modifier
+                            .padding(16.dp)
+                            .testTag("pfi-calculation-result")
+                            .semantics(mergeDescendants = true) {}
+                    ) {
                         Text("Result", style = MaterialTheme.typography.titleSmall)
                         Spacer(modifier = Modifier.height(8.dp))
                         for (line in status.lines()) {
@@ -1057,6 +1317,7 @@ private fun SplitCalculatorTab(
                     )
                     Button(onClick = {
                         errorMessage = null
+                        sweepRows = emptyList()
                         try {
                             val pKrkte = portKrkte.toDouble()
                             val dKrkte = diKrkte.toDouble()
@@ -1065,12 +1326,12 @@ private fun SplitCalculatorTab(
                             require(dKrkte > 0) { "KRKTE_GDI must be positive" }
                             require(load > 0) { "Sweep load must be positive" }
 
-                            val curve = pfiResult ?: PfiShareCalculator.calculateRpmDependentShare()
                             sweepRows = PfiShareCalculator.calculateRpmSweep(
                                 loadPercent = load,
-                                pfiShareCurve = curve,
+                                pfiShareCurve = selectedSweepCurve(load),
                                 portKrkte = pKrkte,
-                                directKrkte = dKrkte
+                                directKrkte = dKrkte,
+                                pressureContext = pressureContext()
                             )
                         } catch (e: Exception) {
                             errorMessage = e.message ?: "Sweep calculation error"
@@ -1150,6 +1411,7 @@ private fun SplitCalculatorTab(
                     Text("Reverse PFI Share Calculator", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                     FilterChip(
                         selected = showReverseCalc,
+                        modifier = Modifier.testTag("pfi-reverse-toggle"),
                         onClick = { showReverseCalc = !showReverseCalc },
                         label = { Text(if (showReverseCalc) "Hide" else "Show") }
                     )
@@ -1172,11 +1434,14 @@ private fun SplitCalculatorTab(
                                 value = reverseTargetDi,
                                 onValueChange = { reverseTargetDi = it },
                                 label = { Text("Target DI On-Time (ms)") },
-                                modifier = Modifier.width(200.dp),
+                                modifier = Modifier.width(200.dp).testTag("pfi-reverse-target-di"),
                                 singleLine = true
                             )
-                            Button(onClick = {
+                            Button(
+                                modifier = Modifier.testTag("pfi-reverse-calculate"),
+                                onClick = {
                                 errorMessage = null
+                                reverseResult = null
                                 try {
                                     val pKrkte = portKrkte.toDouble()
                                     val dKrkte = diKrkte.toDouble()
@@ -1190,12 +1455,14 @@ private fun SplitCalculatorTab(
                                         rpmBins = PfiShareCalculator.DEFAULT_2D_RPM_BINS,
                                         loadBins = PfiShareCalculator.DEFAULT_2D_LOAD_BINS,
                                         portKrkte = pKrkte,
-                                        directKrkte = dKrkte
+                                        directKrkte = dKrkte,
+                                        pressureContext = pressureContext()
                                     )
                                 } catch (e: Exception) {
                                     errorMessage = e.message ?: "Reverse calculation error"
                                 }
-                            }) {
+                                }
+                            ) {
                                 Text("Calculate")
                             }
                         }
@@ -1220,7 +1487,9 @@ private fun SplitCalculatorTab(
                             )
                             MapTable(
                                 map = map3d,
+                                modifier = Modifier.heightIn(max = 400.dp),
                                 editable = false,
+                                testTagPrefix = "pfi-reverse",
                                 cellColorProvider = { r, c ->
                                     when (result.constraintFlags[r][c]) {
                                         InjectorStatus.OK -> Color(0x2000C853.toInt())
@@ -1237,5 +1506,3 @@ private fun SplitCalculatorTab(
         }
     }
 }
-
-

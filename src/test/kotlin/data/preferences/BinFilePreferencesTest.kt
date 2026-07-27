@@ -4,16 +4,24 @@ import data.preferences.bin.BinFilePreferences
 import data.preferences.xdf.XdfFilePreferences
 import data.preferences.kp.KpFilePreferences
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Test
 import java.io.File
 import java.util.prefs.Preferences
 
 class BinFilePreferencesTest {
+    private lateinit var savedFile: File
+
+    @BeforeEach
+    fun saveState() {
+        savedFile = BinFilePreferences.getStoredFile()
+    }
 
     @AfterEach
     fun cleanup() {
-        BinFilePreferences.clear()
+        if (savedFile.path.isEmpty()) BinFilePreferences.clear()
+        else BinFilePreferences.setFile(savedFile)
     }
 
     @Test
@@ -71,10 +79,17 @@ class BinFilePreferencesTest {
 }
 
 class XdfFilePreferencesTest {
+    private lateinit var savedFile: File
+
+    @BeforeEach
+    fun saveState() {
+        savedFile = XdfFilePreferences.getStoredFile()
+    }
 
     @AfterEach
     fun cleanup() {
-        XdfFilePreferences.clear()
+        if (savedFile.path.isEmpty()) XdfFilePreferences.clear()
+        else XdfFilePreferences.setFile(savedFile)
     }
 
     @Test
@@ -132,10 +147,17 @@ class XdfFilePreferencesTest {
 }
 
 class KpFilePreferencesTest {
+    private lateinit var savedFile: File
+
+    @BeforeEach
+    fun saveState() {
+        savedFile = KpFilePreferences.getStoredFile()
+    }
 
     @AfterEach
     fun cleanup() {
-        KpFilePreferences.clear()
+        if (savedFile.path.isEmpty()) KpFilePreferences.clear()
+        else KpFilePreferences.setFile(savedFile)
     }
 
     @Test
