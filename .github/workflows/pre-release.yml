@@ -61,6 +61,11 @@ jobs:
           name: test-results
           path: build/reports/tests/test/
 
+  internal-fixture-test:
+    uses: ./.github/workflows/internal-fixture-regression.yml
+    secrets:
+      ME7_INTERNAL_DEPLOY_KEY: ${{ secrets.ME7_INTERNAL_DEPLOY_KEY }}
+
   check-version:
     runs-on: ubuntu-latest
     outputs:
@@ -105,7 +110,7 @@ jobs:
           echo "pkg_version=${PKG_VERSION}" >> "$GITHUB_OUTPUT"
 
   build-macos:
-    needs: [determine-runner, check-version, test]
+    needs: [determine-runner, check-version, test, internal-fixture-test]
     runs-on: ${{ fromJSON(needs.determine-runner.outputs.runner-type) }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -135,7 +140,7 @@ jobs:
             build/compose/jars/*.jar
 
   build-windows:
-    needs: [check-version, test]
+    needs: [check-version, test, internal-fixture-test]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -175,7 +180,7 @@ jobs:
             MxT-*-windows-x64.zip
 
   build-linux:
-    needs: [check-version, test]
+    needs: [check-version, test, internal-fixture-test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

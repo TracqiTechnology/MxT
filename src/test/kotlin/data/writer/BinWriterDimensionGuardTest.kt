@@ -4,6 +4,8 @@ import data.parser.xdf.AxisDefinition
 import data.parser.xdf.TableDefinition
 import domain.math.map.Map3d
 import java.io.File
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlin.test.AfterTest
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -24,7 +26,17 @@ class BinWriterDimensionGuardTest {
     fun cleanup() = tmpFiles.forEach { it.delete() }
 
     private fun bin(): File =
-        File.createTempFile("mxt-guard", ".bin").also { tmpFiles.add(it); it.writeBytes(ByteArray(128)) }
+        File.createTempFile("mxt-guard", ".bin").also { file ->
+            tmpFiles.add(file)
+            val bytes = ByteArray(128)
+            ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).apply {
+                position(0x10)
+                repeat(4) { putShort(it.toShort()) }
+                position(0x20)
+                repeat(3) { putShort(it.toShort()) }
+            }
+            file.writeBytes(bytes)
+        }
 
     private fun axis(id: String, address: Int, count: Int, rows: Int = 1, cols: Int = count) =
         AxisDefinition(
@@ -171,6 +183,50 @@ class BinWriterDimensionGuardTest {
 
         assertFailsWith<IllegalArgumentException> {
             BinWriter.write(file, table2d(), invalid)
+        }
+        assertContentEquals(before, file.readBytes())
+    }
+
+    @Test
+    fun `native duplicate axis is preserved during an unrelated z edit`() {
+        val file = bin()
+        val bytes = file.readBytes()
+        ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).apply {
+            position(0x10)
+            listOf(0, 10, 10, 20).forEach { putShort(it.toShort()) }
+        }
+        file.writeBytes(bytes)
+        val beforeAxis = file.readBytes().copyOfRange(0x10, 0x18)
+        val edited = map(x = 4, y = 3, zr = 3, zc = 4).also {
+            it.xAxis.indices.forEach { index ->
+                it.xAxis[index] = arrayOf(0.0, 10.0, 10.0, 20.0)[index]
+            }
+            it.zAxis[1][2] = 99.0
+        }
+
+        BinWriter.write(file, table2d(), edited)
+
+        assertContentEquals(beforeAxis, file.readBytes().copyOfRange(0x10, 0x18))
+    }
+
+    @Test
+    fun `native duplicate axis edit is rejected atomically`() {
+        val file = bin()
+        val bytes = file.readBytes()
+        ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN).apply {
+            position(0x10)
+            listOf(0, 10, 10, 20).forEach { putShort(it.toShort()) }
+        }
+        file.writeBytes(bytes)
+        val before = file.readBytes()
+        val editedAxis = map(x = 4, y = 3, zr = 3, zc = 4).also {
+            it.xAxis.indices.forEach { index ->
+                it.xAxis[index] = arrayOf(0.0, 10.0, 15.0, 20.0)[index]
+            }
+        }
+
+        assertFailsWith<IllegalArgumentException> {
+            BinWriter.write(file, table2d(), editedAxis)
         }
         assertContentEquals(before, file.readBytes())
     }
