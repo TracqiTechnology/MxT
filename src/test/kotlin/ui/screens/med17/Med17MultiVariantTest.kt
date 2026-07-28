@@ -72,18 +72,20 @@ class Med17MultiVariantTest {
     }
 
     private lateinit var savedPlatform: EcuPlatform
+    private lateinit var globalState: support.GlobalTestStateSnapshot
     private lateinit var tempBinFile: File
     private lateinit var stockBinCopy: File
 
     @BeforeTest
     fun setUp() {
+        globalState = support.GlobalTestStateSnapshot.capture()
         savedPlatform = EcuPlatformPreference.platform
         EcuPlatformPreference.platform = EcuPlatform.MED17
     }
 
     @AfterTest
     fun tearDown() {
-        EcuPlatformPreference.platform = savedPlatform
+        globalState.restore()
         if (::tempBinFile.isInitialized && tempBinFile.exists()) tempBinFile.delete()
         if (::stockBinCopy.isInitialized && stockBinCopy.exists()) stockBinCopy.delete()
     }

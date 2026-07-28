@@ -40,6 +40,76 @@ class PfiRpmSweepTest {
     }
 
     @Test
+    fun `explicit pressure context corrects both injector KRKATE values`() {
+        val result = PfiShareCalculator.calculateInjectionOnTime(
+            rpm = 5000.0,
+            loadPercent = 100.0,
+            pfiSharePercent = 50.0,
+            portKrkte = 0.04,
+            directKrkte = 0.03,
+            pressureContext = InjectionPressureContext(
+                referencePfiDifferentialBar = 4.0,
+                operatingPfiRailGaugeBar = 4.0,
+                operatingManifoldGaugeBar = 1.0,
+                referenceGdiRailBarAbsolute = 240.0,
+                operatingGdiRailBarAbsolute = 200.0
+            )
+        )
+
+        assertEquals(0.04 * kotlin.math.sqrt(4.0 / 3.0), result.effectivePortKrkte, 1e-9)
+        assertEquals(0.03 * kotlin.math.sqrt(240.0 / 200.0), result.effectiveDirectKrkte, 1e-9)
+        assertEquals(50.0 * result.effectivePortKrkte, result.portOnTimeMs, 1e-9)
+        assertEquals(50.0 * result.effectiveDirectKrkte, result.directOnTimeMs, 1e-9)
+    }
+
+    @Test
+    fun `already compensated mode bypasses pressure scaling`() {
+        val context = InjectionPressureContext(
+            mode = PressureCompensationMode.ALREADY_COMPENSATED,
+            referencePfiDifferentialBar = 4.0,
+            operatingPfiRailGaugeBar = 1.0,
+            operatingManifoldGaugeBar = 2.0,
+            referenceGdiRailBarAbsolute = 240.0,
+            operatingGdiRailBarAbsolute = 0.0
+        )
+
+        assertEquals(0.04, context.effectivePortKrkte(0.04), 1e-9)
+        assertEquals(0.03, context.effectiveDirectKrkte(0.03), 1e-9)
+    }
+
+    @Test
+    fun `timing APIs reject non-finite values and invalid axes`() {
+        val curve = PfiShareCalculator.calculateRpmDependentShare()
+        assertFailsWith<IllegalArgumentException> {
+            PfiShareCalculator.calculateRpmSweep(
+                rpmStart = 1000.0,
+                rpmEnd = Double.NaN,
+                pfiShareCurve = curve,
+                portKrkte = 0.04,
+                directKrkte = 0.03
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PfiShareCalculator.calculateInjectionOnTime(
+                rpm = 5000.0,
+                loadPercent = 100.0,
+                pfiSharePercent = Double.NaN,
+                portKrkte = 0.04,
+                directKrkte = 0.03
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PfiShareCalculator.reverseCalculate(
+                targetDiOnTimeMs = 5.0,
+                rpmBins = doubleArrayOf(3000.0, 3000.0),
+                loadBins = doubleArrayOf(50.0, 100.0),
+                portKrkte = 0.04,
+                directKrkte = 0.03
+            )
+        }
+    }
+
+    @Test
     fun `DI over limit flagged correctly`() {
         // Very low PFI share → DI does most of the work
         val curve = PfiShareResult(

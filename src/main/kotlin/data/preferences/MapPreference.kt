@@ -14,6 +14,12 @@ open class MapPreference(
     private val tableDescriptionPreference: String,
     private val tableUnitPreference: String
 ) {
+    internal data class State(
+        val title: String?,
+        val description: String?,
+        val unit: String?
+    )
+
     private val prefs = Preferences.userNodeForPackage(MapPreference::class.java)
 
     private val _mapChanged = MutableSharedFlow<Pair<TableDefinition, Map3d>?>(
@@ -56,6 +62,22 @@ open class MapPreference(
             prefs.put(tableDescriptionPreference, "")
             prefs.put(tableUnitPreference, "")
         }
+        _mapChanged.tryEmit(getSelectedMap())
+    }
+
+    internal fun snapshotState(): State = State(
+        prefs.get(tableTitlePreference, null),
+        prefs.get(tableDescriptionPreference, null),
+        prefs.get(tableUnitPreference, null)
+    )
+
+    internal fun restoreState(state: State) {
+        fun restore(key: String, value: String?) {
+            if (value == null) prefs.remove(key) else prefs.put(key, value)
+        }
+        restore(tableTitlePreference, state.title)
+        restore(tableDescriptionPreference, state.description)
+        restore(tableUnitPreference, state.unit)
         _mapChanged.tryEmit(getSelectedMap())
     }
 }

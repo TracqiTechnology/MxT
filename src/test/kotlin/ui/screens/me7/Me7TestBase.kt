@@ -15,6 +15,7 @@ import java.io.FileInputStream
 import kotlin.test.BeforeTest
 import kotlin.test.AfterTest
 import kotlin.test.assertTrue
+import support.GlobalTestStateSnapshot
 
 /**
  * Shared base for ME7 end-to-end tests.
@@ -44,7 +45,7 @@ abstract class Me7TestBase(
         val profileJson = Json { ignoreUnknownKeys = true }
     }
 
-    protected lateinit var savedPlatform: EcuPlatform
+    private lateinit var globalState: GlobalTestStateSnapshot
     protected lateinit var tableDefs: List<TableDefinition>
     protected lateinit var allMaps: List<Pair<TableDefinition, Map3d>>
     protected lateinit var tempBinFile: File
@@ -56,7 +57,7 @@ abstract class Me7TestBase(
 
     @BeforeTest
     open fun setUp() {
-        savedPlatform = EcuPlatformPreference.platform
+        globalState = GlobalTestStateSnapshot.capture()
         EcuPlatformPreference.platform = EcuPlatform.ME7
 
         assertTrue(xdfFile.exists(), "XDF not found: ${xdfFile.absolutePath}")
@@ -88,9 +89,9 @@ abstract class Me7TestBase(
 
     @AfterTest
     open fun tearDown() {
-        EcuPlatformPreference.platform = savedPlatform
         if (::tempBinFile.isInitialized && tempBinFile.exists()) tempBinFile.delete()
         if (::stockBinCopy.isInitialized && stockBinCopy.exists()) stockBinCopy.delete()
+        if (::globalState.isInitialized) globalState.restore()
     }
 
     protected fun findMap(title: String): Pair<TableDefinition, Map3d>? =

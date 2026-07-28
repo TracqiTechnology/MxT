@@ -158,6 +158,10 @@ fun KfmiopScreen() {
 
     val finalOutputKfmiop = yAxisRescaleResult?.rescaledMap ?: kfmiopResult?.outputKfmiop
 
+    LaunchedEffect(finalOutputKfmiop) {
+        SharedAxisPreferences.setKfmiopCalculatedMap(finalOutputKfmiop)
+    }
+
     // Emit Y-axis edits for cross-screen sync
     LaunchedEffect(editedYAxis) {
         if (!isScalar && editedYAxis.isNotEmpty() && editedYAxis[0].isNotEmpty()) {
@@ -605,7 +609,8 @@ private fun ConfigurationCard(
                 MapAxis(
                     data = editedYAxis,
                     editable = true,
-                    onDataChanged = onYAxisChanged
+                    onDataChanged = onYAxisChanged,
+                    testTagPrefix = "kfmiop-output-y"
                 )
             }
 
@@ -815,7 +820,11 @@ private fun OutputAxisBanner(outputKfmiop: Map3d) {
             val xAxisData = remember(outputKfmiop) {
                 arrayOf(outputKfmiop.xAxis.copyOf())
             }
-            MapAxis(data = xAxisData, editable = false)
+            MapAxis(
+                data = xAxisData,
+                editable = false,
+                testTagPrefix = "kfmiop-shared-x"
+            )
         }
     }
 }
@@ -842,7 +851,11 @@ private fun SideBySideTables(
             )
             if (inputMap != null) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    MapTable(map = inputMap, editable = false)
+                    MapTable(
+                        map = inputMap,
+                        editable = false,
+                        testTagPrefix = "kfmiop-input"
+                    )
                 }
             } else {
                 Text("No map loaded", style = MaterialTheme.typography.bodyMedium)
@@ -859,7 +872,11 @@ private fun SideBySideTables(
             )
             if (outputMap != null) {
                 Box(modifier = Modifier.fillMaxSize()) {
-                    MapTable(map = outputMap, editable = false)
+                    MapTable(
+                        map = outputMap,
+                        editable = false,
+                        testTagPrefix = "kfmiop-output"
+                    )
                 }
             } else {
                 Text("No data", style = MaterialTheme.typography.bodyMedium)

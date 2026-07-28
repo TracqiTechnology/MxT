@@ -86,6 +86,11 @@ class FuelTrimMed17E2ETest {
                 if (result.corrections[r][c] != 0.0) nonZeroCount++
             }
         }
+        assertEquals(
+            1,
+            nonZeroCount,
+            "The real cruise log must retain its independently verified corrective bin"
+        )
         println("  Non-zero corrections: $nonZeroCount / ${result.corrections.size * result.corrections[0].size}")
     }
 

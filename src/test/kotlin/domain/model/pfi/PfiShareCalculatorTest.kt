@@ -134,13 +134,36 @@ class PfiShareCalculatorTest {
     }
 
     @Test
-    fun `target share values are clamped to 0-100`() {
+    fun `target share values outside 0-100 are rejected`() {
         val axis = doubleArrayOf(1000.0, 5000.0)
-        val target = doubleArrayOf(-10.0, 150.0)
-        val result = PfiShareCalculator.calculateRpmDependentShare(axis, target)
+        assertFailsWith<IllegalArgumentException> {
+            PfiShareCalculator.calculateRpmDependentShare(
+                axis,
+                doubleArrayOf(-10.0, 150.0)
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PfiShareCalculator.calculateRpmDependentShare(
+                axis,
+                doubleArrayOf(10.0, Double.NaN)
+            )
+        }
+    }
 
-        assertEquals(0.0, result.pfiSharePercent[0], 1e-9)
-        assertEquals(100.0, result.pfiSharePercent[1], 1e-9)
+    @Test
+    fun `duplicate and non-finite RPM breakpoints are rejected`() {
+        assertFailsWith<IllegalArgumentException> {
+            PfiShareCalculator.calculateRpmDependentShare(
+                doubleArrayOf(1000.0, 1000.0),
+                doubleArrayOf(30.0, 40.0)
+            )
+        }
+        assertFailsWith<IllegalArgumentException> {
+            PfiShareCalculator.calculateRpmDependentShare(
+                doubleArrayOf(1000.0, Double.POSITIVE_INFINITY),
+                doubleArrayOf(30.0, 40.0)
+            )
+        }
     }
 
     @Test
@@ -305,16 +328,16 @@ class PfiShareCalculatorTest {
     }
 
     @Test
-    fun `refineFromLog clamps out-of-range factor values`() {
+    fun `refineFromLog rejects out-of-range factor values instead of averaging them`() {
         val logData = mapOf(
             Header.RPM_COLUMN_HEADER to listOf(5000.0, 5000.0),
             Header.PFI_SPLIT_FACTOR_HEADER to listOf(1.5, -0.3)  // avg = 0.6 → 60%
         )
         val result = PfiShareCalculator.refineFromLog(logData)
 
-        assertNotNull(result.loggedPfiPercent)
-        // (1.5 + -0.3) / 2 = 0.6 → 60%, but clamped after average, so still 60%
-        assertEquals(60.0, result.loggedPfiPercent!![0], 1e-9)
+        assertNull(result.loggedPfiPercent)
+        assertNull(result.loggedRpmAxis)
+        assertContentEquals(PfiShareCalculator.DEFAULT_PFI_SHARE, result.pfiSharePercent)
     }
 
     // ── Real log integration ────────────────────────────────────────────

@@ -13,10 +13,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import domain.math.AxisRescaler
+import domain.math.ResamplingMethod
 import domain.math.map.Map3d
 import ui.components.MapAxis
 import ui.components.MapTable
@@ -43,17 +45,17 @@ fun AxisRescalerScreen(preloadedMap: Map3d? = null) {
         mutableStateOf(preloadedMap ?: buildEmptyMap(DEFAULT_ROWS, DEFAULT_COLS))
     }
 
-    // Output dimensions — always match input
-    val outputRows = inputRows
-    val outputCols = inputCols
-
-    // Derived output axes — linearly spaced across input range
-    val outputXAxis by remember(inputMap.xAxis, outputCols) {
+    var outputRowsText by remember { mutableStateOf(initRows.toString()) }
+    var outputColsText by remember { mutableStateOf(initCols.toString()) }
+    var outputRows by remember { mutableStateOf(initRows) }
+    var outputCols by remember { mutableStateOf(initCols) }
+    var outputXAxis by remember {
         mutableStateOf(deriveAxis(inputMap.xAxis, outputCols))
     }
-    val outputYAxis by remember(inputMap.yAxis, outputRows) {
+    var outputYAxis by remember {
         mutableStateOf(deriveAxis(inputMap.yAxis, outputRows))
     }
+    var resamplingMethod by remember { mutableStateOf(ResamplingMethod.BILINEAR) }
 
     var rescaleResult by remember { mutableStateOf<AxisRescaler.RescaleResult?>(null) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
@@ -68,18 +70,49 @@ fun AxisRescalerScreen(preloadedMap: Map3d? = null) {
         rescaleResult = null
     }
 
+    fun updateOutputDimensions(rows: Int, cols: Int) {
+        val r = rows.coerceIn(1, MAX_DIMENSION)
+        val c = cols.coerceIn(1, MAX_DIMENSION)
+        outputRows = r
+        outputCols = c
+        outputXAxis = resizeAxis(outputXAxis, c)
+        outputYAxis = resizeAxis(outputYAxis, r)
+        rescaleResult = null
+    }
+
+    fun handlePasteInputMap() {
+        errorMessage = null
+        try {
+            val text = clipboardManager.getText()?.text
+                ?: throw IllegalArgumentException("Clipboard is empty")
+            val pasted = MapClipboardParser.parseTsvOrThrow(text)
+            inputMap = pasted
+            inputRows = pasted.yAxis.size
+            inputCols = pasted.xAxis.size
+            inputRowsText = inputRows.toString()
+            inputColsText = inputCols.toString()
+            outputXAxis = deriveAxis(pasted.xAxis, outputCols)
+            outputYAxis = deriveAxis(pasted.yAxis, outputRows)
+            rescaleResult = null
+            statusMessage = "Pasted ${inputRows}×${inputCols} source map"
+        } catch (e: IllegalArgumentException) {
+            errorMessage = e.message
+        }
+    }
+
     fun handleRescale() {
         errorMessage = null
         try {
             val result = AxisRescaler.rescaleMap(
                 original = inputMap,
                 newXAxis = outputXAxis,
-                newYAxis = outputYAxis
+                newYAxis = outputYAxis,
+                method = resamplingMethod
             )
             rescaleResult = result
             statusMessage = "Rescaled: ${result.exactMatchCount} exact, " +
                 "${result.extrapolatedCount} extrapolated, " +
-                "${result.totalCells} total cells"
+                "${result.totalCells} total cells using ${result.method.displayName()}"
         } catch (e: IllegalArgumentException) {
             errorMessage = e.message
             rescaleResult = null
@@ -130,10 +163,20 @@ fun AxisRescalerScreen(preloadedMap: Map3d? = null) {
         )
 
         errorMessage?.let {
-            Text(text = it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Text(
+                text = it,
+                modifier = Modifier.testTag("axis-rescaler-error"),
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall
+            )
         }
         statusMessage?.let {
-            Text(text = it, color = MaterialTheme.colorScheme.tertiary, style = MaterialTheme.typography.bodySmall)
+            Text(
+                text = it,
+                modifier = Modifier.testTag("axis-rescaler-status"),
+                color = MaterialTheme.colorScheme.tertiary,
+                style = MaterialTheme.typography.bodySmall
+            )
         }
 
         // ── Input section ─────────────────────────────────────────────
@@ -154,7 +197,7 @@ fun AxisRescalerScreen(preloadedMap: Map3d? = null) {
                     },
                     label = { Text("Rows") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.width(80.dp),
+                    modifier = Modifier.width(80.dp).testTag("axis-input-rows"),
                     singleLine = true,
                 )
                 Text("×", style = MaterialTheme.typography.labelLarge)
@@ -169,9 +212,17 @@ fun AxisRescalerScreen(preloadedMap: Map3d? = null) {
                     },
                     label = { Text("Cols") },
                     keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.width(80.dp),
+                    modifier = Modifier.width(80.dp).testTag("axis-input-cols"),
                     singleLine = true,
                 )
+            }
+
+            Spacer(Modifier.height(8.dp))
+            OutlinedButton(
+                modifier = Modifier.testTag("axis-paste-map"),
+                onClick = { handlePasteInputMap() }
+            ) {
+                Text("Paste Complete TSV Map")
             }
 
             Spacer(Modifier.height(8.dp))
@@ -184,7 +235,8 @@ fun AxisRescalerScreen(preloadedMap: Map3d? = null) {
                     if (newData.isNotEmpty() && newData[0].isNotEmpty()) {
                         inputMap = Map3d(newData[0], inputMap.yAxis, inputMap.zAxis)
                     }
-                }
+                },
+                testTagPrefix = "axis-input-x"
             )
 
             Spacer(Modifier.height(4.dp))
@@ -197,7 +249,8 @@ fun AxisRescalerScreen(preloadedMap: Map3d? = null) {
                     if (newData.isNotEmpty() && newData[0].isNotEmpty()) {
                         inputMap = Map3d(inputMap.xAxis, newData[0], inputMap.zAxis)
                     }
-                }
+                },
+                testTagPrefix = "axis-input-y"
             )
 
             Spacer(Modifier.height(8.dp))
@@ -210,20 +263,65 @@ fun AxisRescalerScreen(preloadedMap: Map3d? = null) {
                 MapTable(
                     map = inputMap,
                     editable = true,
-                    onMapChanged = { newMap -> inputMap = newMap }
+                    onMapChanged = { newMap -> inputMap = newMap },
+                    testTagPrefix = "axis-input-map"
                 )
             }
         }
 
         // ── Output section ────────────────────────────────────────────
         SectionCard("Output") {
-            // Derived output axes (read-only)
-            Text("Output X-Axis", style = MaterialTheme.typography.labelMedium)
-            MapAxis(data = arrayOf(outputXAxis), editable = false)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("Dimensions:", style = MaterialTheme.typography.labelMedium)
+                OutlinedTextField(
+                    value = outputRowsText,
+                    onValueChange = { value ->
+                        outputRowsText = value
+                        value.toIntOrNull()?.takeIf { it in 1..MAX_DIMENSION }?.let {
+                            updateOutputDimensions(it, outputCols)
+                        }
+                    },
+                    label = { Text("Rows") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.width(80.dp).testTag("axis-output-rows"),
+                    singleLine = true
+                )
+                Text("×")
+                OutlinedTextField(
+                    value = outputColsText,
+                    onValueChange = { value ->
+                        outputColsText = value
+                        value.toIntOrNull()?.takeIf { it in 1..MAX_DIMENSION }?.let {
+                            updateOutputDimensions(outputRows, it)
+                        }
+                    },
+                    label = { Text("Cols") },
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.width(80.dp).testTag("axis-output-cols"),
+                    singleLine = true
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+            Text("Output X-Axis (editable/pasteable)", style = MaterialTheme.typography.labelMedium)
+            MapAxis(
+                data = arrayOf(outputXAxis),
+                editable = true,
+                onDataChanged = { outputXAxis = it[0] },
+                testTagPrefix = "axis-output-x"
+            )
 
             Spacer(Modifier.height(4.dp))
-            Text("Output Y-Axis", style = MaterialTheme.typography.labelMedium)
-            MapAxis(data = arrayOf(outputYAxis), editable = false)
+            Text("Output Y-Axis (editable/pasteable)", style = MaterialTheme.typography.labelMedium)
+            MapAxis(
+                data = arrayOf(outputYAxis),
+                editable = true,
+                onDataChanged = { outputYAxis = it[0] },
+                testTagPrefix = "axis-output-y"
+            )
 
             Spacer(Modifier.height(12.dp))
 
@@ -231,7 +329,34 @@ fun AxisRescalerScreen(preloadedMap: Map3d? = null) {
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Button(onClick = { handleRescale() }) {
+                Text("Interpolation:", style = MaterialTheme.typography.labelMedium)
+                FilterChip(
+                    selected = resamplingMethod == ResamplingMethod.BILINEAR,
+                    onClick = { resamplingMethod = ResamplingMethod.BILINEAR },
+                    label = { Text("Bilinear (default)") }
+                )
+                FilterChip(
+                    selected = resamplingMethod == ResamplingMethod.MONOTONE_CUBIC,
+                    onClick = { resamplingMethod = ResamplingMethod.MONOTONE_CUBIC },
+                    label = { Text("Monotone cubic") }
+                )
+            }
+            Text(
+                "Exact source intersections are copied unchanged; values outside the source range clamp to the nearest edge.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Button(
+                    modifier = Modifier.testTag("axis-rescale"),
+                    onClick = { handleRescale() }
+                ) {
                     Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
                     Text("Rescale")
@@ -258,6 +383,7 @@ fun AxisRescalerScreen(preloadedMap: Map3d? = null) {
                     MapTable(
                         map = result.rescaledMap,
                         editable = false,
+                        testTagPrefix = "axis-output-map",
                         cellColorProvider = { rowIdx, colIdx ->
                             if (result.extrapolatedCells[rowIdx][colIdx]) {
                                 Color(0xFFFF9800).copy(alpha = 0.45f)
@@ -338,6 +464,11 @@ private fun resizeAxis(current: Array<Double>, newSize: Int): Array<Double> {
 
 private fun modifierKeyName(): String =
     if (System.getProperty("os.name").lowercase().contains("mac")) "⌘" else "Ctrl"
+
+private fun ResamplingMethod.displayName(): String = when (this) {
+    ResamplingMethod.BILINEAR -> "bilinear interpolation"
+    ResamplingMethod.MONOTONE_CUBIC -> "monotone cubic interpolation"
+}
 
 @Composable
 private fun SectionCard(title: String, content: @Composable ColumnScope.() -> Unit) {

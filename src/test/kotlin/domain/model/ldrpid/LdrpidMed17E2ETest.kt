@@ -5,6 +5,7 @@ import data.contract.Med17LogFileContract
 import data.parser.med17log.Med17LogAdapter
 import data.parser.med17log.Med17LogParser
 import data.parser.med17log.Med17LogParser.LogType
+import domain.math.Index
 import domain.math.map.Map3d
 import java.io.File
 import kotlin.test.*
@@ -142,20 +143,54 @@ class LdrpidMed17E2ETest {
         assertEquals(med17Rpms, me7Rpms, "RPM values should be identical after adaptation")
     }
 
-    // ── 4. KFLDRL output has monotonic rows and sane values ─────────
+    // ── 4. Measured cells are preserved and output values are sane ──
 
     @Test
-    fun `KFLDRL rows are monotonically non-decreasing`() {
+    fun `measured boost cells are never overwritten by smoothing`() {
         val parser = Med17LogParser()
         val med17Data = parser.parseLogFile(LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
         val me7Data = Med17LogAdapter.toMe7LdrpidFormat(med17Data)
 
-        val result = LdrpidCalculator.calculateLdrpid(me7Data, buildKfldrlMap(), buildKfldimxMap())
+        val result = LdrpidCalculator.calculateWithCounts(me7Data, buildKfldrlMap(), buildKfldimxMap())
+        val pressureSums = Array(result.nonLinearOutput.yAxis.size) {
+            DoubleArray(result.nonLinearOutput.xAxis.size)
+        }
+        val counts = Array(result.nonLinearOutput.yAxis.size) {
+            IntArray(result.nonLinearOutput.xAxis.size)
+        }
+        val rpms = me7Data[Me7LogFileContract.Header.RPM_COLUMN_HEADER]!!
+        val throttles = me7Data[Me7LogFileContract.Header.THROTTLE_PLATE_ANGLE_HEADER]!!
+        val duties = me7Data[Me7LogFileContract.Header.WASTEGATE_DUTY_CYCLE_HEADER]!!
+        val actualPressures =
+            me7Data[Me7LogFileContract.Header.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER]!!
+        val barometricPressures =
+            me7Data[Me7LogFileContract.Header.BAROMETRIC_PRESSURE_HEADER]!!
 
-        for ((rowIdx, row) in result.nonLinearOutput.zAxis.withIndex()) {
-            for (i in 1 until row.size) {
-                assertTrue(row[i] >= row[i - 1],
-                    "Non-linear row $rowIdx should be non-decreasing: ${row.contentToString()}")
+        for (sample in rpms.indices) {
+            val relativePressure = actualPressures[sample] - barometricPressures[sample]
+            if (throttles[sample] >= 80.0 && relativePressure > 0.0) {
+                val row = Index.getInsertIndex(result.nonLinearOutput.yAxis.toList(), rpms[sample])
+                val column = Index.getInsertIndex(
+                    result.nonLinearOutput.xAxis.toList(),
+                    duties[sample]
+                )
+                pressureSums[row][column] += relativePressure
+                counts[row][column]++
+            }
+        }
+
+        assertTrue(counts.sumOf { row -> row.count { it > 0 } } > 1)
+        for (row in counts.indices) {
+            for (column in counts[row].indices) {
+                if (counts[row][column] == 0) continue
+                val expectedPsi =
+                    pressureSums[row][column] / counts[row][column] * 0.0145038
+                assertEquals(
+                    expectedPsi,
+                    result.nonLinearOutput.zAxis[row][column],
+                    1e-9,
+                    "Measured cell [$row][$column] must remain the exact log average"
+                )
             }
         }
     }
@@ -190,7 +225,7 @@ class LdrpidMed17E2ETest {
     // ── 5. Linear table has equal step sizes per column ─────────────
 
     @Test
-    fun `linear table has equal step sizes per column`() {
+    fun `linear table has equal step sizes within each RPM row`() {
         val parser = Med17LogParser()
         val med17Data = parser.parseLogFile(LogType.LDRPID, logFile("2025-01-21_16.24.32_log(1).csv"))
         val me7Data = Med17LogAdapter.toMe7LdrpidFormat(med17Data)
@@ -198,13 +233,13 @@ class LdrpidMed17E2ETest {
         val result = LdrpidCalculator.calculateLdrpid(me7Data, buildKfldrlMap(), buildKfldimxMap())
         val linear = result.linearOutput.zAxis
 
-        for (col in linear[0].indices) {
-            if (linear.size < 3) continue
-            val step = linear[1][col] - linear[0][col]
-            for (row in 2 until linear.size) {
-                val actual = linear[row][col] - linear[row - 1][col]
+        for (row in linear.indices) {
+            if (linear[row].size < 3 || linear[row].all { it == 0.0 }) continue
+            val step = linear[row][1] - linear[row][0]
+            for (column in 2 until linear[row].size) {
+                val actual = linear[row][column] - linear[row][column - 1]
                 assertEquals(step, actual, 0.01,
-                    "Column $col should have equal step size ($step), got $actual at row $row")
+                    "RPM row $row should have equal step size ($step), got $actual at column $column")
             }
         }
     }

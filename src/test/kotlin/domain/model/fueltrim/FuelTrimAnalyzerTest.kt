@@ -196,6 +196,26 @@ class FuelTrimAnalyzerTest {
         assertFalse(result.isEmpty)
     }
 
+    @Test
+    fun `interpolated samples retain their true trim magnitude`() {
+        val n = 12
+        val rpmBins = doubleArrayOf(2000.0, 3000.0)
+        val loadBins = doubleArrayOf(50.0, 100.0)
+        val data = buildLogData(
+            rpm = constant(2500.0, n),
+            load = constant(75.0, n),
+            stft = constant(1.20, n)
+        )
+
+        val result = FuelTrimAnalyzer.analyzeMed17Trims(data, rpmBins, loadBins)
+
+        for (row in result.avgTrims) {
+            for (trim in row) {
+                assertEquals(20.0, trim, 0.01, "Interpolation must not dilute a 20% trim")
+            }
+        }
+    }
+
     // ── 3. Empty / missing data handling ────────────────────────────
 
     @Test

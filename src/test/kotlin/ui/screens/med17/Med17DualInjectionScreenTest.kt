@@ -1,6 +1,8 @@
 package ui.screens.med17
 
 import androidx.compose.ui.test.*
+import data.preferences.dualinjection.DualInjectionPreferences
+import java.io.File
 import kotlin.test.Test
 
 /**
@@ -128,5 +130,80 @@ class Med17DualInjectionScreenTest : Med17ScreenTestBase() {
 
         // Presets section visible on Port Injector tab
         onNodeWithText("Presets").assertExists()
+    }
+
+    @Test
+    fun mockPfiLogDrivesExactOnTimeAndReverseTableValues() {
+        DualInjectionPreferences.krkateAlreadyPressureCompensated = true
+        val logFile = File.createTempFile("mxt-pfi-ui-", ".csv")
+        logFile.writeText(
+            buildString {
+                appendLine("DS1 firmware:test,MED17")
+                appendLine(
+                    "Time(s),Engine speed(nmot_w) (1/min),Load(rl_w) (%)," +
+                        "Tgt dist fac prop port fuel inj(InjSys_facPrtnPfiTar) (-)"
+                )
+                repeat(10) { sample ->
+                    appendLine("${sample / 10.0},5000,160,0.28")
+                }
+            }
+        )
+
+        try {
+            runComposeUiTest {
+                setContent {
+                    ui.screens.dualinjection.DualInjectionScreen(
+                        initialTab = 2,
+                        initialKrktePfi = "0.0307",
+                        initialKrkteGdi = "0.0320",
+                        preloadedPfiLogFile = logFile
+                    )
+                }
+
+                waitUntil(timeoutMillis = 10_000) {
+                    runCatching {
+                        onNodeWithText("Logged RPM × load").assertIsEnabled()
+                    }.isSuccess
+                }
+
+                onNodeWithTag("pfi-target-load").performTextReplacement("160")
+                onNodeWithTag("pfi-calculate").performScrollTo().performClick()
+                waitForIdle()
+
+                onNodeWithTag("pfi-calculation-result").assertExists()
+                onNodeWithText("Port (PFI) on-time:   1.3754 ms").assertExists()
+                onNodeWithText("Direct (GDI) on-time: 3.6864 ms").assertExists()
+                onNodeWithText(
+                    "RPM: 5000  |  PFI Share: 28.0% (LOGGED_SURFACE)  |  " +
+                        "Available window: 24.00 ms"
+                ).assertExists()
+
+                onNodeWithTag("pfi-reverse-toggle").performScrollTo().performClick()
+                onNodeWithTag("pfi-reverse-calculate").performScrollTo().performClick()
+                waitForIdle()
+
+                onNodeWithTag("pfi-reverse-root").assertExists()
+                onNodeWithTag("pfi-reverse-cell-0-0").assertTextEquals("0")
+                onNodeWithTag("pfi-reverse-cell-0-9").assertTextEquals("21.88")
+            }
+        } finally {
+            logFile.delete()
+        }
+    }
+
+    @Test
+    fun invalidKrkteIsRejectedInTheRenderedWorkflow() = runComposeUiTest {
+        DualInjectionPreferences.krkateAlreadyPressureCompensated = true
+        setContent {
+            ui.screens.dualinjection.DualInjectionScreen(
+                initialTab = 2,
+                initialKrktePfi = "-0.0307",
+                initialKrkteGdi = "0.0320"
+            )
+        }
+
+        onNodeWithTag("pfi-calculate").performScrollTo().performClick()
+        onNodeWithText("KRKTE_PFI must be positive").assertExists()
+        onAllNodesWithTag("pfi-calculation-result").assertCountEquals(0)
     }
 }

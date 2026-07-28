@@ -98,6 +98,16 @@ class AxisRescalerScreenTest {
         assertNull(MapClipboardParser.parseTsv(tsv))
     }
 
+    @Test
+    fun `strict TSV parser rejects ragged or non-numeric data instead of inserting zeros`() {
+        assertFailsWith<IllegalArgumentException> {
+            MapClipboardParser.parseTsvOrThrow("\t10\t20\n1000\t1.0")
+        }
+        assertFailsWith<IllegalArgumentException> {
+            MapClipboardParser.parseTsvOrThrow("\t10\t20\n1000\t1.0\tbad")
+        }
+    }
+
     // ── Rescale Integration ───────────────────────────────────────────
 
     @Test

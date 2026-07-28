@@ -12,6 +12,7 @@ import java.io.File
 import java.io.FileInputStream
 import kotlin.math.abs
 import kotlin.test.*
+import support.GlobalTestStateSnapshot
 
 /**
  * Tests for BinWriter behavior at data type boundaries.
@@ -30,14 +31,14 @@ class BinWriterOverflowTest {
         private val BIN_FILE = File(PROJECT_ROOT, "example/me7/bin/8D0907551M-0002.bin")
     }
 
-    private lateinit var savedPlatform: EcuPlatform
+    private lateinit var globalState: GlobalTestStateSnapshot
     private lateinit var tableDefs: List<TableDefinition>
     private lateinit var allMaps: List<Pair<TableDefinition, Map3d>>
     private lateinit var tempBinFile: File
 
     @BeforeTest
     fun setUp() {
-        savedPlatform = EcuPlatformPreference.platform
+        globalState = GlobalTestStateSnapshot.capture()
         EcuPlatformPreference.platform = EcuPlatform.ME7
 
         val (_, defs) = XdfParser.parseToList(FileInputStream(XDF_FILE))
@@ -54,8 +55,8 @@ class BinWriterOverflowTest {
 
     @AfterTest
     fun tearDown() {
-        EcuPlatformPreference.platform = savedPlatform
         if (::tempBinFile.isInitialized) tempBinFile.delete()
+        if (::globalState.isInitialized) globalState.restore()
     }
 
     private fun findDef(keyword: String): Pair<TableDefinition, Map3d>? =

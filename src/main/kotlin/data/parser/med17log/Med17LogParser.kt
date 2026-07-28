@@ -6,6 +6,7 @@ import org.apache.commons.csv.CSVFormat
 import org.apache.commons.csv.CSVRecord
 import java.io.File
 import java.io.FileReader
+import java.io.IOException
 
 /**
  * Parser for Dyno Spectrum (DS1) MED17 CSV log files.
@@ -35,8 +36,15 @@ class Med17LogParser {
     data class ParseDiagnostics(
         val matchedHeaders: Set<String>,
         val missingHeaders: Set<String>,
+        val attemptedRows: Int,
+        val acceptedRows: Int,
+        val rejectedRows: Int,
+        val errors: List<String> = emptyList()
+    ) {
+        /** Backward-compatible name retained for existing diagnostics consumers. */
         val totalRows: Int
-    )
+            get() = attemptedRows
+    }
 
     fun interface ProgressCallback {
         fun onProgress(value: Int, max: Int)
@@ -84,13 +92,16 @@ class Med17LogParser {
         map: Map<Med17LogFileContract.Header, MutableList<Double>>
     ) {
         columnIndices.clear()
-        var rowCount = 0
+        var attemptedRows = 0
+        var acceptedRows = 0
+        var rejectedRows = 0
+        val errors = mutableListOf<String>()
+        var headersFound = false
 
         try {
             FileReader(file).use { reader ->
                 val records = CSVFormat.RFC4180.parse(reader)
                 val iterator = records.iterator()
-                var headersFound = false
                 var isFirstLine = true
 
                 while (iterator.hasNext()) {
@@ -134,8 +145,9 @@ class Med17LogParser {
                     }
 
                     // Parse data rows
-                    rowCount++
+                    attemptedRows++
                     try {
+                        val before = primaryRowCount(logType, map)
                         when (logType) {
                             LogType.LDRPID -> parseLdrpidRow(record, map)
                             LogType.OPTIMIZER -> parseOptimizerRow(record, map)
@@ -143,24 +155,48 @@ class Med17LogParser {
                             LogType.PFI_SPLIT -> parsePfiSplitRow(record, map)
                             LogType.PLSOL -> parsePlsolRow(record, map)
                         }
-                    } catch (_: NumberFormatException) {
-                    } catch (_: ArrayIndexOutOfBoundsException) {
+                        if (primaryRowCount(logType, map) > before) {
+                            acceptedRows++
+                        } else {
+                            rejectedRows++
+                        }
+                    } catch (e: RuntimeException) {
+                        rejectedRows++
+                        errors += "row ${attemptedRows + 2}: ${e.message ?: e::class.simpleName}"
                     }
                 }
             }
-        } catch (e: Exception) {
-            e.printStackTrace()
+        } catch (e: IOException) {
+            val matched = columnIndices.keys.map { it.header }.toSet()
+            lastDiagnostics = ParseDiagnostics(
+                matchedHeaders = matched,
+                missingHeaders = missingHeaders(logType),
+                attemptedRows = attemptedRows,
+                acceptedRows = acceptedRows,
+                rejectedRows = rejectedRows,
+                errors = listOf(e.message ?: "I/O error")
+            )
+            throw IllegalArgumentException("Could not read log file '${file.name}'", e)
         }
 
-        // Populate diagnostics after parse attempt
         val matched = columnIndices.keys.map { it.header }.toSet()
-        val required = requiredHeaders(logType)
-        val missing = required - matched
+        val missing = missingHeaders(logType)
         lastDiagnostics = ParseDiagnostics(
             matchedHeaders = matched,
             missingHeaders = missing,
-            totalRows = rowCount
+            attemptedRows = attemptedRows,
+            acceptedRows = acceptedRows,
+            rejectedRows = rejectedRows,
+            errors = errors
         )
+
+        require(headersFound) {
+            "Required ${logType.name.lowercase().replace('_', ' ')} headers were not found: " +
+                missing.joinToString()
+        }
+        require(errors.isEmpty()) {
+            "Malformed rows in '${file.name}': ${errors.take(3).joinToString()}"
+        }
     }
 
     /**
@@ -205,6 +241,7 @@ class Med17LogParser {
             ?: getDouble(record, H.LDR_DUTY_CYCLE_HEADER) ?: return
         val absBoost = getDouble(record, H.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER) ?: return
         val gear = getDouble(record, H.SELECTED_GEAR_HEADER) ?: 0.0
+        val requestedPressure = getDouble(record, H.REQUESTED_PRESSURE_HEADER)
 
         map[H.TIME_STAMP_COLUMN_HEADER]!!.add(time)
         map[H.RPM_COLUMN_HEADER]!!.add(rpm)
@@ -213,6 +250,8 @@ class Med17LogParser {
         map[H.WASTEGATE_DUTY_CYCLE_HEADER]!!.add(wgdc)
         map[H.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER]!!.add(absBoost)
         map[H.SELECTED_GEAR_HEADER]!!.add(gear)
+        // Keep optional diagnostics row-aligned with the required LDRPID signals.
+        map[H.REQUESTED_PRESSURE_HEADER]!!.add(requestedPressure ?: Double.NaN)
     }
 
     private fun parseOptimizerRow(
@@ -269,26 +308,54 @@ class Med17LogParser {
         map[H.RPM_COLUMN_HEADER]!!.add(rpm)
         map[H.ENGINE_LOAD_HEADER]!!.add(load)
 
-        // Store STFT under whichever header was found (prefer STFT_MIXED)
-        if (stft != null) {
-            val stftHeader = if (H.STFT_MIXED_COLUMN_HEADER in columnIndices)
-                H.STFT_MIXED_COLUMN_HEADER else H.STFT_COLUMN_HEADER
-            map[stftHeader]!!.add(stft)
+        // Preserve row alignment for optional trim channels. Missing values use
+        // NaN and are ignored by the analyzer rather than compressing the list.
+        val stftHeader = when {
+            H.STFT_MIXED_COLUMN_HEADER in columnIndices -> H.STFT_MIXED_COLUMN_HEADER
+            H.STFT_COLUMN_HEADER in columnIndices -> H.STFT_COLUMN_HEADER
+            else -> null
         }
-        if (ltft != null) {
-            val ltftHeader = if (H.LTFT_COLUMN_HEADER in columnIndices)
-                H.LTFT_COLUMN_HEADER else H.LONG_TERM_FT_HEADER
-            map[ltftHeader]!!.add(ltft)
+        stftHeader?.let { map[it]!!.add(stft ?: Double.NaN) }
+
+        val ltftHeader = when {
+            H.LTFT_COLUMN_HEADER in columnIndices -> H.LTFT_COLUMN_HEADER
+            H.LONG_TERM_FT_HEADER in columnIndices -> H.LONG_TERM_FT_HEADER
+            else -> null
         }
+        ltftHeader?.let { map[it]!!.add(ltft ?: Double.NaN) }
 
         // Optional signals (avoid double-adding longft1_w if already stored as ltft above)
         if (ltft == null || (H.LTFT_COLUMN_HEADER in columnIndices)) {
             // Only add longft1_w separately if it wasn't used as the ltft fallback
-            getDouble(record, H.LONG_TERM_FT_HEADER)?.let { map[H.LONG_TERM_FT_HEADER]?.add(it) }
+            if (H.LONG_TERM_FT_HEADER in columnIndices && ltftHeader != H.LONG_TERM_FT_HEADER) {
+                map[H.LONG_TERM_FT_HEADER]?.add(
+                    getDouble(record, H.LONG_TERM_FT_HEADER) ?: Double.NaN
+                )
+            }
         }
-        getDouble(record, H.FUEL_MASS_REL_HEADER)?.let { map[H.FUEL_MASS_REL_HEADER]?.add(it) }
-        getDouble(record, H.LAMBDA_CONTROL_ACTIVE_HEADER)?.let { map[H.LAMBDA_CONTROL_ACTIVE_HEADER]?.add(it) }
-        getDouble(record, H.REQUESTED_LAMBDA_HEADER)?.let { map[H.REQUESTED_LAMBDA_HEADER]?.add(it) }
+        if (H.FUEL_MASS_REL_HEADER in columnIndices) {
+            map[H.FUEL_MASS_REL_HEADER]?.add(getDouble(record, H.FUEL_MASS_REL_HEADER) ?: Double.NaN)
+        }
+        if (H.LAMBDA_CONTROL_ACTIVE_HEADER in columnIndices) {
+            map[H.LAMBDA_CONTROL_ACTIVE_HEADER]?.add(
+                getDouble(record, H.LAMBDA_CONTROL_ACTIVE_HEADER) ?: Double.NaN
+            )
+        }
+        if (H.REQUESTED_LAMBDA_HEADER in columnIndices) {
+            map[H.REQUESTED_LAMBDA_HEADER]?.add(
+                getDouble(record, H.REQUESTED_LAMBDA_HEADER) ?: Double.NaN
+            )
+        }
+        if (H.STFT_BANK1_HEADER in columnIndices) {
+            map[H.STFT_BANK1_HEADER]?.add(
+                getDouble(record, H.STFT_BANK1_HEADER) ?: Double.NaN
+            )
+        }
+        if (H.STFT_BANK2_HEADER in columnIndices) {
+            map[H.STFT_BANK2_HEADER]?.add(
+                getDouble(record, H.STFT_BANK2_HEADER) ?: Double.NaN
+            )
+        }
     }
 
     private fun parsePlsolRow(
@@ -307,22 +374,38 @@ class Med17LogParser {
         map[H.BAROMETRIC_PRESSURE_HEADER]!!.add(baro)
         map[H.THROTTLE_PLATE_ANGLE_HEADER]!!.add(throttle)
 
-        getDouble(record, H.FUPSRLS_HEADER)?.let { map[H.FUPSRLS_HEADER]?.add(it) }
-        getDouble(record, H.INTAKE_TEMPERATURE_HEADER)?.let { map[H.INTAKE_TEMPERATURE_HEADER]?.add(it) }
+        if (H.FUPSRLS_HEADER in columnIndices) {
+            map[H.FUPSRLS_HEADER]?.add(getDouble(record, H.FUPSRLS_HEADER) ?: Double.NaN)
+        }
+        if (H.INTAKE_TEMPERATURE_HEADER in columnIndices) {
+            map[H.INTAKE_TEMPERATURE_HEADER]?.add(
+                getDouble(record, H.INTAKE_TEMPERATURE_HEADER) ?: Double.NaN
+            )
+        }
     }
 
     private fun parsePfiSplitRow(
         record: CSVRecord,
         map: Map<Med17LogFileContract.Header, MutableList<Double>>
     ) {
+        val time = getDouble(record, H.TIME_STAMP_COLUMN_HEADER) ?: return
         val rpm = getDouble(record, H.RPM_COLUMN_HEADER) ?: return
         val pfi = getDouble(record, H.PFI_SPLIT_FACTOR_HEADER)
             ?: getDouble(record, H.PFI_SPLIT_FACTOR_UNLIM_HEADER) ?: return
 
+        map[H.TIME_STAMP_COLUMN_HEADER]!!.add(time)
         map[H.RPM_COLUMN_HEADER]!!.add(rpm)
         map[H.PFI_SPLIT_FACTOR_HEADER]!!.add(pfi)
-        getDouble(record, H.PFI_SPLIT_FACTOR_UNLIM_HEADER)?.let { map[H.PFI_SPLIT_FACTOR_UNLIM_HEADER]?.add(it) }
-        getDouble(record, H.ENGINE_LOAD_HEADER)?.let { map[H.ENGINE_LOAD_HEADER]?.add(it) }
+        if (H.PFI_SPLIT_FACTOR_UNLIM_HEADER in columnIndices) {
+            map[H.PFI_SPLIT_FACTOR_UNLIM_HEADER]?.add(
+                getDouble(record, H.PFI_SPLIT_FACTOR_UNLIM_HEADER) ?: Double.NaN
+            )
+        }
+        if (H.ENGINE_LOAD_HEADER in columnIndices) {
+            map[H.ENGINE_LOAD_HEADER]?.add(
+                getDouble(record, H.ENGINE_LOAD_HEADER) ?: Double.NaN
+            )
+        }
     }
 
     private fun getDouble(
@@ -330,11 +413,13 @@ class Med17LogParser {
         header: Med17LogFileContract.Header
     ): Double? {
         val idx = columnIndices[header] ?: return null
-        return try {
-            if (idx < record.size()) record.get(idx).trim().toDoubleOrNull() else null
-        } catch (_: Exception) {
-            null
-        }
+        if (idx >= record.size()) return null
+        val raw = record.get(idx).trim()
+        if (raw.isEmpty()) return null
+        return raw.toDoubleOrNull()
+            ?: throw IllegalArgumentException(
+                "column '${header.header}' contains non-numeric value '$raw'"
+            )
     }
 
     private fun headersFound(logType: LogType): Boolean {
@@ -374,47 +459,87 @@ class Med17LogParser {
         }
     }
 
-    /**
-     * Returns the set of required header signal names for a given [LogType].
-     * For headers with alternatives (e.g., WGDC or LDR duty cycle), both are listed —
-     * the requirement is satisfied if at least one is matched (handled by [headersFound]).
-     */
-    private fun requiredHeaders(logType: LogType): Set<String> {
-        val common = setOf(H.TIME_STAMP_COLUMN_HEADER.header)
-        val rpm = H.RPM_COLUMN_HEADER.header
-        val throttle = H.THROTTLE_PLATE_ANGLE_HEADER.header
-        val baro = H.BAROMETRIC_PRESSURE_HEADER.header
-        val boost = H.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER.header
-        val wgdc = H.WASTEGATE_DUTY_CYCLE_HEADER.header
-        val ldr = H.LDR_DUTY_CYCLE_HEADER.header
+    private fun missingHeaders(logType: LogType): Set<String> {
+        val missing = linkedSetOf<String>()
 
-        return common + when (logType) {
-            LogType.LDRPID -> setOf(rpm, throttle, baro, boost, wgdc, ldr)
-            LogType.OPTIMIZER -> setOf(
-                rpm, throttle, baro, boost, wgdc, ldr,
-                H.REQUESTED_PRESSURE_HEADER.header,
-                H.REQUESTED_LOAD_HEADER.header,
-                H.REQUESTED_LOAD_ALT_HEADER.header,
-                H.ENGINE_LOAD_HEADER.header
-            )
-            LogType.FUEL_TRIM -> setOf(
-                rpm,
-                H.ENGINE_LOAD_HEADER.header,
-                H.STFT_COLUMN_HEADER.header,
-                H.STFT_MIXED_COLUMN_HEADER.header,
-                H.LTFT_COLUMN_HEADER.header,
-                H.LONG_TERM_FT_HEADER.header
-            )
-            LogType.PFI_SPLIT -> setOf(
-                rpm,
-                H.PFI_SPLIT_FACTOR_HEADER.header,
-                H.PFI_SPLIT_FACTOR_UNLIM_HEADER.header
-            )
-            LogType.PLSOL -> setOf(
-                H.ENGINE_LOAD_HEADER.header,
-                boost, baro, throttle
-            )
+        fun require(header: H) {
+            if (header !in columnIndices) missing += header.header
         }
+
+        fun requireAny(label: String, vararg headers: H) {
+            if (headers.none { it in columnIndices }) missing += label
+        }
+
+        require(H.TIME_STAMP_COLUMN_HEADER)
+        when (logType) {
+            LogType.LDRPID -> {
+                require(H.RPM_COLUMN_HEADER)
+                require(H.THROTTLE_PLATE_ANGLE_HEADER)
+                require(H.BAROMETRIC_PRESSURE_HEADER)
+                require(H.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER)
+                requireAny(
+                    "${H.WASTEGATE_DUTY_CYCLE_HEADER.header} or ${H.LDR_DUTY_CYCLE_HEADER.header}",
+                    H.WASTEGATE_DUTY_CYCLE_HEADER,
+                    H.LDR_DUTY_CYCLE_HEADER
+                )
+            }
+            LogType.OPTIMIZER -> {
+                require(H.RPM_COLUMN_HEADER)
+                require(H.THROTTLE_PLATE_ANGLE_HEADER)
+                require(H.BAROMETRIC_PRESSURE_HEADER)
+                require(H.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER)
+                require(H.REQUESTED_PRESSURE_HEADER)
+                require(H.ENGINE_LOAD_HEADER)
+                requireAny(
+                    "${H.WASTEGATE_DUTY_CYCLE_HEADER.header} or ${H.LDR_DUTY_CYCLE_HEADER.header}",
+                    H.WASTEGATE_DUTY_CYCLE_HEADER,
+                    H.LDR_DUTY_CYCLE_HEADER
+                )
+                requireAny(
+                    "${H.REQUESTED_LOAD_HEADER.header} or ${H.REQUESTED_LOAD_ALT_HEADER.header}",
+                    H.REQUESTED_LOAD_HEADER,
+                    H.REQUESTED_LOAD_ALT_HEADER
+                )
+            }
+            LogType.FUEL_TRIM -> {
+                require(H.RPM_COLUMN_HEADER)
+                require(H.ENGINE_LOAD_HEADER)
+                requireAny(
+                    "${H.STFT_COLUMN_HEADER.header} or ${H.STFT_MIXED_COLUMN_HEADER.header} or " +
+                        "${H.LTFT_COLUMN_HEADER.header} or ${H.LONG_TERM_FT_HEADER.header}",
+                    H.STFT_COLUMN_HEADER,
+                    H.STFT_MIXED_COLUMN_HEADER,
+                    H.LTFT_COLUMN_HEADER,
+                    H.LONG_TERM_FT_HEADER
+                )
+            }
+            LogType.PFI_SPLIT -> {
+                require(H.RPM_COLUMN_HEADER)
+                requireAny(
+                    "${H.PFI_SPLIT_FACTOR_HEADER.header} or ${H.PFI_SPLIT_FACTOR_UNLIM_HEADER.header}",
+                    H.PFI_SPLIT_FACTOR_HEADER,
+                    H.PFI_SPLIT_FACTOR_UNLIM_HEADER
+                )
+            }
+            LogType.PLSOL -> {
+                require(H.ENGINE_LOAD_HEADER)
+                require(H.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER)
+                require(H.BAROMETRIC_PRESSURE_HEADER)
+                require(H.THROTTLE_PLATE_ANGLE_HEADER)
+            }
+        }
+        return missing
+    }
+
+    private fun primaryRowCount(
+        logType: LogType,
+        map: Map<Med17LogFileContract.Header, MutableList<Double>>
+    ): Int = when (logType) {
+        LogType.LDRPID,
+        LogType.OPTIMIZER,
+        LogType.FUEL_TRIM,
+        LogType.PFI_SPLIT -> map[H.RPM_COLUMN_HEADER]?.size ?: 0
+        LogType.PLSOL -> map[H.ENGINE_LOAD_HEADER]?.size ?: 0
     }
 
     private fun generateMap(logType: LogType): Map<Med17LogFileContract.Header, MutableList<Double>> {
@@ -431,6 +556,7 @@ class Med17LogParser {
                 map[H.WASTEGATE_DUTY_CYCLE_HEADER] = mutableListOf()
                 map[H.ABSOLUTE_BOOST_PRESSURE_ACTUAL_HEADER] = mutableListOf()
                 map[H.SELECTED_GEAR_HEADER] = mutableListOf()
+                map[H.REQUESTED_PRESSURE_HEADER] = mutableListOf()
             }
             LogType.OPTIMIZER -> {
                 map[H.TIME_STAMP_COLUMN_HEADER] = mutableListOf()
@@ -455,6 +581,8 @@ class Med17LogParser {
                 map[H.FUEL_MASS_REL_HEADER] = mutableListOf()
                 map[H.LAMBDA_CONTROL_ACTIVE_HEADER] = mutableListOf()
                 map[H.REQUESTED_LAMBDA_HEADER] = mutableListOf()
+                map[H.STFT_BANK1_HEADER] = mutableListOf()
+                map[H.STFT_BANK2_HEADER] = mutableListOf()
             }
             LogType.PFI_SPLIT -> {
                 map[H.TIME_STAMP_COLUMN_HEADER] = mutableListOf()

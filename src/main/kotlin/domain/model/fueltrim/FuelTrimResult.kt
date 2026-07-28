@@ -72,8 +72,41 @@ data class FuelTrimCellDiagnostic(
     /** The correction applied to rk_w — 0.0 if the bin was rejected or within threshold. */
     val correctionApplied: Double,
     val rejected: Boolean,
-    val rejectReason: String?
+    val rejectReason: String?,
+    /** Sum of interpolation weights contributed to this cell. */
+    val effectiveSampleWeight: Double = sampleCount.toDouble()
 )
+
+/**
+ * User-adjustable acceptance filters for fuel-trim analysis.
+ *
+ * Defaults retain the historical behavior; keeping them in one value object makes
+ * the active policy visible to both the UI and diagnostics.
+ */
+data class FuelTrimSettings(
+    val trimThresholdPercent: Double = 3.0,
+    val minimumSamples: Int = 3,
+    val standardDeviationLimitPercent: Double = 5.0,
+    val maximumRpmChangePerSecond: Double = 1000.0,
+    val requireClosedLoopWhenAvailable: Boolean = true,
+    val maximumLambdaDeviation: Double = 0.05
+) {
+    init {
+        require(trimThresholdPercent.isFinite() && trimThresholdPercent >= 0.0) {
+            "Trim threshold must be finite and non-negative"
+        }
+        require(minimumSamples >= 1) { "Minimum samples must be at least 1" }
+        require(standardDeviationLimitPercent.isFinite() && standardDeviationLimitPercent >= 0.0) {
+            "Standard deviation limit must be finite and non-negative"
+        }
+        require(maximumRpmChangePerSecond.isFinite() && maximumRpmChangePerSecond >= 0.0) {
+            "Maximum RPM change per second must be finite and non-negative"
+        }
+        require(maximumLambdaDeviation.isFinite() && maximumLambdaDeviation >= 0.0) {
+            "Maximum lambda deviation must be finite and non-negative"
+        }
+    }
+}
 
 /**
  * Extended fuel trim analysis result with per-cell diagnostics and
@@ -114,7 +147,9 @@ data class FuelTrimDiagnosticResult(
     /** Convert to a basic [FuelTrimResult] for backward-compatible consumption. */
     fun toFuelTrimResult(): FuelTrimResult {
         val avgTrims = Array(rpmBins.size) { r ->
-            DoubleArray(loadBins.size) { l -> diagnostics[r][l].meanTrimPercent }
+            DoubleArray(loadBins.size) { l ->
+                diagnostics[r][l].takeUnless { it.rejected }?.meanTrimPercent ?: 0.0
+            }
         }
         return FuelTrimResult(rpmBins, loadBins, avgTrims, corrections, warnings)
     }

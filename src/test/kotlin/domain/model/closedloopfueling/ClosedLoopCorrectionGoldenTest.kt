@@ -45,6 +45,7 @@ class ClosedLoopCorrectionGoldenTest {
     }
 
     private lateinit var savedPlatform: EcuPlatform
+    private lateinit var globalState: support.GlobalTestStateSnapshot
     private lateinit var tableDefs: List<TableDefinition>
     private lateinit var allMaps: List<Pair<TableDefinition, Map3d>>
     private lateinit var tempBinFile: File
@@ -53,6 +54,7 @@ class ClosedLoopCorrectionGoldenTest {
 
     @BeforeTest
     fun setUp() {
+        globalState = support.GlobalTestStateSnapshot.capture()
         savedPlatform = EcuPlatformPreference.platform
         EcuPlatformPreference.platform = EcuPlatform.ME7
 
@@ -80,7 +82,7 @@ class ClosedLoopCorrectionGoldenTest {
 
     @AfterTest
     fun tearDown() {
-        EcuPlatformPreference.platform = savedPlatform
+        globalState.restore()
         if (::tempBinFile.isInitialized) tempBinFile.delete()
         if (::stockBinCopy.isInitialized) stockBinCopy.delete()
     }

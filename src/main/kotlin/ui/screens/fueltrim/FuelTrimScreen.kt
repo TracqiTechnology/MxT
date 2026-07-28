@@ -12,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import data.contract.Med17LogFileContract
@@ -20,6 +21,7 @@ import data.parser.med17log.Med17LogParser
 import data.parser.xdf.TableDefinition
 import data.preferences.MapPreference
 import data.preferences.bin.BinFilePreferences
+import data.preferences.fueltrim.FuelTrimPreferences
 import data.preferences.rkw.RkwPreferences
 import data.writer.BinWriter
 import domain.math.map.Map3d
@@ -104,6 +106,59 @@ fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
     var diagnosticResult by remember { mutableStateOf<FuelTrimDiagnosticResult?>(null) }
     var logStatus by remember { mutableStateOf<String?>(null) }
     var showProgress by remember { mutableStateOf(false) }
+    var loadedLogData by remember {
+        mutableStateOf<Map<Med17LogFileContract.Header, List<Double>>?>(null)
+    }
+
+    var fuelTrimSettings by remember { mutableStateOf(FuelTrimPreferences.load()) }
+    var showFilterSettings by remember { mutableStateOf(false) }
+    var trimThresholdText by remember { mutableStateOf(fuelTrimSettings.trimThresholdPercent.toString()) }
+    var minimumSamplesText by remember { mutableStateOf(fuelTrimSettings.minimumSamples.toString()) }
+    var stdDevLimitText by remember { mutableStateOf(fuelTrimSettings.standardDeviationLimitPercent.toString()) }
+    var maximumRpmChangeText by remember { mutableStateOf(fuelTrimSettings.maximumRpmChangePerSecond.toString()) }
+    var lambdaDeviationText by remember { mutableStateOf(fuelTrimSettings.maximumLambdaDeviation.toString()) }
+
+    fun settingsFromInputs(): FuelTrimSettings = FuelTrimSettings(
+        trimThresholdPercent = trimThresholdText.toDouble(),
+        minimumSamples = minimumSamplesText.toInt(),
+        standardDeviationLimitPercent = stdDevLimitText.toDouble(),
+        maximumRpmChangePerSecond = maximumRpmChangeText.toDouble(),
+        requireClosedLoopWhenAvailable = fuelTrimSettings.requireClosedLoopWhenAvailable,
+        maximumLambdaDeviation = lambdaDeviationText.toDouble()
+    )
+
+    fun analyzeLoadedData(
+        logData: Map<Med17LogFileContract.Header, List<Double>>,
+        settings: FuelTrimSettings
+    ): FuelTrimDiagnosticResult {
+        val rpmBins = inputRkw?.yAxis?.map { it }?.toDoubleArray()
+            ?: FuelTrimAnalyzer.DEFAULT_RPM_BINS
+        val loadBins = inputRkw?.xAxis?.map { it }?.toDoubleArray()
+            ?: FuelTrimAnalyzer.DEFAULT_LOAD_BINS
+        return FuelTrimAnalyzer.analyzeMed17TrimsWithDiagnostics(
+            logData = logData,
+            rpmBins = rpmBins,
+            loadBins = loadBins,
+            settings = settings
+        )
+    }
+
+    fun analysisStatus(
+        prefix: String,
+        result: FuelTrimDiagnosticResult,
+        settings: FuelTrimSettings
+    ): String {
+        val correctionBins = result.corrections.sumOf { row -> row.count { it != 0.0 } }
+        return when {
+            correctionBins > 0 -> "$prefix — $correctionBins bins with corrections"
+            result.binsWithData == 0 ->
+                "$prefix — no usable steady-state trim samples; review the analysis settings"
+            result.binsRejected >= result.binsWithData ->
+                "$prefix — all ${result.binsWithData} populated bins were rejected; review sample and variance limits"
+            else ->
+                "$prefix — no accepted bins exceeded ±${settings.trimThresholdPercent}%"
+        }
+    }
 
     // ── Output: corrections applied to the input rk_w map ──
     val outputRkw: Map3d? = remember(inputRkw, trimResult) {
@@ -137,38 +192,41 @@ fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
     // Auto-load log data when preloadedLogFiles is provided (screenshot harness)
     LaunchedEffect(preloadedLogFiles, inputRkw) {
         if (preloadedLogFiles != null && preloadedLogFiles.isNotEmpty()) {
+            showProgress = true
+            loadedLogData = null
+            trimResult = null
+            diagnosticResult = null
+            selectedDiagCell = null
             withContext(Dispatchers.IO) {
                 try {
                     val parser = Med17LogParser()
-                    var merged: Map<Med17LogFileContract.Header, List<Double>>? = null
-                    for (f in preloadedLogFiles) {
-                        val logData = parser.parseLogFile(Med17LogParser.LogType.FUEL_TRIM, f)
-                        if (merged == null) {
-                            merged = logData.toMutableMap()
-                        } else {
-                            val m = merged!!.toMutableMap()
-                            for ((key, list) in logData) {
-                                val existing = m[key]
-                                m[key] = if (existing != null) existing + list else list
-                            }
-                            merged = m
-                        }
+                    val parsedLogs = preloadedLogFiles.map { file ->
+                        parser.parseLogFile(Med17LogParser.LogType.FUEL_TRIM, file)
                     }
-                    val allLogData = merged ?: emptyMap()
-                    val rpmBins = inputRkw?.yAxis?.map { it }?.toDoubleArray()
-                        ?: FuelTrimAnalyzer.DEFAULT_RPM_BINS
-                    val loadBins = inputRkw?.xAxis?.map { it }?.toDoubleArray()
-                        ?: FuelTrimAnalyzer.DEFAULT_LOAD_BINS
-                    val diagResult = FuelTrimAnalyzer.analyzeMed17TrimsWithDiagnostics(
-                        allLogData, rpmBins, loadBins
-                    )
+                    val allLogData = FuelTrimAnalyzer.mergeAlignedLogs(parsedLogs)
+                    val diagResult = analyzeLoadedData(allLogData, fuelTrimSettings)
                     val analyzed = diagResult.toFuelTrimResult()
                     withContext(Dispatchers.Main) {
+                        loadedLogData = allLogData
                         trimResult = analyzed
                         diagnosticResult = diagResult
-                        logStatus = "✓ Loaded ${preloadedLogFiles.size} file(s)"
+                        logStatus = analysisStatus(
+                            "✓ Loaded ${preloadedLogFiles.size} file(s)",
+                            diagResult,
+                            fuelTrimSettings
+                        )
+                        showProgress = false
                     }
-                } catch (_: Exception) { }
+                } catch (e: Exception) {
+                    withContext(Dispatchers.Main) {
+                        loadedLogData = null
+                        trimResult = null
+                        diagnosticResult = null
+                        selectedDiagCell = null
+                        logStatus = "Error: ${e.message}"
+                        showProgress = false
+                    }
+                }
             }
         }
     }
@@ -298,7 +356,11 @@ fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
                 if (inputRkw != null) {
                     val tableHeight = ((inputRkw.yAxis.size + 1) * 24 + 4).dp
                     Box(modifier = Modifier.fillMaxWidth().height(tableHeight)) {
-                        MapTable(map = inputRkw, editable = false)
+                        MapTable(
+                            map = inputRkw,
+                            editable = false,
+                            testTagPrefix = "fuel-trim-input"
+                        )
                     }
                 } else {
                     Text(
@@ -319,6 +381,103 @@ fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text("Load Log Files", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Reaction: ±${fuelTrimSettings.trimThresholdPercent}% · " +
+                            "min ${fuelTrimSettings.minimumSamples} samples · " +
+                            "max σ ${fuelTrimSettings.standardDeviationLimitPercent}%",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.weight(1f)
+                    )
+                    TextButton(onClick = { showFilterSettings = !showFilterSettings }) {
+                        Text(if (showFilterSettings) "Hide Settings" else "Analysis Settings")
+                    }
+                }
+                AnimatedVisibility(showFilterSettings) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                trimThresholdText,
+                                { trimThresholdText = it },
+                                label = { Text("Reaction threshold (%)") },
+                                modifier = Modifier.weight(1f).testTag("fuel-trim-threshold"),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                minimumSamplesText,
+                                { minimumSamplesText = it },
+                                label = { Text("Minimum samples") },
+                                modifier = Modifier.weight(1f).testTag("fuel-trim-minimum-samples"),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                stdDevLimitText,
+                                { stdDevLimitText = it },
+                                label = { Text("Max std deviation (%)") },
+                                modifier = Modifier.weight(1f).testTag("fuel-trim-max-stddev"),
+                                singleLine = true
+                            )
+                        }
+                        Row(
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedTextField(
+                                maximumRpmChangeText,
+                                { maximumRpmChangeText = it },
+                                label = { Text("Max RPM rate (RPM/s)") },
+                                modifier = Modifier.weight(1f).testTag("fuel-trim-max-rpm-change"),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                lambdaDeviationText,
+                                { lambdaDeviationText = it },
+                                label = { Text("Max λ deviation") },
+                                modifier = Modifier.weight(1f).testTag("fuel-trim-max-lambda-deviation"),
+                                singleLine = true
+                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Checkbox(
+                                    checked = fuelTrimSettings.requireClosedLoopWhenAvailable,
+                                    onCheckedChange = {
+                                        fuelTrimSettings = fuelTrimSettings.copy(
+                                            requireClosedLoopWhenAvailable = it
+                                        )
+                                    }
+                                )
+                                Text("Require closed loop when logged", style = MaterialTheme.typography.bodySmall)
+                            }
+                        }
+                        Button(
+                            modifier = Modifier.testTag("fuel-trim-apply-settings"),
+                            onClick = {
+                            try {
+                                val updated = settingsFromInputs()
+                                fuelTrimSettings = updated
+                                FuelTrimPreferences.save(updated)
+                                loadedLogData?.let { data ->
+                                    val diagResult = analyzeLoadedData(data, updated)
+                                    diagnosticResult = diagResult
+                                    trimResult = diagResult.toFuelTrimResult()
+                                    logStatus = analysisStatus("Reanalyzed", diagResult, updated)
+                                }
+                            } catch (e: Exception) {
+                                logStatus = "Settings error: ${e.message}"
+                            }
+                            }
+                        ) {
+                            Text("Apply Settings")
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                     Button(onClick = {
                         val dialog = FileDialog(Frame(), "Select MED17 Fuel Trim Log", FileDialog.LOAD)
@@ -329,55 +488,39 @@ fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
                         if (dir != null && files != null && files.isNotEmpty()) {
                             showProgress = true
                             logStatus = "Loading ${files.size} file(s)..."
+                            loadedLogData = null
+                            trimResult = null
+                            diagnosticResult = null
+                            selectedDiagCell = null
                             scope.launch {
                                 withContext(Dispatchers.IO) {
                                     try {
                                         val parser = Med17LogParser()
-                                        var merged: Map<Med17LogFileContract.Header, List<Double>>? = null
-                                        for (f in files) {
-                                            val logData = parser.parseLogFile(
-                                                Med17LogParser.LogType.FUEL_TRIM, f
+                                        val parsedLogs = files.map { file ->
+                                            parser.parseLogFile(
+                                                Med17LogParser.LogType.FUEL_TRIM, file
                                             )
-                                            if (merged == null) {
-                                                merged = logData.toMutableMap()
-                                            } else {
-                                                val m = merged!!.toMutableMap()
-                                                for ((key, list) in logData) {
-                                                    val existing = m[key]
-                                                    if (existing != null) {
-                                                        m[key] = existing + list
-                                                    } else {
-                                                        m[key] = list
-                                                    }
-                                                }
-                                                merged = m
-                                            }
                                         }
-                                        val allLogData = merged ?: emptyMap()
-                                        // Use rk_w table axes if available, else defaults
-                                        val rpmBins = inputRkw?.yAxis?.map { it }?.toDoubleArray()
-                                            ?: FuelTrimAnalyzer.DEFAULT_RPM_BINS
-                                        val loadBins = inputRkw?.xAxis?.map { it }?.toDoubleArray()
-                                            ?: FuelTrimAnalyzer.DEFAULT_LOAD_BINS
-                                        val diagResult = FuelTrimAnalyzer.analyzeMed17TrimsWithDiagnostics(
-                                            allLogData, rpmBins, loadBins
-                                        )
+                                        val allLogData = FuelTrimAnalyzer.mergeAlignedLogs(parsedLogs)
+                                        val diagResult = analyzeLoadedData(allLogData, fuelTrimSettings)
                                         val analyzed = diagResult.toFuelTrimResult()
                                         withContext(Dispatchers.Main) {
+                                            loadedLogData = allLogData
                                             trimResult = analyzed
                                             diagnosticResult = diagResult
-                                            val totalBins = analyzed.corrections.sumOf { row ->
-                                                row.count { it != 0.0 }
-                                            }
-                                            logStatus = if (analyzed.isEmpty) {
-                                                "✓ Loaded ${files.size} file(s) — all trims within ±3% threshold"
-                                            } else {
-                                                "✓ Loaded ${files.size} file(s) — $totalBins bins with corrections"
-                                            }
+                                            logStatus = analysisStatus(
+                                                "✓ Loaded ${files.size} file(s)",
+                                                diagResult,
+                                                fuelTrimSettings
+                                            )
                                             showProgress = false
                                         }
                                     } catch (e: Exception) {
                                         withContext(Dispatchers.Main) {
+                                            loadedLogData = null
+                                            trimResult = null
+                                            diagnosticResult = null
+                                            selectedDiagCell = null
                                             logStatus = "Error: ${e.message}"
                                             showProgress = false
                                         }
@@ -393,6 +536,8 @@ fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
                         OutlinedButton(onClick = {
                             trimResult = null
                             diagnosticResult = null
+                            loadedLogData = null
+                            selectedDiagCell = null
                             logStatus = "Cleared"
                         }) {
                             Text("Clear")
@@ -405,7 +550,12 @@ fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
                 }
                 logStatus?.let {
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(
+                        it,
+                        modifier = Modifier.testTag("fuel-trim-status"),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }
@@ -445,7 +595,11 @@ fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
                     val avgMap = fuelTrimResult.toAvgTrimsMap3d()
                     val avgHeight = ((avgMap.yAxis.size + 1) * 24 + 4).dp
                     Box(modifier = Modifier.fillMaxWidth().height(avgHeight)) {
-                        MapTable(map = avgMap, editable = false)
+                        MapTable(
+                            map = avgMap,
+                            editable = false,
+                            testTagPrefix = "fuel-trim-average"
+                        )
                     }
                 }
             }
@@ -474,6 +628,7 @@ fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
                             MapTable(
                                 map = outputRkw,
                                 editable = false,
+                                testTagPrefix = "fuel-trim-output",
                                 cellColorProvider = colorProvider,
                                 onCellSelected = { rowIdx, colIdx ->
                                     diagnosticResult?.let { diag ->
@@ -503,7 +658,8 @@ fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
                                     )
                                     Spacer(modifier = Modifier.height(4.dp))
                                     Text(
-                                        "Samples: ${cell.sampleCount}",
+                                        "Samples: ${cell.sampleCount} · effective weight: " +
+                                            diagFormatter.format(cell.effectiveSampleWeight),
                                         style = MaterialTheme.typography.bodySmall
                                     )
                                     Text(
@@ -588,7 +744,8 @@ fun FuelTrimScreen(preloadedLogFiles: List<java.io.File>? = null) {
         ) {
             Button(
                 onClick = { showWriteConfirmation = true },
-                enabled = canWrite
+                enabled = canWrite,
+                modifier = Modifier.testTag("fuel-trim-write")
             ) {
                 Text("Write rk_w")
             }

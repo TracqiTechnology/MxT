@@ -1,6 +1,7 @@
 package data.preferences.platform
 
 import data.model.EcuPlatform
+import data.preferences.SharedAxisPreferences
 import java.util.prefs.Preferences
 
 /**
@@ -19,6 +20,8 @@ object EcuPlatformPreference {
                 EcuPlatform.ME7
             }
         }
-        set(value) = prefs.put(PLATFORM_KEY, value.name)
+        set(value) {
+            prefs.put(PLATFORM_KEY, value.name)
+            SharedAxisPreferences.clear()
+        }
 }
-

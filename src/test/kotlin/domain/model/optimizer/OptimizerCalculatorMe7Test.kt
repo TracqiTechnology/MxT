@@ -3,7 +3,10 @@ package domain.model.optimizer
 import data.contract.Me7LogFileContract
 import data.contract.Me7LogFileContract.Header as H
 import data.parser.me7log.Me7LogParser
+import data.profile.ConfigurationProfile
+import data.profile.ProfileManager
 import java.io.File
+import kotlinx.serialization.json.Json
 import kotlin.test.*
 
 /**
@@ -17,10 +20,26 @@ class OptimizerCalculatorMe7Test {
     private val parser = Me7LogParser()
     private val mainLog = File("example/me7/logs/me7/log_typical_20200825_141742.csv")
     private val optimizerOnlyLog = File("example/me7/logs/me7/log_typical_20180722_131032.csv")
+    private lateinit var globalState: support.GlobalTestStateSnapshot
 
     @BeforeTest
     fun checkFilesExist() {
+        globalState = support.GlobalTestStateSnapshot.capture()
+        val profileStream = ProfileManager::class.java.getResourceAsStream(
+            "/profiles/MBox.mxtprofile.json"
+        ) ?: error("MBox profile not found")
+        ProfileManager.applyProfile(
+            Json { ignoreUnknownKeys = true }.decodeFromString(
+                ConfigurationProfile.serializer(),
+                profileStream.bufferedReader().readText()
+            )
+        )
         assertTrue(mainLog.exists(), "Main log fixture not found at ${mainLog.absolutePath}")
+    }
+
+    @AfterTest
+    fun restoreGlobalState() {
+        globalState.restore()
     }
 
     private fun parseOptimizer(file: File): Map<Me7LogFileContract.Header, List<Double>> {

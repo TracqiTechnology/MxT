@@ -96,13 +96,10 @@ class KfzwYAxisEditTest {
         assertEquals(12.0, map.zAxis[0][1], 1e-9, "RPM=1000, Load=40")
         assertEquals(14.0, map.zAxis[0][2], 1e-9, "RPM=1000, Load=60")
 
-        // RPM=2500: monotone cubic interpolation between RPM=2000 and RPM=3000.
-        // The curve decelerates from 3000→4000 (smaller delta), so the cubic
-        // pulls midpoint values slightly above the bilinear average, correctly
-        // capturing the curvature of the ignition map.
-        assertEquals(17.767857142857142, map.zAxis[1][0], 1e-9, "RPM=2500, Load=20 (cubic 15→20)")
-        assertEquals(21.375, map.zAxis[1][1], 1e-9, "RPM=2500, Load=40 (cubic 18→24)")
-        assertEquals(23.375, map.zAxis[1][2], 1e-9, "RPM=2500, Load=60 (cubic 20→26)")
+        // RPM=2500: bilinear is the product default.
+        assertEquals(17.5, map.zAxis[1][0], 1e-9, "RPM=2500, Load=20")
+        assertEquals(21.0, map.zAxis[1][1], 1e-9, "RPM=2500, Load=40")
+        assertEquals(23.0, map.zAxis[1][2], 1e-9, "RPM=2500, Load=60")
 
         // RPM=4000: exact match to original last row
         assertEquals(22.0, map.zAxis[2][0], 1e-9, "RPM=4000, Load=20")
@@ -228,5 +225,17 @@ class KfzwYAxisEditTest {
         // Load=65: extrapolated beyond Load=60 (clamped by -13.5 min)
         // LinearExtrapolation from [40,60] with values [12,14]: slope=0.1, at 65 → 14.5
         assertEquals(14.5, xRescaledZ[0][2], 1e-9, "Load=65, extrapolated")
+    }
+
+    @Test
+    fun `KFZW generation uses the exact target axis length`() {
+        val original = buildKfzwMap()
+        val targetAxis = arrayOf(20.0, 30.0, 40.0, 50.0, 60.0)
+
+        val generated = Kfzw.generateKfzw(original.xAxis, original.zAxis, targetAxis)
+
+        assertEquals(targetAxis.size, generated[0].size)
+        assertEquals(11.0, generated[0][1], 1e-9)
+        assertEquals(13.0, generated[0][3], 1e-9)
     }
 }

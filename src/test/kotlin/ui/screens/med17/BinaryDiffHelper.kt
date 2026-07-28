@@ -73,13 +73,13 @@ object BinaryDiffHelper {
         val ranges = mutableListOf<LongRange>()
 
         tableDef.xAxis?.takeIf { it.address != 0 }?.let { axis ->
-            val count = maxOf(axis.rowCount, 1) * maxOf(axis.indexCount, 1)
+            val count = maxOf(axis.indexCount, 1)
             val bytes = count * (axis.sizeBits / 8)
             ranges.add(axis.address.toLong() until axis.address.toLong() + bytes)
         }
 
         tableDef.yAxis?.takeIf { it.address != 0 }?.let { axis ->
-            val count = maxOf(axis.rowCount, 1) * maxOf(axis.indexCount, 1)
+            val count = maxOf(axis.indexCount, 1)
             val bytes = count * (axis.sizeBits / 8)
             ranges.add(axis.address.toLong() until axis.address.toLong() + bytes)
         }

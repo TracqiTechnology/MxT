@@ -5,6 +5,7 @@ import data.parser.bin.BinParser
 import data.parser.xdf.TableDefinition
 import data.parser.xdf.XdfParser
 import data.preferences.bin.BinFilePreferences
+import data.preferences.SharedAxisPreferences
 import data.preferences.platform.EcuPlatformPreference
 import data.preferences.xdf.XdfFilePreferences
 import data.profile.ConfigurationProfile
@@ -16,6 +17,7 @@ import java.io.FileInputStream
 import kotlin.test.BeforeTest
 import kotlin.test.AfterTest
 import kotlin.test.assertTrue
+import support.GlobalTestStateSnapshot
 
 /**
  * Shared base for MED17 Compose UI screen tests.
@@ -45,18 +47,16 @@ abstract class Med17ScreenTestBase {
         private val profileJson = Json { ignoreUnknownKeys = true }
     }
 
-    protected lateinit var savedPlatform: EcuPlatform
-    protected lateinit var savedXdfFile: File
+    private lateinit var globalState: GlobalTestStateSnapshot
     protected lateinit var tableDefs: List<TableDefinition>
     protected lateinit var allMaps: List<Pair<TableDefinition, Map3d>>
     protected lateinit var tempBinFile: File
     protected lateinit var stockBinCopy: File
     protected lateinit var profile: ConfigurationProfile
-
     @BeforeTest
     open fun setUp() {
-        savedPlatform = EcuPlatformPreference.platform
-        savedXdfFile = XdfFilePreferences.getStoredFile()
+        globalState = GlobalTestStateSnapshot.capture()
+        clearSharedWorkspaceState()
         EcuPlatformPreference.platform = EcuPlatform.MED17
 
         assertTrue(XDF_FILE.exists(), "XDF not found: ${XDF_FILE.absolutePath}")
@@ -93,14 +93,14 @@ abstract class Med17ScreenTestBase {
 
     @AfterTest
     open fun tearDown() {
-        EcuPlatformPreference.platform = savedPlatform
-        XdfFilePreferences.setFile(savedXdfFile)
+        clearSharedWorkspaceState()
         if (::tempBinFile.isInitialized && tempBinFile.exists()) {
             tempBinFile.delete()
         }
         if (::stockBinCopy.isInitialized && stockBinCopy.exists()) {
             stockBinCopy.delete()
         }
+        if (::globalState.isInitialized) globalState.restore()
     }
 
     /** Find a map by exact table name. */
@@ -128,5 +128,12 @@ abstract class Med17ScreenTestBase {
             raf.readFully(bytes)
         }
         return bytes
+    }
+
+    private fun clearSharedWorkspaceState() {
+        SharedAxisPreferences.setKfmiopEditedXAxis(null)
+        SharedAxisPreferences.setKfmiopEditedYAxis(null)
+        SharedAxisPreferences.setKfmirlEditedYAxis(null)
+        SharedAxisPreferences.setKfmiopCalculatedMap(null)
     }
 }

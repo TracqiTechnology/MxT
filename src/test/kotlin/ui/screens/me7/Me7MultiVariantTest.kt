@@ -76,17 +76,19 @@ class Me7MultiVariantTest {
     }
 
     private lateinit var savedPlatform: EcuPlatform
+    private lateinit var globalState: support.GlobalTestStateSnapshot
     private lateinit var tempBinFile: File
     private lateinit var stockBinCopy: File
 
     @BeforeTest
     fun setUp() {
+        globalState = support.GlobalTestStateSnapshot.capture()
         savedPlatform = EcuPlatformPreference.platform
     }
 
     @AfterTest
     fun tearDown() {
-        EcuPlatformPreference.platform = savedPlatform
+        globalState.restore()
         if (::tempBinFile.isInitialized && tempBinFile.exists()) tempBinFile.delete()
         if (::stockBinCopy.isInitialized && stockBinCopy.exists()) stockBinCopy.delete()
     }
@@ -139,6 +141,23 @@ class Me7MultiVariantTest {
         stockBinCopy.copyTo(tempBinFile, overwrite = true)
     }
 
+    private fun verifyIncompatibleMapWriteRejected(
+        variantName: String,
+        mapKey: String,
+        getter: () -> Pair<TableDefinition, Map3d>?
+    ) {
+        loadVariant(VARIANTS.first { it.name == variantName })
+        val (definition, map) = getter() ?: fail("$mapKey preference not resolved")
+        val before = tempBinFile.readBytes()
+
+        val error = assertFailsWith<IllegalArgumentException> {
+            BinWriter.write(tempBinFile, definition, map)
+        }
+
+        assertTrue(error.message.orEmpty().contains("strictly increasing"))
+        assertContentEquals(before, tempBinFile.readBytes(), "Rejected write must leave BIN byte-identical")
+    }
+
     // ── Stock variant ──────────────────────────────────────────────────
 
     @Test fun `stock - all map preferences resolve`() = verifyAllPreferences("stock")
@@ -174,7 +193,8 @@ class Me7MultiVariantTest {
     @Test fun `5120 - all map preferences resolve`() = verifyAllPreferences("5120")
     @Test fun `5120 - write KRKTE`() = verifyWrite("5120", "KRKTE") { KrktePreferences.getSelectedMap() }
     @Test fun `5120 - write KFMIOP`() = verifyWrite("5120", "KFMIOP") { KfmiopPreferences.getSelectedMap() }
-    @Test fun `5120 - write KFZW`() = verifyWrite("5120", "KFZW") { KfzwPreferences.getSelectedMap() }
+    @Test fun `5120 - incompatible 16-bit KFZW is rejected safely`() =
+        verifyIncompatibleMapWriteRejected("5120", "KFZW") { KfzwPreferences.getSelectedMap() }
     @Test fun `5120 - write KFLDRL`() = verifyWrite("5120", "KFLDRL") { KfldrlPreferences.getSelectedMap() }
     @Test fun `5120 - write KFLDIMX`() = verifyWrite("5120", "KFLDIMX") { KfldimxPreferences.getSelectedMap() }
 
@@ -183,7 +203,8 @@ class Me7MultiVariantTest {
     @Test fun `5120-nyet - all map preferences resolve`() = verifyAllPreferences("5120-nyet")
     @Test fun `5120-nyet - write KRKTE`() = verifyWrite("5120-nyet", "KRKTE") { KrktePreferences.getSelectedMap() }
     @Test fun `5120-nyet - write KFMIOP`() = verifyWrite("5120-nyet", "KFMIOP") { KfmiopPreferences.getSelectedMap() }
-    @Test fun `5120-nyet - write KFZW`() = verifyWrite("5120-nyet", "KFZW") { KfzwPreferences.getSelectedMap() }
+    @Test fun `5120-nyet - incompatible 16-bit KFZW is rejected safely`() =
+        verifyIncompatibleMapWriteRejected("5120-nyet", "KFZW") { KfzwPreferences.getSelectedMap() }
     @Test fun `5120-nyet - write KFLDRL`() = verifyWrite("5120-nyet", "KFLDRL") { KfldrlPreferences.getSelectedMap() }
 
     // ── 5120-16bit variant ──────────────────────────────────────────

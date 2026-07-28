@@ -72,6 +72,53 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+    // The app uses process-wide singleton state and java.util.prefs. Keep tests
+    // deterministic and prevent them from reading or modifying the developer's
+    // real desktop preferences.
+    maxParallelForks = 1
+    val isolatedPreferences = layout.buildDirectory.dir("test-preferences/$name")
+    systemProperty("java.util.prefs.userRoot", isolatedPreferences.get().asFile.absolutePath)
+    systemProperty("java.util.prefs.systemRoot", isolatedPreferences.get().asFile.absolutePath)
+    doFirst {
+        val directory = isolatedPreferences.get().asFile
+        check(!directory.exists() || directory.deleteRecursively()) {
+            "Could not clear isolated test preferences at ${directory.absolutePath}"
+        }
+        check(directory.mkdirs()) {
+            "Could not create isolated test preferences at ${directory.absolutePath}"
+        }
+    }
+}
+
+tasks.named<Test>("test") {
+    useJUnitPlatform {
+        excludeTags("internal-fixture")
+    }
+}
+
+val internalFixtureRoot = providers.gradleProperty("mxtInternalFixtures")
+    .orElse(layout.projectDirectory.dir("../me7-internal").asFile.absolutePath)
+
+tasks.register<Test>("internalFixtureTest") {
+    group = "verification"
+    description = "Runs the private, hash-pinned MED17 tuned-BIN corpus"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform {
+        includeTags("internal-fixture")
+    }
+    shouldRunAfter(tasks.named("test"))
+    doFirst {
+        val root = file(internalFixtureRoot.get())
+        check(root.isDirectory) {
+            "Private fixture root does not exist: ${root.absolutePath}. " +
+                "Pass -PmxtInternalFixtures=/path/to/me7-internal."
+        }
+        check(file("${root.absolutePath}/mxt-fixtures/med17-corpus-v1.json").isFile) {
+            "Private MED17 manifest is missing under ${root.absolutePath}/mxt-fixtures."
+        }
+        systemProperty("mxt.internal.fixtures", root.absolutePath)
+    }
 }
 
 tasks.register<JavaExec>("screenshots") {
@@ -94,11 +141,21 @@ tasks.register<JavaExec>("cli") {
     )
 }
 
+val generatedVersionResources = layout.buildDirectory.dir("generated/versionResources")
+sourceSets.main {
+    resources.srcDir(generatedVersionResources)
+}
+
 tasks.register("generateVersionFile") {
-    val outputFile = file("src/main/resources/version.txt")
+    val outputFile = generatedVersionResources.map { it.file("version.txt") }
     inputs.property("appVersion", appVersion)
     outputs.file(outputFile)
-    doLast { outputFile.writeText(appVersion) }
+    doLast {
+        outputFile.get().asFile.apply {
+            parentFile.mkdirs()
+            writeText(appVersion)
+        }
+    }
 }
 
 tasks.named("processResources") { dependsOn("generateVersionFile") }
