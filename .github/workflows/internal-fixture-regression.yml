@@ -28,6 +28,7 @@ jobs:
           ref: a8f0f3211f197bc180c0101ff56e2d43e2524d85
           ssh-key: ${{ secrets.ME7_INTERNAL_DEPLOY_KEY }}
           persist-credentials: false
+          lfs: true
           path: me7-internal
 
       - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
