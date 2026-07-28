@@ -47,14 +47,14 @@ object BinWriter {
         require(writes.isNotEmpty()) { "At least one table is required for a BIN write" }
         require(file.exists() && file.isFile) { "BIN file does not exist: ${file.path}" }
 
+        val original = file.readBytes()
         val regions = mutableListOf<WriteRegion>()
         for ((tableDefinition, map) in writes) {
-            regions += prepareWriteRegions(tableDefinition, map).map { prepared ->
+            regions += prepareWriteRegions(tableDefinition, map, original).map { prepared ->
                 WriteRegion(tableDefinition, prepared.axis, prepared.bytes)
             }
         }
 
-        val original = file.readBytes()
         val staged = original.copyOf()
         val appliedRegions = mutableListOf<WriteRegion>()
         for (region in regions) {
@@ -110,7 +110,8 @@ object BinWriter {
 
     private fun prepareWriteRegions(
         tableDefinition: TableDefinition,
-        map: Map3d
+        map: Map3d,
+        original: ByteArray
     ): List<PreparedRegion> {
         val regions = mutableListOf<PreparedRegion>()
         // Axis writes only apply when the map carries that axis's breakpoints.
@@ -135,14 +136,6 @@ object BinWriter {
         require(map.xAxis.all { it.isFinite() } && map.yAxis.all { it.isFinite() }) {
             "Refusing to write '${tableDefinition.tableName}': axes must contain only finite values"
         }
-        require(isStrictlyIncreasingOrScalar(map.xAxis)) {
-            "Refusing to write '${tableDefinition.tableName}': x-axis must be strictly increasing; " +
-                "received ${map.xAxis.contentToString()}"
-        }
-        require(isStrictlyIncreasingOrScalar(map.yAxis)) {
-            "Refusing to write '${tableDefinition.tableName}': y-axis must be strictly increasing; " +
-                "received ${map.yAxis.contentToString()}"
-        }
         val zRows = maxOf(tableDefinition.zAxis.rowCount, 1)
         val zCols = maxOf(tableDefinition.zAxis.columnCount, 1)
         zAxis?.let {
@@ -157,11 +150,11 @@ object BinWriter {
         // therefore leave the original file byte-identical.
         xAxis?.let { axis ->
             val values = map.xAxis.toDoubleArray()
-            regions += PreparedRegion(axis, encode(axis, values))
+            prepareAxisRegion(tableDefinition, "x", axis, values, original)?.let(regions::add)
         }
         yAxis?.let { axis ->
             val values = map.yAxis.toDoubleArray()
-            regions += PreparedRegion(axis, encode(axis, values))
+            prepareAxisRegion(tableDefinition, "y", axis, values, original)?.let(regions::add)
         }
         zAxis?.let { axis ->
             val zFlat = DoubleArray(zRows * zCols)
@@ -174,6 +167,80 @@ object BinWriter {
             regions += PreparedRegion(axis, encode(axis, zFlat))
         }
         return regions
+    }
+
+    /**
+     * Some production MED17 calibrations contain a repeated native breakpoint
+     * (for example, [..., 100, 100, 110]). Requiring every requested axis to be
+     * strictly increasing made even a Z-only or identity write impossible for
+     * those otherwise valid files.
+     *
+     * A repeated native breakpoint may therefore be preserved byte-for-byte,
+     * but never created or changed. Strict native axes retain the existing
+     * strictly-increasing guard. This keeps the safety check while allowing
+     * legitimate factory axes to survive unrelated table edits.
+     */
+    private fun prepareAxisRegion(
+        tableDefinition: TableDefinition,
+        label: String,
+        axis: AxisDefinition,
+        values: DoubleArray,
+        original: ByteArray
+    ): PreparedRegion? {
+        val encoded = encode(axis, values)
+        val start = axis.address
+        val end = start.toLong() + encoded.size
+        require(start >= 0 && end <= original.size.toLong()) {
+            "Refusing to write '${tableDefinition.tableName}': $label-axis region " +
+                "0x${start.toString(16)}..0x${end.toString(16)} is outside the " +
+                "${original.size}-byte BIN"
+        }
+
+        val originalBytes = original.copyOfRange(start, end.toInt())
+        if (containsUsableAxisWithAdjacentDuplicate(originalBytes, axis.sizeBits / 8)) {
+            require(isNonDecreasingWithUsableRangeOrScalar(values)) {
+                "Refusing to write '${tableDefinition.tableName}': native $label-axis contains " +
+                    "a repeated breakpoint and may only be preserved unchanged; received " +
+                    values.contentToString()
+            }
+            require(encoded.contentEquals(originalBytes)) {
+                "Refusing to write '${tableDefinition.tableName}': native $label-axis contains " +
+                    "a repeated breakpoint and may only be preserved byte-for-byte"
+            }
+            return null
+        }
+
+        require(isStrictlyIncreasingOrScalar(values)) {
+            "Refusing to write '${tableDefinition.tableName}': $label-axis must be strictly increasing; " +
+                "received ${values.contentToString()}"
+        }
+        return PreparedRegion(axis, encoded)
+    }
+
+    private fun containsUsableAxisWithAdjacentDuplicate(bytes: ByteArray, stride: Int): Boolean {
+        require(stride > 0) { "Axis element size must be at least one byte" }
+        if (bytes.size < stride * 2) return false
+        var hasDuplicate = false
+        var hasDistinctValue = false
+        for (offset in stride until bytes.size step stride) {
+            var equal = true
+            for (byteIndex in 0 until stride) {
+                if (bytes[offset + byteIndex] != bytes[offset - stride + byteIndex]) {
+                    equal = false
+                    break
+                }
+            }
+            if (equal) {
+                hasDuplicate = true
+            } else {
+                hasDistinctValue = true
+            }
+        }
+        // A completely constant/raw-zero synthetic axis has no usable range and
+        // may be initialized by a strict requested axis. The preservation-only
+        // exception is reserved for real native axes that have both a usable
+        // range and at least one repeated breakpoint.
+        return hasDuplicate && hasDistinctValue
     }
 
     private fun validateCompatibleOverlap(
@@ -439,6 +506,12 @@ object BinWriter {
         return max(1e-9, abs(atOne - atZero) * 1.000000001)
     }
 
-    private fun isStrictlyIncreasingOrScalar(axis: Array<Double>): Boolean =
+    private fun isStrictlyIncreasingOrScalar(axis: DoubleArray): Boolean =
         axis.size <= 1 || (1 until axis.size).all { axis[it].isFinite() && axis[it] > axis[it - 1] }
+
+    private fun isNonDecreasingWithUsableRangeOrScalar(axis: DoubleArray): Boolean =
+        axis.size <= 1 || (
+            (1 until axis.size).all { axis[it].isFinite() && axis[it] >= axis[it - 1] } &&
+                axis.any { it > axis[0] }
+            )
 }

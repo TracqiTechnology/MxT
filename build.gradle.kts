@@ -90,6 +90,37 @@ tasks.withType<Test> {
     }
 }
 
+tasks.named<Test>("test") {
+    useJUnitPlatform {
+        excludeTags("internal-fixture")
+    }
+}
+
+val internalFixtureRoot = providers.gradleProperty("mxtInternalFixtures")
+    .orElse(layout.projectDirectory.dir("../me7-internal").asFile.absolutePath)
+
+tasks.register<Test>("internalFixtureTest") {
+    group = "verification"
+    description = "Runs the private, hash-pinned MED17 tuned-BIN corpus"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform {
+        includeTags("internal-fixture")
+    }
+    shouldRunAfter(tasks.named("test"))
+    doFirst {
+        val root = file(internalFixtureRoot.get())
+        check(root.isDirectory) {
+            "Private fixture root does not exist: ${root.absolutePath}. " +
+                "Pass -PmxtInternalFixtures=/path/to/me7-internal."
+        }
+        check(file("${root.absolutePath}/mxt-fixtures/med17-corpus-v1.json").isFile) {
+            "Private MED17 manifest is missing under ${root.absolutePath}/mxt-fixtures."
+        }
+        systemProperty("mxt.internal.fixtures", root.absolutePath)
+    }
+}
+
 tasks.register<JavaExec>("screenshots") {
     mainClass.set("ScreenshotHarnessKt")
     classpath = sourceSets["main"].runtimeClasspath

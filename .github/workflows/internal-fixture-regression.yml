@@ -1,0 +1,50 @@
+name: Private MED17 Fixture Regression
+
+on:
+  workflow_call:
+    secrets:
+      ME7_INTERNAL_DEPLOY_KEY:
+        required: true
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  internal-fixture-test:
+    name: Hash-pinned tuned-BIN corpus
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out MxT
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Check out immutable private fixture corpus
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          repository: TracqiTechnology/me7-internal
+          ref: a8f0f3211f197bc180c0101ff56e2d43e2524d85
+          ssh-key: ${{ secrets.ME7_INTERNAL_DEPLOY_KEY }}
+          persist-credentials: false
+          path: me7-internal
+
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
+
+      - name: Run private MED17 fixture regression
+        run: ./gradlew internalFixtureTest -PmxtInternalFixtures="$GITHUB_WORKSPACE/me7-internal"
+
+      - name: Upload private fixture test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: private-med17-fixture-test-${{ github.run_attempt }}
+          path: |
+            build/reports/tests/internalFixtureTest/
+            build/test-results/internalFixtureTest/
