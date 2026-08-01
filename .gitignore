@@ -15,3 +15,5 @@ technical/
 # Private example files
 example/*.rar
 example/C22mb31g.*
+
+.kotlin/
