@@ -61,7 +61,9 @@ data class KpMapDefinition(
     /** X-axis physical units */
     val xUnits: String = "",
     /** Y-axis physical units */
-    val yUnits: String = ""
+    val yUnits: String = "",
+    /** Exact encoding metadata from a recognized layout; absent for the legacy heuristic reader. */
+    val tableDefinition: data.parser.xdf.TableDefinition? = null
 ) {
     /** True when we have a usable binary address */
     val hasAddress: Boolean get() = arAddress >= 0 || zAddress >= 0

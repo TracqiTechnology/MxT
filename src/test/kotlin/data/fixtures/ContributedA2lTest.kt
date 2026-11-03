@@ -17,7 +17,9 @@ class ContributedA2lTest {
             if (file.name.startsWith("D915C")) {
                 assertFailsWith<IllegalArgumentException> { A2lParser.parse(file) }
                 val kp = data.parser.kp.KpHintParser.parseFileFull(file)
-                assertTrue(kp.first.isEmpty() && kp.second.isEmpty(), "This KP variant currently has no supported definitions")
+                println("MED9 KP hints=${kp.first.size}, definitions=${kp.second.size}")
+                assertTrue(kp.first.size > 10000)
+                assertTrue(kp.second.size > 7000)
                 continue
             }
             val parsed = A2lParser.parse(file)

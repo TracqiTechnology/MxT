@@ -320,7 +320,7 @@ These cover every equation form produced by the Bosch ME7 TunerPro translators f
 
 ## WinOLS Support (KP + CSV)
 
-MxT includes full support for WinOLS `.kp` ECU definition files and WinOLS CSV exports. We reverse-engineered the proprietary KP binary format to make this work. You're welcome.
+MxT imports WinOLS CSV exports and supported `.kp` map-pack layouts. KP coverage depends on the record layout and encoding; recognizing the file container alone does not guarantee that every map can be imported.
 
 **An XDF file, WinOLS CSV export, or KP file is sufficient for binary reading and writing.** Any combination works — MxT merges definitions with priority: XDF > CSV > KP.
 
@@ -359,7 +359,7 @@ If no XDF is loaded, KP definitions alone are sufficient to read and write maps 
 | Axis addresses | Full | Full | Full |
 | Units | Full | Full | Full |
 | Bit width | Full | Derived | Full |
-| Byte order | Full | Assumed LE | Full |
+| Byte order | Full | Explicit in counted v2; assumed LE in legacy reader | Full |
 | Use case | Primary source | Standalone or gap-fill | Standalone or gap-fill |
 
 ### Address verification
@@ -378,9 +378,9 @@ KP AR addresses and XDF addresses match perfectly for the `8D0907551M` ECU:
 
 The WinOLS binary format is proprietary with no public specification. Our reverse-engineering covers the core fields (name, address, dimensions, scaling, units, axes) but has these caveats:
 
-- **Scale anomaly:** ~4/21 tested records have binary scale = 2× or 0.5× the CSV ground truth. The binary scale is used as-is — close enough for reading, and BinWriter's equation inversion is scale-independent.
-- **Byte order:** Assumed little-endian (LoHi) for all ME7 ECUs. This is consistent with XDF defaults and all tested records.
-- **Signed flag:** Derived from scale sign. Records with unsigned negative values (rare) may need an XDF override.
+- **Legacy scale discrepancy:** Some records in the legacy ME7 reader differ from the CSV reference by a factor of two. Those scales need verification against a matching definition; successful byte readback does not establish correct physical units.
+- **Legacy encoding:** The original ME7 heuristic reader assumes little-endian storage and derives signedness from the scale sign. The counted v2 reader instead preserves explicit map/axis widths, byte order, signedness, scale, and offset.
+- **Counted v2 coverage:** The contributed D915C N46A510 pack yields 10,123 unique address hints and 8,451 full definitions. Unsupported axis modes (including ordinal axes with no physical breakpoints), mirrored/reciprocal data, and conflicting same-name definitions are not promoted to editable maps. Other layouts are not claimed as supported.
 - **Coverage:** ~90 maps with addresses vs. ~393 in a typical XDF. KP definitions fill gaps when combined with XDF/CSV, or work standalone for the maps they cover.
 
 KP files available from https://files.s4wiki.com/defs/ can be used alongside the XDF files from the same source.
@@ -656,6 +656,6 @@ Downloads stay under `build/contributed-fixtures`; source URLs and hashes are in
 
 The four actual A2Ls yield 7,540 (D9156), 7,485 (D915A 41W200), 8,051 (D915A N43J050), and 8,774 (D915E) calibration definitions. Tests cover all supported VALUE/CURVE/MAP characteristics, XDF export/reimport, encoding metadata, and address bounds. VAL_BLK/ASCII characteristics remain unsupported. Matching BINs were not supplied in #93, so this does not verify decoded calibration values against those ECU versions.
 
-D915C N46A510 is a binary WinOLS KP file despite its `.a2l` filename. The current KP parser extracts no definitions from this variant; importing it as A2L now reports its actual format.
+D915C N46A510 is a binary WinOLS KP file despite its `.a2l` filename. Rename a copy to `.kp` and open it through the WinOLS KP workflow. Its counted v2 records yield 10,123 address hints and 8,451 full definitions. Fixture tests verify the encoding metadata and use an explicitly synthetic BIN to check signed values, mixed axis widths, big-endian storage, column-major maps, identity writes, and localized edits. A matching N46A510 BIN is still needed for real calibration-value validation.
 
 The contributed Volvo `2350WRHJ` XDF / `VVT16` BIN pair passes byte-identical MLHFM writes and localized cell edit/readback checks, including signed airflow values. Its 129 voltage labels are empty and decode as zeros, so MAF correction is blocked until a definition with verified voltage breakpoints is available. Horizontal curves with valid axes are normalized for calculation and restored to their original layout for writing. Tests of valid horizontal axes use explicitly synthetic breakpoints, not inferred Volvo calibration data. These checks establish file handling, not vehicle or flashing validation.
