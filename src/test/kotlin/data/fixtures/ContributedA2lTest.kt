@@ -43,7 +43,7 @@ class ContributedA2lTest {
                     assertEquals(axis.address, copy.address)
                     assertEquals(axis.sizeBits, copy.sizeBits)
                     assertEquals(axis.indexCount, copy.indexCount)
-                    assertEquals(axis.unit, copy.unit)
+                    assertEquals(axis.unit.ifBlank { "-" }, copy.unit)
                     assertEquals(axis.rowCount, copy.rowCount)
                     assertEquals(axis.columnCount, copy.columnCount)
                     assertEquals(axis.equation, copy.equation)
