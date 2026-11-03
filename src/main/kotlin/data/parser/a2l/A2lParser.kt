@@ -166,6 +166,9 @@ object A2lParser {
      * can't corrupt block matching on real-world A2L files.
      */
     fun parse(content: String): A2lParseResult {
+        require(!content.take(32).contains("WinOLS File")) {
+            "This is a WinOLS KP file, not an A2L. Import it through the KP map-pack workflow."
+        }
         val clean          = stripComments(content)
         val methods        = parseCompuMethods(clean)
         val measurements   = parseMeasurements(clean)

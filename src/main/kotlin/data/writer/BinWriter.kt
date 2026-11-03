@@ -373,7 +373,14 @@ object BinWriter {
 
         for (index in values.indices) {
             val value = values[index]
-            val raw = rawValues[index]
+            // Inverting a decoded decimal scale can produce e.g. -72.99999999999999.
+            // Snap only floating-point noise near an integer; retain truncation for
+            // genuinely fractional requested raw values.
+            val unrounded = rawValues[index]
+            val nearest = Math.rint(unrounded)
+            val raw = if (!axis.isFloat && abs(unrounded - nearest) <= 8 * Math.ulp(max(1.0, abs(unrounded)))) {
+                nearest
+            } else unrounded
 
             if (!axis.isFloat) {
                 val min = if (axis.isSigned) -(1L shl (axis.sizeBits - 1)).toDouble() else 0.0

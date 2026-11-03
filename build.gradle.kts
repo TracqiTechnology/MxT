@@ -92,7 +92,7 @@ tasks.withType<Test> {
 
 tasks.named<Test>("test") {
     useJUnitPlatform {
-        excludeTags("internal-fixture")
+        excludeTags("internal-fixture", "contributed-fixture")
     }
 }
 
@@ -203,4 +203,13 @@ compose.desktop {
             }
         }
     }
+}
+
+// Public contributor fixtures are downloaded and hash-verified separately.
+tasks.register<Test>("contributedFixtureTest") {
+    group = "verification"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform { includeTags("contributed-fixture") }
+    shouldRunAfter(tasks.named("test"))
 }

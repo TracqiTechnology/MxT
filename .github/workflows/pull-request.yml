@@ -48,14 +48,38 @@ jobs:
             build/reports/tests/test/
             build/test-results/test/
 
+  contributed-fixtures:
+    name: Public contributor fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d
+      - name: Fetch hash-pinned public contributor fixtures
+        run: python3 tools/fixtures/fetch_contributed.py
+      - name: Validate contributed fixtures
+        run: ./gradlew contributedFixtureTest
+      - name: Upload contributor fixture report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: contributed-fixture-report
+          path: build/reports/tests/contributedFixtureTest/
+
   required-gate:
     name: Required PR Gate
     if: always()
-    needs: test
+    needs: [test, contributed-fixtures]
     runs-on: ubuntu-latest
     steps:
       - name: Require every platform suite to pass
         env:
           TEST_RESULT: ${{ needs.test.result }}
+          FIXTURE_RESULT: ${{ needs.contributed-fixtures.result }}
         run: |
           test "$TEST_RESULT" = "success"
+          test "$FIXTURE_RESULT" = "success"

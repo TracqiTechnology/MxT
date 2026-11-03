@@ -4,6 +4,7 @@ import data.contract.Me7LogFileContract
 import domain.derivative.Derivative
 import domain.math.Index
 import domain.math.map.Map3d
+import domain.model.mlhfm.MlhfmCurve
 import domain.util.Util
 import org.apache.commons.math3.stat.StatUtils
 import org.apache.commons.math3.stat.descriptive.moment.Mean
@@ -23,7 +24,8 @@ class ClosedLoopFuelingCorrectionManager(
     var closedLoopMlhfmCorrection: ClosedLoopFuelingCorrection? = null
         private set
 
-    fun correct(me7LogMap: Map<Me7LogFileContract.Header, List<Double>>, mlhfm: Map3d) {
+    fun correct(me7LogMap: Map<Me7LogFileContract.Header, List<Double>>, nativeMlhfm: Map3d) {
+        val mlhfm = MlhfmCurve.toColumn(nativeMlhfm)
         val correctionErrorMap = mutableMapOf<Double, MutableList<Double>>()
 
         for (voltage in mlhfm.yAxis) {

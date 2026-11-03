@@ -24,6 +24,7 @@ import domain.math.map.Map3d
 import domain.model.airflow.AirflowEstimation
 import domain.model.airflow.AirflowEstimationManager
 import domain.model.mlhfm.MlhfmFitter
+import domain.model.mlhfm.MlhfmCurve
 import domain.model.openloopfueling.correction.OpenLoopMlhfmCorrection
 import domain.model.openloopfueling.correction.OpenLoopMlhfmCorrectionManager
 import domain.model.openloopfueling.util.AfrLogUtil
@@ -50,7 +51,11 @@ fun OpenLoopScreen(
     initialCorrectionSubTab: Int = 0,
     autoFitDegree: Int? = null
 ) {
-    val mlhfmPair by rememberMlhfmMap()
+    val nativeMlhfmPair by rememberMlhfmMap()
+    val curve = remember(nativeMlhfmPair) {
+        runCatching { nativeMlhfmPair?.let { it.first to MlhfmCurve.toColumn(it.second) } }
+    }
+    val mlhfmPair = curve.getOrNull()
     val me7LogMap by OpenLoopLogParser.logs.collectAsState(initial = emptyMap())
     val externalAfrLogs by AfrLogParser.logs.collectAsState(initial = emptyMap())
     // Embedded wideband data belongs to this ME7 log, never to a previous load.
@@ -132,7 +137,7 @@ fun OpenLoopScreen(
 
         if (!hasMap) {
             Text(
-                "Load a BIN and select its MLHFM map in Configuration → Map Definitions.",
+                curve.exceptionOrNull()?.message ?: "Load a BIN and select its MLHFM map in Configuration → Map Definitions.",
                 modifier = Modifier.padding(16.dp),
                 style = MaterialTheme.typography.bodyMedium
             )
@@ -513,7 +518,7 @@ private fun OpenLoopCorrectionTab(
                     if (pair != null) {
                         val binFile = BinFilePreferences.getStoredFile()
                         if (binFile.exists()) {
-                            BinWriter.write(binFile, pair.first, correction.fitMlhfm)
+                            BinWriter.write(binFile, pair.first, MlhfmCurve.forWrite(correction.fitMlhfm, pair.second))
                         }
                     }
                 }) {
@@ -677,7 +682,7 @@ private fun OpenLoopMlhfmTab(correction: OpenLoopMlhfmCorrection?) {
                         val mlhfmToWrite = correction.fitMlhfm.let {
                             if (it.yAxis.isNotEmpty()) it else correction.correctedMlhfm
                         }
-                        BinWriter.write(binFile, pair.first, mlhfmToWrite)
+                        BinWriter.write(binFile, pair.first, MlhfmCurve.forWrite(mlhfmToWrite, pair.second))
                     }
                 }
             }) {

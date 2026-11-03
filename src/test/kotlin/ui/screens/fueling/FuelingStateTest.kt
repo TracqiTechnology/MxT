@@ -14,6 +14,17 @@ import kotlin.test.*
 @OptIn(ExperimentalTestApi::class)
 class FuelingStateTest : Me7TestBase() {
     @Test
+    fun `invalid horizontal voltage labels explain why correction is unavailable`() = runComposeUiTest {
+        val original = MlhfmPreferences.getSelectedMap()!!
+        val invalid = Map3d(arrayOf(0.0, 0.0), emptyArray(), arrayOf(arrayOf(10.0, 20.0)))
+        BinParser.setMapListForTesting(listOf(original.first to invalid))
+        setContent { ui.screens.closedloop.ClosedLoopScreen() }
+        onNodeWithText("MLHFM voltage breakpoints must be finite and strictly increasing. Check for missing XDF labels.").assertExists()
+        onNodeWithText("Load Logs").assertIsNotEnabled()
+        onNodeWithText("Correction").assertIsNotEnabled()
+    }
+
+    @Test
     fun `closed loop opens with a configured map before logs are loaded`() = runComposeUiTest {
         setContent { ui.screens.closedloop.ClosedLoopScreen() }
         onNodeWithText("Load Logs").assertIsEnabled()

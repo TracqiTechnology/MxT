@@ -4,6 +4,7 @@ import data.contract.AfrLogFileContract
 import data.contract.Me7LogFileContract
 import domain.math.Index
 import domain.math.map.Map3d
+import domain.model.mlhfm.MlhfmCurve
 import domain.model.openloopfueling.util.AfrLogUtil
 import domain.model.openloopfueling.util.Me7LogUtil
 import org.apache.commons.math3.stat.StatUtils
@@ -25,7 +26,8 @@ class OpenLoopMlhfmCorrectionManager(
     var openLoopCorrection: OpenLoopMlhfmCorrection? = null
         private set
 
-    fun correct(me7Log: Map<Me7LogFileContract.Header, List<Double>>, afrLog: Map<String, List<Double>>, mlhfm: Map3d) {
+    fun correct(me7Log: Map<Me7LogFileContract.Header, List<Double>>, afrLog: Map<String, List<Double>>, nativeMlhfm: Map3d) {
+        val mlhfm = MlhfmCurve.toColumn(nativeMlhfm)
         val me7LogList = Me7LogUtil.findMe7Logs(me7Log, minThrottleAngle, LAMBDA_CONTROL_ENABLED, minRpm, minPointsMe7)
         val afrLogList = AfrLogUtil.findAfrLogs(afrLog, minThrottleAngle, minRpm, maxAfr, minPointsAfr)
         generateMlhfm(mlhfm, me7LogList, afrLogList)

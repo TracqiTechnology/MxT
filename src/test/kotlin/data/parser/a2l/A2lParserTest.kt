@@ -7,6 +7,14 @@ import org.junit.jupiter.api.condition.EnabledIf
 import java.io.File
 
 class A2lParserTest {
+    @kotlin.test.Test
+    fun `WinOLS binary mislabeled as A2L reports its actual format`() {
+        val error = kotlin.test.assertFailsWith<IllegalArgumentException> {
+            A2lParser.parse("\u000b\u0000\u0000\u0000WinOLS File\u0000")
+        }
+        kotlin.test.assertTrue(error.message!!.contains("WinOLS KP"))
+    }
+
 
     // Synthetic A2L snippet for deterministic unit tests
     private val SYNTHETIC_A2L = """
