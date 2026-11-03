@@ -76,23 +76,12 @@ tasks.withType<Test> {
     // deterministic and prevent them from reading or modifying the developer's
     // real desktop preferences.
     maxParallelForks = 1
-    val isolatedPreferences = layout.buildDirectory.dir("test-preferences/$name")
-    systemProperty("java.util.prefs.userRoot", isolatedPreferences.get().asFile.absolutePath)
-    systemProperty("java.util.prefs.systemRoot", isolatedPreferences.get().asFile.absolutePath)
-    doFirst {
-        val directory = isolatedPreferences.get().asFile
-        check(!directory.exists() || directory.deleteRecursively()) {
-            "Could not clear isolated test preferences at ${directory.absolutePath}"
-        }
-        check(directory.mkdirs()) {
-            "Could not create isolated test preferences at ${directory.absolutePath}"
-        }
-    }
+    systemProperty("java.util.prefs.PreferencesFactory", "support.InMemoryPreferencesFactory")
 }
 
 tasks.named<Test>("test") {
     useJUnitPlatform {
-        excludeTags("internal-fixture")
+        excludeTags("internal-fixture", "contributed-fixture")
     }
 }
 
@@ -203,4 +192,13 @@ compose.desktop {
             }
         }
     }
+}
+
+// Public contributor fixtures are downloaded and hash-verified separately.
+tasks.register<Test>("contributedFixtureTest") {
+    group = "verification"
+    testClassesDirs = sourceSets["test"].output.classesDirs
+    classpath = sourceSets["test"].runtimeClasspath
+    useJUnitPlatform { includeTags("contributed-fixture") }
+    shouldRunAfter(tasks.named("test"))
 }

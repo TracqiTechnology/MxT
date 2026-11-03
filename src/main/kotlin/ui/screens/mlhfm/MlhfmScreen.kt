@@ -10,6 +10,7 @@ import androidx.compose.ui.unit.dp
 import data.parser.bin.BinParser
 import data.preferences.mlhfm.MlhfmPreferences
 import domain.math.map.Map3d
+import domain.model.mlhfm.MlhfmCurve
 import ui.components.ChartSeries
 import ui.components.LineChart
 import ui.components.MapTable
@@ -35,8 +36,11 @@ fun MlhfmScreen() {
         } else null
     }
 
-    val chartSeries = remember(selectedMap) {
-        val map = selectedMap?.second ?: return@remember emptyList<ChartSeries>()
+    val curve = remember(selectedMap) {
+        runCatching { selectedMap?.second?.let(MlhfmCurve::toColumn) }
+    }
+    val chartSeries = remember(curve) {
+        val map = curve.getOrNull() ?: return@remember emptyList<ChartSeries>()
         val voltage = map.yAxis
         val kghr = map.zAxis
 
@@ -96,7 +100,7 @@ fun MlhfmScreen() {
             contentAlignment = Alignment.Center
         ) {
             Text(
-                text = selectedMap?.first ?: "No Definition Selected",
+                text = curve.exceptionOrNull()?.message ?: selectedMap?.first ?: "No Definition Selected",
                 style = MaterialTheme.typography.bodyMedium
             )
         }

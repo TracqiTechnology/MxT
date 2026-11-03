@@ -22,6 +22,7 @@ import domain.math.map.Map3d
 import domain.model.closedloopfueling.ClosedLoopFuelingCorrection
 import domain.model.closedloopfueling.ClosedLoopFuelingCorrectionManager
 import domain.model.mlhfm.MlhfmFitter
+import domain.model.mlhfm.MlhfmCurve
 import kotlinx.coroutines.delay
 import org.apache.commons.math3.stat.descriptive.moment.Mean
 import ui.screens.fueling.rememberMlhfmMap
@@ -47,7 +48,11 @@ fun ClosedLoopScreen(
     initialCorrectionSubTab: Int = 0,
     autoFitDegree: Int? = null
 ) {
-    val mlhfmPair by rememberMlhfmMap()
+    val nativeMlhfmPair by rememberMlhfmMap()
+    val curve = remember(nativeMlhfmPair) {
+        runCatching { nativeMlhfmPair?.let { it.first to MlhfmCurve.toColumn(it.second) } }
+    }
+    val mlhfmPair = curve.getOrNull()
     val me7LogMap by ClosedLoopLogParser.logs.collectAsState(initial = emptyMap())
     var correction by rememberFuelingCalculation(mlhfmPair, me7LogMap) {
         val pair = mlhfmPair
@@ -118,7 +123,7 @@ fun ClosedLoopScreen(
 
         if (!hasMap) {
             Text(
-                "Load a BIN and select its MLHFM map in Configuration → Map Definitions.",
+                curve.exceptionOrNull()?.message ?: "Load a BIN and select its MLHFM map in Configuration → Map Definitions.",
                 modifier = Modifier.padding(16.dp),
                 style = MaterialTheme.typography.bodyMedium
             )
@@ -545,7 +550,7 @@ private fun ClosedLoopCorrectionTab(
                                 val mlhfmToWrite = correction.fitMlhfm.let {
                                     if (it.yAxis.isNotEmpty()) it else correction.correctedMlhfm
                                 }
-                                BinWriter.write(BinFilePreferences.file.value, pair.first, mlhfmToWrite)
+                                BinWriter.write(BinFilePreferences.file.value, pair.first, MlhfmCurve.forWrite(mlhfmToWrite, pair.second))
                                 writeStatus = WriteStatus.Success
                             } catch (e: Exception) {
                                 writeStatus = WriteStatus.Error
@@ -840,7 +845,7 @@ private fun ClosedLoopMlhfmTab(
                                 val mlhfmToWrite = correction.fitMlhfm.let {
                                     if (it.yAxis.isNotEmpty()) it else correction.correctedMlhfm
                                 }
-                                BinWriter.write(BinFilePreferences.file.value, pair.first, mlhfmToWrite)
+                                BinWriter.write(BinFilePreferences.file.value, pair.first, MlhfmCurve.forWrite(mlhfmToWrite, pair.second))
                                 writeStatus = WriteStatus.Success
                             } catch (e: Exception) {
                                 writeStatus = WriteStatus.Error

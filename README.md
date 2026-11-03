@@ -642,3 +642,20 @@ For technical details on the A2L parsing pipeline and conversion formulas, see [
 *MxT is free software. It comes with no warranty. If you send 25 psi into a motor that can handle 15 psi because you didn't read the output, that's between you and your engine builder.*
 
 *Built with mass quantities of coffee by [TracQi Technology](https://github.com/TracqiTechnology).*
+
+## Contributor fixture checks
+
+Public attachments from [Volvo ME7 #89](https://github.com/TracqiTechnology/MxT/issues/89) and [MED9 #93](https://github.com/TracqiTechnology/MxT/issues/93) have a separate, SHA-256-pinned regression suite:
+
+```sh
+python3 tools/fixtures/fetch_contributed.py
+./gradlew contributedFixtureTest
+```
+
+Downloads stay under `build/contributed-fixtures`; source URLs and hashes are in `tools/fixtures/contributed.json`. PR CI runs this suite alongside the normal platform regressions.
+
+The four actual A2Ls yield 7,540 (D9156), 7,485 (D915A 41W200), 8,051 (D915A N43J050), and 8,774 (D915E) calibration definitions. Tests cover all supported VALUE/CURVE/MAP characteristics, XDF export/reimport, encoding metadata, and address bounds. VAL_BLK/ASCII characteristics remain unsupported. Matching BINs were not supplied in #93, so this does not verify decoded calibration values against those ECU versions.
+
+D915C N46A510 is a binary WinOLS KP file despite its `.a2l` filename. The current KP parser extracts no definitions from this variant; importing it as A2L now reports its actual format.
+
+The contributed Volvo `2350WRHJ` XDF / `VVT16` BIN pair passes byte-identical MLHFM writes and localized cell edit/readback checks, including signed airflow values. Its 129 voltage labels are empty and decode as zeros, so MAF correction is blocked until a definition with verified voltage breakpoints is available. Horizontal curves with valid axes are normalized for calculation and restored to their original layout for writing. Tests of valid horizontal axes use explicitly synthetic breakpoints, not inferred Volvo calibration data. These checks establish file handling, not vehicle or flashing validation.
