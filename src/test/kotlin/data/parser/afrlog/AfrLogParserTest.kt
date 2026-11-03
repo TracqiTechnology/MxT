@@ -31,14 +31,6 @@ class AfrLogParserTest {
         return method.invoke(AfrLogParser, file) as Map<String, List<Double>>
     }
 
-    /** Invoke the private `parseMe7Log` method via reflection. */
-    private fun parseMe7Log(log: Map<Me7LogFileContract.Header, List<Double>>): Map<String, List<Double>> {
-        val method = AfrLogParser::class.java.getDeclaredMethod("parseMe7Log", Map::class.java)
-        method.isAccessible = true
-        @Suppress("UNCHECKED_CAST")
-        return method.invoke(AfrLogParser, log) as Map<String, List<Double>>
-    }
-
     // ── T8: Zeitronix CSV parsing ───────────────────────────────────
 
     @Test
@@ -121,7 +113,7 @@ class AfrLogParserTest {
             Me7LogFileContract.Header.BAROMETRIC_PRESSURE_HEADER to listOf(1013.0, 1013.0, 1013.0)
         )
 
-        val result = parseMe7Log(me7Log)
+        val result = AfrLogParser.parseMe7Log(me7Log)
 
         val afrs = result[AfrLogFileContract.AFR_HEADER]!!
         assertEquals(3, afrs.size)
@@ -143,7 +135,7 @@ class AfrLogParserTest {
             Me7LogFileContract.Header.BAROMETRIC_PRESSURE_HEADER to listOf(1013.0, 1013.0)
         )
 
-        val result = parseMe7Log(me7Log)
+        val result = AfrLogParser.parseMe7Log(me7Log)
         val boosts = result[AfrLogFileContract.BOOST_HEADER]!!
         assertEquals(2, boosts.size)
 
@@ -162,7 +154,7 @@ class AfrLogParserTest {
             // No WIDE_BAND_O2_HEADER
         )
 
-        val result = parseMe7Log(me7Log)
+        val result = AfrLogParser.parseMe7Log(me7Log)
         assertTrue(result.isEmpty(), "Should return empty map when wideband O2 is missing")
     }
 }
