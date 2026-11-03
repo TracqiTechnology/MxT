@@ -85,7 +85,7 @@ The physics doesn't change between platforms. The ECU's opinion about how to man
 | **MAF Scaling** | MLHFM linearization via Closed Loop + Open Loop | N/A — adaptive VE handles air metering | MLHFM linearization (same tools, 256-pt curve) | Period-based — Closed/Open Loop generate corrections, apply via NefMoto/WinOLS |
 | **VE Model** | KFURL / KFPBRK (static). Recalibrate by hand or Optimizer. | Adaptive (`fupsrls_w` / `pbrint_w`). ECU adjusts continuously. | Static, no MAP sensor — load inferred entirely from MAF | Static (KFURL / KFPBRK), same as ME7 |
 | **Torque Tables** | KFMIOP / KFMIRL (load ↔ torque, %) | KFLMIOP / KFLMIRL (same math). DS1 auto-detects scalar mode. | KFMDOPT (torque at optimum timing, Nm). One-directional — no inverse map. | KFMIOP / KFMIRL (same as ME7) |
-| **Ignition Timing** | KFZWOP + KFZW/2 (single map set) | KFZWOP + KFZW/2. DS1 multi-switch: up to 6 fuel-blend maps. | KFZWOPT + KFZW (same concept, different names) | KFZWOP + 6 KFZW variants (_0_A through _2_A) for knock management |
+| **Ignition Timing** | KFZWOP + KFZW/2 (single map set) | KFZWOP + KFZW/2. DS1 multi-switch: up to 6 fuel-blend maps. | KFZWOPT + KFZW (same concept, different names) | KFZWOP + software-dependent KFZW/KFZW2 sets; supported MED9.1 versions select fuel-quality variants via VKKRAQU |
 | **Throttle Model** | KFVPDKSD + WDKUGDN (throttle body choke) | Internal — not calibratable here | N/A — no throttle transition map | KFVPDKLD (same concept as KFVPDKSD) |
 | **Boost Control** | KFLDRL / KFLDIMX (pressure-based, mbar) | Same maps, same PID algorithm | KFLDP / KFLDS / KFLDTV (load-based, ms/rev) | KFLDRL / KFLDIMX (same as ME7) |
 | **Fuel Trim** | Closed Loop (narrowband O2 + trims) / Open Loop (wideband) → correct MLHFM | `rk_w` STFT/LTFT → correct base fuel mass map | Closed Loop / Open Loop → correct KFLF (scaling factor) | Closed Loop / Open Loop → generate MAF correction (apply externally) |
@@ -133,7 +133,11 @@ The MAF sensor is **period/frequency-based** (MSHFMTPH, µs → kg/h) rather tha
 
 The fuel constant is KRKATE (ms/%, same physics as KRKTE but with fuel pressure correction). Unlike port injection where rail pressure is fixed by a vacuum-referenced regulator, DI injector flow varies with HPFP rail pressure — the HPFP is the critical constraint for power scaling on K04 and larger turbo builds.
 
-MED9 has three KFZW variants (_0_A, _1_A, _2_A) and two KFZWOP variants for knock management — more ignition maps than ME7's single set, fewer than MED17's DS1 multi-switch mode. The throttle transition map is KFVPDKLD (same concept as ME7's KFVPDKSD). The static VE model (KFURL/KFPBRK) works like ME7's, not MED17's adaptive model.
+Some MED9.1 software versions provide multiple KFZW/KFZW2 ignition map sets selected by **VKKRAQU** (VariantenKriteriumKraftstoffqualität), the long-coding fuel-quality selector used for regional octane grades. Map counts and suffixes depend on the software version; these are fuel-quality variants, not simply extra knock-management maps. LDRXN variants can also depend on gearbox coding. The contributor to [issue #108](https://github.com/TracqiTechnology/MxT/issues/108) reports LDRXN_A_1/2/3 for manual gearboxes and LDRXN_A_0/4/5 for DSG/Multitronic on the described variants; verify the selection logic against the specific ECU software before applying that mapping elsewhere.
+
+The [MED9.1 Multimap Tool](https://github.com/EliasTuning/MED9.1-Multimap-Tool) uses the VKKRAQU map selection mechanism for runtime switching and requires adaptation to the target binary. MxT does not currently install that patch; selecting calibration maps in MxT does not change the ECU's runtime switching logic.
+
+The throttle transition map is KFVPDKLD (same concept as ME7's KFVPDKSD). The static VE model (KFURL/KFPBRK) works like ME7's, not MED17's adaptive model.
 
 MED9 runs on a **Motorola MPC562 (PowerPC 32-bit, Big-Endian)** with a 2 MB BIN (vs ME7's 512 KB–1 MB). Logging uses KWP2000 over K-line (same physical connection as ME7) or CAN/CCP depending on the variant.
 
