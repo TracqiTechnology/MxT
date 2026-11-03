@@ -62,15 +62,20 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@0b6dd653ba04f4f93bf581ec31e66cbd7dcb644d # v4
 
-      - name: Run tests
-        run: xvfb-run -a ./gradlew test
+      - name: Fetch hash-pinned public contributor fixtures
+        run: python3 tools/fixtures/fetch_contributed.py
+
+      - name: Run regression and public contributor tests
+        run: xvfb-run -a ./gradlew test contributedFixtureTest
 
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: test-results
-          path: build/reports/tests/test/
+          path: |
+            build/reports/tests/test/
+            build/reports/tests/contributedFixtureTest/
 
   internal-fixture-test:
     needs: verify-source
@@ -228,6 +233,8 @@ jobs:
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: v${{ needs.check-version.outputs.version }}
+          target_commitish: ${{ github.sha }}
           name: MxT ${{ needs.check-version.outputs.version }}
+          draft: true
           generate_release_notes: true
           files: flat/*
