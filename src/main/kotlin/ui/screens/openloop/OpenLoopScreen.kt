@@ -15,9 +15,7 @@ import androidx.compose.ui.unit.dp
 import data.contract.AfrLogFileContract
 import data.contract.Me7LogFileContract
 import data.parser.afrlog.AfrLogParser
-import data.parser.bin.BinParser
 import data.parser.me7log.OpenLoopLogParser
-import data.parser.xdf.TableDefinition
 import data.preferences.bin.BinFilePreferences
 import data.preferences.mlhfm.MlhfmPreferences
 import data.preferences.openloopfueling.OpenLoopFuelingLogFilterPreferences
@@ -30,9 +28,9 @@ import domain.model.openloopfueling.correction.OpenLoopMlhfmCorrection
 import domain.model.openloopfueling.correction.OpenLoopMlhfmCorrectionManager
 import domain.model.openloopfueling.util.AfrLogUtil
 import domain.model.openloopfueling.util.Me7LogUtil
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 import org.apache.commons.math3.stat.descriptive.moment.Mean
+import ui.screens.fueling.rememberMlhfmMap
+import ui.screens.fueling.rememberFuelingCalculation
 import ui.components.*
 import ui.theme.ChartBlue
 import ui.theme.ChartGreen
@@ -45,13 +43,6 @@ import java.awt.Frame
 import java.io.File
 import java.net.URI
 
-private fun findMlhfmMap(mapList: List<Pair<TableDefinition, Map3d>>): Pair<TableDefinition, Map3d>? {
-    val selected = MlhfmPreferences.getSelectedMap()
-    return if (selected != null) {
-        mapList.find { it.first.tableName == selected.first.tableName }
-    } else null
-}
-
 @Composable
 fun OpenLoopScreen(
     initialTab: Int = 0,
@@ -59,62 +50,40 @@ fun OpenLoopScreen(
     initialCorrectionSubTab: Int = 0,
     autoFitDegree: Int? = null
 ) {
-    val mapList by BinParser.mapList.collectAsState()
-    val mlhfmPair = remember(mapList) { findMlhfmMap(mapList) }
-
-    var me7LogMap by remember { mutableStateOf<Map<Me7LogFileContract.Header, List<Double>>?>(null) }
-    var afrLogMap by remember { mutableStateOf<Map<String, List<Double>>?>(null) }
-    var correction by remember { mutableStateOf<OpenLoopMlhfmCorrection?>(null) }
-    var airflowEstimation by remember { mutableStateOf<AirflowEstimation?>(null) }
-
-    val scope = rememberCoroutineScope()
-
-    // Collect ME7 logs
-    LaunchedEffect(Unit) {
-        OpenLoopLogParser.logs.collect { logs ->
-            me7LogMap = logs
-            // Check if wide band O2 is in the log and forward to AFR parser
-            val wideBand = logs[Me7LogFileContract.Header.WIDE_BAND_O2_HEADER]
-            if (wideBand != null && wideBand.isNotEmpty()) {
-                AfrLogParser.load(logs)
-            }
+    val mlhfmPair by rememberMlhfmMap()
+    val me7LogMap by OpenLoopLogParser.logs.collectAsState(initial = emptyMap())
+    val externalAfrLogs by AfrLogParser.logs.collectAsState(initial = emptyMap())
+    // Embedded wideband data belongs to this ME7 log, never to a previous load.
+    val afrLogMap = remember(me7LogMap, externalAfrLogs) {
+        if (!me7LogMap[Me7LogFileContract.Header.WIDE_BAND_O2_HEADER].isNullOrEmpty()) {
+            AfrLogParser.parseMe7Log(me7LogMap)
+        } else externalAfrLogs
+    }
+    val calculation by rememberFuelingCalculation(mlhfmPair, me7LogMap, afrLogMap) {
+        val pair = mlhfmPair
+        if (pair == null || me7LogMap.isEmpty() || afrLogMap.isEmpty()) null else {
+            val prefs = OpenLoopFuelingLogFilterPreferences
+            val manager = OpenLoopMlhfmCorrectionManager(
+                prefs.minThrottleAngle, prefs.minRpm,
+                prefs.minMe7Points, prefs.minAfrPoints, prefs.maxAfr
+            )
+            manager.correct(me7LogMap, afrLogMap, pair.second)
+            val afManager = AirflowEstimationManager(
+                prefs.minThrottleAngle, prefs.minRpm,
+                prefs.minMe7Points, prefs.minAfrPoints,
+                prefs.maxAfr, prefs.fuelInjectorSize,
+                prefs.numFuelInjectors, prefs.gasolineGramsPerCubicCentimeter
+            )
+            afManager.estimate(me7LogMap, afrLogMap)
+            manager.openLoopCorrection to afManager.airflowEstimation
         }
     }
-
-    // Collect AFR logs and compute correction + airflow
-    LaunchedEffect(Unit) {
-        AfrLogParser.logs.collect { logs ->
-            afrLogMap = logs
-            val currentMe7 = me7LogMap
-            val pair = findMlhfmMap(BinParser.mapList.value)
-            if (currentMe7 != null && currentMe7.isNotEmpty() && logs.isNotEmpty() && pair != null) {
-                withContext(Dispatchers.Default) {
-                    // Compute correction
-                    val prefs = OpenLoopFuelingLogFilterPreferences
-                    val manager = OpenLoopMlhfmCorrectionManager(
-                        prefs.minThrottleAngle, prefs.minRpm,
-                        prefs.minMe7Points, prefs.minAfrPoints, prefs.maxAfr
-                    )
-                    manager.correct(currentMe7, logs, pair.second)
-                    correction = manager.openLoopCorrection
-
-                    // Compute airflow estimation
-                    val afManager = AirflowEstimationManager(
-                        prefs.minThrottleAngle, prefs.minRpm,
-                        prefs.minMe7Points, prefs.minAfrPoints,
-                        prefs.maxAfr, prefs.fuelInjectorSize,
-                        prefs.numFuelInjectors, prefs.gasolineGramsPerCubicCentimeter
-                    )
-                    afManager.estimate(currentMe7, logs)
-                    airflowEstimation = afManager.airflowEstimation
-                }
-            }
-        }
-    }
+    var correction by remember(calculation) { mutableStateOf(calculation?.first) }
+    val airflowEstimation = calculation?.second
 
     val hasMap = mlhfmPair != null
-    val hasMe7Logs = me7LogMap != null && me7LogMap!!.isNotEmpty()
-    val hasAfrLogs = afrLogMap != null && afrLogMap!!.isNotEmpty()
+    val hasMe7Logs = me7LogMap.isNotEmpty()
+    val hasAfrLogs = afrLogMap.isNotEmpty()
     val hasCorrection = correction != null
 
     var selectedTab by remember { mutableStateOf(initialTab) }
@@ -125,7 +94,7 @@ fun OpenLoopScreen(
             PrimaryTabRow(selectedTabIndex = selectedTab) {
                 tabTitles.forEachIndexed { index, title ->
                     val enabled = when (index) {
-                        0 -> hasMap
+                        0 -> true
                         1 -> hasMap && hasCorrection
                         2 -> hasMap && hasMe7Logs && hasAfrLogs && hasCorrection
                         else -> true
@@ -159,6 +128,14 @@ fun OpenLoopScreen(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+        }
+
+        if (!hasMap) {
+            Text(
+                "Load a BIN and select its MLHFM map in Configuration → Map Definitions.",
+                modifier = Modifier.padding(16.dp),
+                style = MaterialTheme.typography.bodyMedium
+            )
         }
 
         when (selectedTab) {

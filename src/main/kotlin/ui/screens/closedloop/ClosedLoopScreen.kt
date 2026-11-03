@@ -12,9 +12,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import data.contract.Me7LogFileContract
-import data.parser.bin.BinParser
 import data.parser.me7log.ClosedLoopLogParser
-import data.parser.xdf.TableDefinition
 import data.preferences.bin.BinFilePreferences
 import data.preferences.closedloopfueling.ClosedLoopFuelingLogPreferences
 import data.preferences.mlhfm.MlhfmPreferences
@@ -24,10 +22,10 @@ import domain.math.map.Map3d
 import domain.model.closedloopfueling.ClosedLoopFuelingCorrection
 import domain.model.closedloopfueling.ClosedLoopFuelingCorrectionManager
 import domain.model.mlhfm.MlhfmFitter
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
 import org.apache.commons.math3.stat.descriptive.moment.Mean
+import ui.screens.fueling.rememberMlhfmMap
+import ui.screens.fueling.rememberFuelingCalculation
 import ui.components.*
 import ui.components.ParameterField
 import ui.theme.ChartBlue
@@ -43,44 +41,28 @@ import java.net.URI
 
 private enum class WriteStatus { Idle, Success, Error }
 
-private fun findMlhfmMap(mapList: List<Pair<TableDefinition, Map3d>>): Pair<TableDefinition, Map3d>? {
-    val selected = MlhfmPreferences.getSelectedMap()
-    return if (selected != null) {
-        mapList.find { it.first.tableName == selected.first.tableName }
-    } else null
-}
-
 @Composable
 fun ClosedLoopScreen(
     initialTab: Int = 0,
     initialCorrectionSubTab: Int = 0,
     autoFitDegree: Int? = null
 ) {
-    val mapList by BinParser.mapList.collectAsState()
-    val mlhfmPair = remember(mapList) { findMlhfmMap(mapList) }
-
-    var me7LogMap by remember { mutableStateOf<Map<Me7LogFileContract.Header, List<Double>>?>(null) }
-    var correction by remember { mutableStateOf<ClosedLoopFuelingCorrection?>(null) }
-
-    LaunchedEffect(Unit) {
-        ClosedLoopLogParser.logs.collect { logs ->
-            me7LogMap = logs
-            val pair = findMlhfmMap(BinParser.mapList.value)
-            if (pair != null && logs.isNotEmpty()) {
-                withContext(Dispatchers.Default) {
-                    val manager = ClosedLoopFuelingCorrectionManager(
-                        ClosedLoopFuelingLogPreferences.minThrottleAngle,
-                        ClosedLoopFuelingLogPreferences.minRpm,
-                        ClosedLoopFuelingLogPreferences.maxDerivative
-                    )
-                    manager.correct(logs, pair.second)
-                    correction = manager.closedLoopMlhfmCorrection
-                }
-            }
+    val mlhfmPair by rememberMlhfmMap()
+    val me7LogMap by ClosedLoopLogParser.logs.collectAsState(initial = emptyMap())
+    var correction by rememberFuelingCalculation(mlhfmPair, me7LogMap) {
+        val pair = mlhfmPair
+        if (pair == null || me7LogMap.isEmpty()) null else {
+            val manager = ClosedLoopFuelingCorrectionManager(
+                ClosedLoopFuelingLogPreferences.minThrottleAngle,
+                ClosedLoopFuelingLogPreferences.minRpm,
+                ClosedLoopFuelingLogPreferences.maxDerivative
+            )
+            manager.correct(me7LogMap, pair.second)
+            manager.closedLoopMlhfmCorrection
         }
     }
 
-    val hasLogs = me7LogMap != null && me7LogMap!!.isNotEmpty()
+    val hasLogs = me7LogMap.isNotEmpty()
     val hasCorrection = correction != null
     val hasMap = mlhfmPair != null
 
@@ -98,7 +80,7 @@ fun ClosedLoopScreen(
             PrimaryTabRow(selectedTabIndex = selectedTab) {
                 tabTitles.forEachIndexed { index, title ->
                     val enabled = when (index) {
-                        0 -> hasMap
+                        0 -> true
                         1 -> hasMap && hasCorrection
                         2 -> hasMap && hasLogs && hasCorrection
                         else -> true
@@ -132,6 +114,14 @@ fun ClosedLoopScreen(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+        }
+
+        if (!hasMap) {
+            Text(
+                "Load a BIN and select its MLHFM map in Configuration → Map Definitions.",
+                modifier = Modifier.padding(16.dp),
+                style = MaterialTheme.typography.bodyMedium
+            )
         }
 
         when (selectedTab) {

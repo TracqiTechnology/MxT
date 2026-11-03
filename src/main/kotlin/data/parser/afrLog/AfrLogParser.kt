@@ -36,7 +36,7 @@ object AfrLogParser {
         }
     }
 
-    private fun parseMe7Log(log: Map<Me7LogFileContract.Header, List<Double>>): Map<String, List<Double>> {
+    internal fun parseMe7Log(log: Map<Me7LogFileContract.Header, List<Double>>): Map<String, List<Double>> {
         val map = mutableMapOf<String, MutableList<Double>>()
 
         val wideBandO2 = log[Me7LogFileContract.Header.WIDE_BAND_O2_HEADER] ?: return emptyMap()
