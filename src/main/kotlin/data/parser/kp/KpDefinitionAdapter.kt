@@ -25,6 +25,7 @@ object KpDefinitionAdapter {
      * Convert a single [KpMapDefinition] to a [TableDefinition].
      */
     fun toTableDefinition(kp: KpMapDefinition): TableDefinition {
+        kp.tableDefinition?.let { return it.copy(tableName = kp.name, tableDescription = kp.description) }
         val zAxis = buildZAxis(kp)
         val xAxis = if (kp.hasXAxis) buildXAxis(kp) else null
         val yAxis = if (kp.hasYAxis) buildYAxis(kp) else null

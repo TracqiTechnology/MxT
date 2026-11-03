@@ -16,10 +16,13 @@ import java.util.zip.ZipInputStream
  * A KP file is a proprietary EVC/WinOLS binary container:
  *   - Bytes 0..N : WinOLS binary header (magic: `WinOLS File\0`)
  *   - Embedded ZIP archive containing a single entry named `intern`
- *   - `intern` : flat binary record database; each record is variable-length
- *     with the total length stored as uint32-LE in the first 4 bytes
+ *   - `intern` : a flag, declared map count, then variable-length records
  *
- * ## What we extract
+ * The original ME7 heuristic reader below is retained for its established
+ * fixtures. When it recognizes no maps, supported v2 containers use [KpV2Parser],
+ * which walks the complete counted stream and preserves explicit encodings.
+ *
+ * ## Legacy heuristic fields
  * From each record we extract:
  *   1. Description string  — null-terminated at offset 16
  *   2. Name string         — pattern `[A-Z][A-Z0-9_]+ (AR HEXADDR)`
@@ -70,24 +73,19 @@ object KpHintParser {
     // ── Public API ────────────────────────────────────────────────────────
 
     /** Parse [file] synchronously and return the extracted hints. */
-    fun parseFile(file: File): List<KpMapHint> {
-        val raw = file.readBytes()
-        val internBytes = extractInternBlob(raw) ?: return emptyList()
-        return parseInternBlob(internBytes).first
-    }
+    fun parseFile(file: File): List<KpMapHint> = parseFileFull(file).first
 
-    /** Parse [file] synchronously and return full definitions. */
-    fun parseFileDefinitions(file: File): List<KpMapDefinition> {
-        val raw = file.readBytes()
-        val internBytes = extractInternBlob(raw) ?: return emptyList()
-        return parseInternBlob(internBytes).second
-    }
+    fun parseFileDefinitions(file: File): List<KpMapDefinition> = parseFileFull(file).second
 
-    /** Parse [file] and return both hints and definitions. */
     internal fun parseFileFull(file: File): Pair<List<KpMapHint>, List<KpMapDefinition>> {
         val raw = file.readBytes()
-        val internBytes = extractInternBlob(raw) ?: return Pair(emptyList(), emptyList())
-        return parseInternBlob(internBytes)
+        val internBytes = extractInternBlob(raw) ?: return emptyList<KpMapHint>() to emptyList()
+        val legacy = parseInternBlob(internBytes)
+        if (legacy.first.isNotEmpty()) return legacy
+        if (raw.size >= 24 && readU32(raw, 16) in setOf(0x124, 0x149)) {
+            return KpV2Parser.parse(internBytes)
+        }
+        return legacy
     }
 
     // ── Internal helpers ──────────────────────────────────────────────────
@@ -128,7 +126,8 @@ object KpHintParser {
     }
 
     /**
-     * Walk the flat binary record database and extract both [KpMapHint] and
+     * Legacy heuristic scan for annotated ME7 records; this is not a v2 format walk.
+     * Extract both [KpMapHint] and
      * [KpMapDefinition] for each record.
      *
      * Returns (hints, definitions) where definitions is a subset of records
