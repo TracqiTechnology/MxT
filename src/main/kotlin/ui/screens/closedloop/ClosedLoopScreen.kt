@@ -167,7 +167,7 @@ private fun ClosedLoopLogsTab(
     val loadProgress by ClosedLoopLogParser.progress.collectAsState()
 
     val chartSeries = remember(me7LogMap, mlhfm) {
-        if (me7LogMap != null && mlhfm != null) {
+        if (!me7LogMap.isNullOrEmpty() && mlhfm != null) {
             val dtMap = Derivative.getMlfhm(me7LogMap, mlhfm)
             val maxFilterVoltage = ClosedLoopFuelingLogPreferences.maxDerivative
             val excludedPoints = mutableListOf<Pair<Double, Double>>()

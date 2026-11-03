@@ -13,6 +13,21 @@ import kotlin.test.*
 
 @OptIn(ExperimentalTestApi::class)
 class FuelingStateTest : Me7TestBase() {
+    @Test
+    fun `closed loop opens with a configured map before logs are loaded`() = runComposeUiTest {
+        setContent { ui.screens.closedloop.ClosedLoopScreen() }
+        onNodeWithText("Load Logs").assertIsEnabled()
+        onNodeWithText("Correction").assertIsNotEnabled()
+    }
+
+    @Test
+    fun `open loop explains missing map and keeps logs accessible`() = runComposeUiTest {
+        MlhfmPreferences.clear()
+        setContent { ui.screens.openloop.OpenLoopScreen() }
+        onNodeWithText("ME7 Logs").assertIsEnabled()
+        onNodeWithText("Load a BIN and select its MLHFM map in Configuration → Map Definitions.").assertExists()
+    }
+
     @ParameterizedTest
     @ValueSource(strings = ["map,me7,afr", "afr,map,me7", "me7,afr,map", "me7,map,afr", "map,afr,me7", "afr,me7,map"])
     fun `all input orders compute and clearing input invalidates edits`(order: String) = runComposeUiTest {
