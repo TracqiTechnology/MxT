@@ -176,7 +176,7 @@ class Med17LogWorkflowTest {
 
     @Test
     fun `log1 - LDRPID KFLDRL calculated and written to BIN`() =
-        verifyLdrpidKfldrlWorkflow(LOG_FILES[0])
+        verifyLdrpidKfldrlWorkflow(LOG_FILES[0], expectChanges = false)
 
     @Test
     fun `log2 - LDRPID KFLDRL calculated and written to BIN`() =
@@ -188,7 +188,7 @@ class Med17LogWorkflowTest {
 
     @Test
     fun `log1 - LDRPID KFLDIMX calculated and written to BIN`() =
-        verifyLdrpidKfldimxWorkflow(LOG_FILES[0])
+        verifyLdrpidKfldimxWorkflow(LOG_FILES[0], expectChanges = false)
 
     @Test
     fun `log2 - LDRPID KFLDIMX calculated and written to BIN`() =
@@ -205,7 +205,7 @@ class Med17LogWorkflowTest {
         return Med17LogAdapter.toMe7LdrpidFormat(med17Values)
     }
 
-    private fun verifyLdrpidKfldrlWorkflow(logName: String) {
+    private fun verifyLdrpidKfldrlWorkflow(logName: String, expectChanges: Boolean = true) {
         resetBin()
         val kfldrlPair = KfldrlPreferences.getSelectedMap()
             ?: fail("KFLDRL preference not resolved")
@@ -221,13 +221,19 @@ class Med17LogWorkflowTest {
             "KFLDRL output y-axis should match input"
         )
 
+        if (!expectChanges) {
+            // Log 1 has no qualifying WOT samples: preserving the calibration is the expected result.
+            assertTrue(result.kfldrlSampleCounts.all { row -> row.all { it == 0 } })
+            assertEquals(kfldrlPair.second, result.kfldrl)
+        }
         BinWriter.write(tempBinFile, kfldrlPair.first, result.kfldrl)
         BinaryDiffHelper.assertOnlyExpectedBytesChanged(
-            stockBinCopy, tempBinFile, kfldrlPair.first
+            stockBinCopy, tempBinFile, kfldrlPair.first, requireChanges = expectChanges
         )
+        if (!expectChanges) assertFalse(BinaryDiffHelper.diff(stockBinCopy, tempBinFile).hasChanges)
     }
 
-    private fun verifyLdrpidKfldimxWorkflow(logName: String) {
+    private fun verifyLdrpidKfldimxWorkflow(logName: String, expectChanges: Boolean = true) {
         resetBin()
         val kfldrlPair = KfldrlPreferences.getSelectedMap()
             ?: fail("KFLDRL preference not resolved")
@@ -237,10 +243,15 @@ class Med17LogWorkflowTest {
         val values = parseLdrpidFromLog(logName)
         val result = LdrpidCalculator.calculateLdrpid(values, kfldrlPair.second, kfldimxPair.second)
 
+        if (!expectChanges) {
+            assertTrue(result.kfldimxSampleCounts.all { row -> row.all { it == 0 } })
+            assertEquals(kfldimxPair.second, result.kfldimx)
+        }
         BinWriter.write(tempBinFile, kfldimxPair.first, result.kfldimx)
         BinaryDiffHelper.assertOnlyExpectedBytesChanged(
-            stockBinCopy, tempBinFile, kfldimxPair.first
+            stockBinCopy, tempBinFile, kfldimxPair.first, requireChanges = expectChanges
         )
+        if (!expectChanges) assertFalse(BinaryDiffHelper.diff(stockBinCopy, tempBinFile).hasChanges)
     }
 
     // ── Optimizer: log → adapt → analyze → plausibility checks ───────
