@@ -13,9 +13,17 @@ permissions:
   contents: read
 
 jobs:
+  route:
+    uses: ./.github/workflows/select-runner.yml
+    secrets: inherit
+    with:
+      labels: '["self-hosted", "macOS"]'
+      hosted: macos-latest
+
   test:
+    needs: route
     name: Regression suite (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.os == 'macos-latest' && fromJSON(needs.route.outputs.runner) || matrix.os }}
     timeout-minutes: 45
     strategy:
       fail-fast: false
