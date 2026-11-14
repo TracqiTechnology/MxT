@@ -1,0 +1,56 @@
+name: Select idle local runner
+on:
+  workflow_call:
+    inputs:
+      labels:
+        type: string
+        default: '["self-hosted", "macOS", "apple-silicon", "docker"]'
+      hosted:
+        type: string
+        default: ubuntu-latest
+    secrets:
+      RUNNER_CHECK_TOKEN:
+        required: false
+      GH_PAT_WORKFLOW:
+        required: false
+    outputs:
+      runner:
+        value: ${{ jobs.select.outputs.runner }}
+jobs:
+  select:
+    # Bootstrap outside the local pool so a busy/offline pool cannot block fallback.
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions: {}
+    outputs:
+      runner: ${{ steps.pick.outputs.runner }}
+    steps:
+      - id: pick
+        uses: actions/github-script@v7
+        env:
+          LOCAL_LABELS: ${{ inputs.labels }}
+          HOSTED_RUNNER: ${{ inputs.hosted }}
+          LOOKUP_TOKEN: ${{ secrets.RUNNER_CHECK_TOKEN || secrets.GH_PAT_WORKFLOW }}
+        with:
+          github-token: ${{ secrets.RUNNER_CHECK_TOKEN || secrets.GH_PAT_WORKFLOW || github.token }}
+          script: |
+            const labels = JSON.parse(process.env.LOCAL_LABELS);
+            const fallback = process.env.HOSTED_RUNNER;
+            let selected = fallback;
+            // Untrusted fork code must never be routed to a persistent local machine.
+            if (!context.payload.pull_request?.head?.repo?.fork && process.env.LOOKUP_TOKEN) {
+              try {
+                const runners = await github.paginate('GET /orgs/{org}/actions/runners', {
+                  org: context.repo.owner, per_page: 100
+                });
+                if (runners.some(r => r.status === 'online' && r.busy === false &&
+                    labels.every(label => (r.labels || []).some(l => l.name.toLowerCase() === label.toLowerCase())))) {
+                  selected = labels;
+                }
+              } catch (error) {
+                core.warning('Runner availability lookup failed; using standard hosted fallback.');
+              }
+            }
+            // This is a preflight snapshot, not a runner reservation or mid-job retry.
+            core.setOutput('runner', JSON.stringify(selected));
+            core.notice(`Selected ${JSON.stringify(selected)}`);
